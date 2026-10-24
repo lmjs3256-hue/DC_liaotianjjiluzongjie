@@ -1,0 +1,22 @@
+# ===== 敏感信息（绝对不要上传到 GitHub）=====
+config.json
+
+# ===== 日志 =====
+run.log
+tg_listener.log
+
+# ===== 导出的聊天记录与生成的日报（含内容，勿传）=====
+exports/
+
+# ===== DiscordChatExporter 程序文件（自己下载，别传二进制）=====
+DiscordChatExporter.Cli.exe
+DiscordChatExporter.*
+*.dll
+createdump.exe
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+
+# ===== WorkBuddy 内部数据（非项目代码）=====
+.workbuddy/

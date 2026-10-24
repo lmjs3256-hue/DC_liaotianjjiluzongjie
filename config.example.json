@@ -1,0 +1,25 @@
+{
+  "discord_token": "PASTE_YOUR_DISCORD_USER_TOKEN_HERE",
+  "discord_tokens": [
+    "TOKEN_ACCOUNT_1",
+    "TOKEN_ACCOUNT_2",
+    "TOKEN_ACCOUNT_3"
+  ],
+  "channel_id": "1341812134807343114",
+  "guild_name": "DTAO",
+  "channel_name": "price-talk",
+  "output_dir": "exports",
+  "dce_backend": "local",
+  "dce_exe": "C:/Users/gzx/dtao-daily-pipeline/DiscordChatExporter.Cli.exe",
+  "deepseek_api_key": "PASTE_DEEPSEEK_API_KEY",
+  "deepseek_base_url": "https://api.deepseek.com/v1",
+  "deepseek_model": "deepseek-chat",
+  "proxy": "",
+  "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/PASTE_HOOK_ID",
+  "feishu_secret": "",
+  "telegram_bot_token": "PASTE_BOT_TOKEN",
+  "telegram_chat_id": "-1000000000000",
+  "allowed_user_ids": [],
+  "timezone": "Asia/Shanghai",
+  "push_enabled": true
+}

@@ -9,7 +9,7 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /digest 2026-10-23           导出指定日
   /digest 2026-10-22 2026-10-23 一次导出多天（逐日推送）
   /weekly                       周报
-  /watch                       查看潜力观察（默认最新一天，可跟天数 /watch 7 或 /watch all）
+  /watch                       查看潜力观察（默认最新一天，可跟天数 /watch 7 或 /watch all；同步推飞书）
   /repush 2026-10-23           补推（飞书+TG）
   /repush 2026-10-23 tg        仅补推 TG
   /repush 2026-10-23 feishu    仅补推飞书
@@ -96,6 +96,14 @@ def _tg_bold(s):
     return re.sub(r"\*\*(.+?)\*\*", r"*\1*", s)
 
 
+def _feishu_watch(cfg, title, content):
+    """把潜力观察推到飞书卡片（失败不影响 TG 推送）。"""
+    try:
+        P.push_feishu(cfg, title, content)
+    except Exception as e:
+        log("飞书潜力观察推送失败（忽略）：%s" % e)
+
+
 def run_pipeline(args, chat_id):
     cmd = [sys.executable, os.path.join(HERE, "pipeline.py")] + args
     send(chat_id, "⏳ 开始执行：%s" % " ".join(args))
@@ -152,12 +160,15 @@ def handle(text, chat_id):
                 return
             txt = open(files[-1], encoding="utf-8").read()
             send(chat_id, "📊 最新潜力观察\n" + _tg_bold(txt))
+            _feishu_watch(P._CFG, "📊 DTAO 潜力观察 · 最新", txt)
         else:
             head, merged = P.watch_summary(n)
             full = _tg_bold(head + "\n\n" + merged)
             chunks = P.chunk_text(full, 3800)
             for i, ch in enumerate(chunks, 1):
                 send(chat_id, (("【%d/%d】\n" % (i, len(chunks))) if len(chunks) > 1 else "") + ch)
+            # 飞书：跨日汇总较长，只推「热点统计」核心信号（完整明细已在 TG）
+            _feishu_watch(P._CFG, "📊 DTAO 潜力观察 · 近%d天热点" % n, head)
     elif cmd == "repush":
         day = None
         targets = []

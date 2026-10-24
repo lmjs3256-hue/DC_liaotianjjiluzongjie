@@ -383,22 +383,51 @@ def feishu_sign(secret):
     sign = base64.b64encode(hmac_code).decode("utf-8")
     return timestamp, sign
 
+# ---------------------------------------------------------------------------
+# 排版增强：识别「EMOJI 标题行」并加粗（飞书 lark_md / TG Markdown 通用）
+# ---------------------------------------------------------------------------
+_SECTION_EMOJI = ("🔥", "🔢", "👥", "📊", "📎", "💡", "📌", "⚠️", "✅", "❌", "📝", "📈", "🧭")
+
+
+def prettify_headers(text):
+    """把以板块 emoji 开头的『标题行』加粗，让重点更突出。
+    仅当该行较短（像标题而非正文）、且非列表项、且尚未加粗时才加粗，避免误伤。"""
+    out = []
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if s.startswith(_SECTION_EMOJI) and not s.startswith(("-", "•", "*")) \
+                and not s.startswith("**"):
+            rest = s
+            for e in _SECTION_EMOJI:
+                if rest.startswith(e):
+                    rest = rest[len(e):].strip()
+                    break
+            if 0 < len(rest) <= 30:
+                out.append("**" + s + "**")
+            else:
+                out.append(ln)
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
 def push_feishu(cfg, title, digest):
     url = cfg.get("feishu_webhook_url")
     if not url:
         log("未配置 feishu_webhook_url，跳过飞书推送")
         return
     secret = cfg.get("feishu_secret", "")
-    # 手机端友好结构：标题 + 元信息行 + 分隔线 + 正文 + 页脚
+    # 手机端：wide_screen_mode 铺满屏宽；板块标题加粗，重点更突出
     m = re.search(r"(\d{4}-\d{2}-\d{2})", title)
     day = m.group(1) if m else ""
-    meta = "📅 %s　·　📱 手机端优化排版　·　🤖 DeepSeek 生成" % day if day else "📱 手机端优化排版　·　🤖 DeepSeek 生成"
+    meta = ("📅 %s　·　📱 手机端优化　·　🤖 DeepSeek 生成" % day) if day else "📱 手机端优化　·　🤖 DeepSeek 生成"
+    body = prettify_headers(digest)
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": meta}},
         {"tag": "hr"},
-        {"tag": "div", "text": {"tag": "lark_md", "content": digest}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": body}},
         {"tag": "hr"},
-        {"tag": "note", "content": "每日 09:00 自动推送 · DTAO price-talk 频道日报"},
+        {"tag": "note", "content": "DTAO price-talk 日报 · 由 DeepSeek 生成"},
     ]
     card = {
         "msg_type": "interactive",
@@ -429,12 +458,16 @@ def push_telegram(cfg, title, digest):
         log("未配置 telegram bot/chat_id，跳过 TG 推送")
         return
     url = "https://api.telegram.org/bot%s/sendMessage" % token
-    full = "*%s*\n\n%s" % (_tg_md(title), _tg_md(digest))
+    # TG 仅支持基础 Markdown：板块标题加粗 + 上下分隔线框，提升可读性
+    body = _tg_md(prettify_headers(digest))
+    sep = "────────────"
+    t = _tg_md(title)
+    full = "*%s*\n%s\n\n%s\n\n%s\n🤖 由 DeepSeek 生成 · DTAO price-talk 日报" % (t, sep, body, sep)
     for i, part in enumerate(chunk_text(full, 3900), 1):
-        body = {"chat_id": chat_id, "text": part,
-                "parse_mode": "Markdown", "disable_web_page_preview": True}
+        payload = {"chat_id": chat_id, "text": part,
+                   "parse_mode": "Markdown", "disable_web_page_preview": True}
         try:
-            _post_json(url, body)
+            _post_json(url, payload)
         except Exception as e:
             # Markdown 解析失败兜底：纯文本重发，保证不丢消息
             _post_json(url, {"chat_id": chat_id, "text": part, "disable_web_page_preview": True})

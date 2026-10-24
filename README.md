@@ -226,8 +226,17 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 | `config.json` | 你的真实配置（含密钥，**不入库**） |
 | `start_tg_listener.bat` | 手动启动监听（带窗口） |
 | `DTAO_TG_Listener.bat` | 开机自启版（放启动文件夹，无窗口） |
+| `install_task_login.ps1` | 注册任务计划程序自启（更稳，失败自动重启） |
+| `DEPLOY_HOMEPC.md` | 部署到另一台常开 Windows 电脑的完整教程 |
 | `exports/` | 导出的聊天记录和生成的日报（**不入库**） |
 | `run.log` / `tg_listener.log` | 运行日志（**不入库**） |
+
+---
+
+## 十一、部署到另一台常开电脑（解放你的主力机）
+
+不想让日常用的电脑一直开着、挂着 Clash？可以把整套程序搬到一台**不关机的旧电脑 / 闲置笔记本**上 7×24 跑，
+Telegram 指令随时能触发，主力机关机外出都不影响。完整步骤（前置条件、拷贝项目、关休眠、开机自启、恢复每日自动日报）见 **[DEPLOY_HOMEPC.md](DEPLOY_HOMEPC.md)**。
 
 ---
 

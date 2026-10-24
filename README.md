@@ -162,7 +162,7 @@ python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 > 提示：跑的天数越多，`/watch 7` 的热点统计越准。建议先连续跑几天日报，再看跨日汇总。
 
 **更懒人**：bot 回你消息后，聊天底部会出现一排**按钮**
-`📅 导出昨日` / `🔁 补推最新` / `📆 周报` / `❓ 帮助`，
+`📅 导出昨日(/digest 昨日)` / `🔁 补推最新(/repush 最新)` / `📊 近7天热点(/watch 7)` / `📆 周报(/weekly)`，
 **点一下就发指令，完全不用打字**。
 
 > 群里若挂了多个机器人，指令可能要写成 `/repush@你的机器人名 2026-10-23`，脚本已兼容。
@@ -173,14 +173,20 @@ python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 
 默认脚本不会自己跑，需要有一个「监听程序」在后台常驻，才能随时收你的 TG 指令。
 
-**最简单：开机自启（推荐）**
-- 本项目已附带 `DTAO_TG_Listener.bat`，放在你电脑的「启动」文件夹里
-  （路径：`C:/Users/你的用户名/AppData/Roaming/Microsoft/Windows/Start Menu/Startup/`）
-- 放进去后，**下次登录 Windows 会自动后台运行**，无窗口、不碍事
-- 也可以现在就双击它立刻启动
+**最简单：开机自启（推荐，无需管理员）**
+- 本项目已附带 `DTAO_TG_Listener.bat`。请把它做成**快捷方式**放进你电脑的「启动」文件夹
+  （路径：`C:/Users/你的用户名/AppData/Roaming/Microsoft/Windows/Start Menu/Startup/`）。
+  ⚠️ **务必放「快捷方式」而不是文件本身**：脚本用 `%~dp0` 定位 `tg_listener.py`，
+  直接拷文件进启动文件夹会找不到程序、自启失效。
+- 放好快捷方式后，**下次登录 Windows 会自动后台（无窗口）运行**监听，不碍事。
+- 也可以现在就双击 `DTAO_TG_Listener.bat` 立刻启动（无窗口）。
 
 **手动临时跑（看得到窗口）**
 双击 `start_tg_listener.bat` 即可，关掉窗口就停。
+
+**可选增强：任务计划程序（崩溃自动重启，需管理员）**
+见 [DEPLOY_HOMEPC.md](DEPLOY_HOMEPC.md) 第五节「方案 2」。需**以管理员身份**运行
+`install_task_login.ps1`，且启用后要把启动文件夹的快捷方式删掉，避免两个监听抢消息。
 
 > 注意：
 > - 同一时间**只跑一个**监听，否则两个会抢消息、指令时灵时不灵
@@ -249,7 +255,7 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 | `config.json` | 你的真实配置（含密钥，**不入库**） |
 | `start_tg_listener.bat` | 手动启动监听（带窗口） |
 | `DTAO_TG_Listener.bat` | 开机自启版（放启动文件夹，无窗口） |
-| `install_task_login.ps1` | 注册任务计划程序自启（更稳，失败自动重启） |
+| `install_task_login.ps1` | 注册任务计划程序自启（更稳，失败自动重启；**需以管理员身份运行**） |
 | `DEPLOY_HOMEPC.md` | 部署到另一台常开 Windows 电脑的完整教程 |
 | `exports/` | 导出的聊天记录和生成的日报（**不入库**） |
 | `exports/watchlist_*.txt` `exports/watchlist_all.md` | 自动沉淀的潜力股跟踪文件（**不入库**） |

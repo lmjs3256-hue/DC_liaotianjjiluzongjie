@@ -104,6 +104,14 @@ python pipeline.py
 3. 把机器人拉进你要收推送的群；在群里发任意一条消息
 4. 打开 @RawDataBot 或 @GetIDsBot，转发/查看那条消息，拿到群的 **chat_id**（负数，如 `-5111149587`）填到 `telegram_chat_id`
 5. 想只让自己能触发：填 `allowed_user_ids`（你的 TG 数字 ID，@GetIDsBot 可查）
+6. （可选）在 @BotFather 发 `/setcommands`，选你的机器人，粘贴下面这段，让输入 `/` 时弹出指令菜单：
+   ```
+   digest - 导出前一天并双推（可跟日期）
+   weekly - 生成本周周报
+   watch - 查看潜力观察/跨日热点(可跟天数, 如 /watch 7)
+   repush - 补推已生成的日报(可跟日期与 tg/feishu)
+   help - 显示帮助
+   ```
 
 ### 飞书机器人
 1. 飞书群 → 设置 → 群机器人 → 添加机器人
@@ -134,9 +142,24 @@ python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 | `/repush` | **补推最近一次日报（不用输日期）** |
 | `/repush 2026-10-23` | 补推指定日 |
 | `/repush 2026-10-23 tg` | 只补推 TG |
+| `/watch` | 查看「潜力观察」板块（默认最新一天） |
+| `/watch 7` | 近 7 天潜力标的**跨日热点汇总**（提前布局参考） |
+| `/watch all` | 全部日期汇总 |
 | `/help` | 显示帮助 |
 
 发完 bot 会先回「⏳ 开始执行」，跑完回「✅/❌ + 日志」。
+
+#### 📊 潜力股跨日跟踪（提前布局用）
+每次跑 `/digest` 或 `/weekly`，脚本都会自动把日报里的 **「📊 潜力观察 · 近期可布局」** 板块单独抽出来，存到 `exports/` 下：
+- `watchlist_YYYY-MM-DD.txt`：单日潜力观察
+- `watchlist_all.md`：所有日期累积（跨日对比用，文件末尾追加）
+
+然后在 TG 里发 `/watch` 随时调阅：
+- `/watch`（无参数）= 看最新一天；
+- `/watch 7` = 把最近 7 天的潜力标的按「被提及天数」排序，标出**跨日高频、值得提前埋伏**的子网/人物（如 `• SN24：3 天被提及`）；
+- `/watch all` = 全部汇总。
+
+> 提示：跑的天数越多，`/watch 7` 的热点统计越准。建议先连续跑几天日报，再看跨日汇总。
 
 **更懒人**：bot 回你消息后，聊天底部会出现一排**按钮**
 `📅 导出昨日` / `🔁 补推最新` / `📆 周报` / `❓ 帮助`，
@@ -229,6 +252,7 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 | `install_task_login.ps1` | 注册任务计划程序自启（更稳，失败自动重启） |
 | `DEPLOY_HOMEPC.md` | 部署到另一台常开 Windows 电脑的完整教程 |
 | `exports/` | 导出的聊天记录和生成的日报（**不入库**） |
+| `exports/watchlist_*.txt` `exports/watchlist_all.md` | 自动沉淀的潜力股跟踪文件（**不入库**） |
 | `run.log` / `tg_listener.log` | 运行日志（**不入库**） |
 
 ---

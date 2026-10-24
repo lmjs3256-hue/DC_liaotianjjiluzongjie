@@ -31,6 +31,7 @@ import os
 import sys
 import json
 import re
+import glob
 import subprocess
 import datetime
 import time
@@ -474,6 +475,73 @@ def retry(times, fn, *a, **k):
 # ----------------------------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# 3.5) 潜力股提取与跨日跟踪（watchlist）
+# ----------------------------------------------------------------------------
+def extract_watchlist(digest):
+    """从日报 digest 中切出「📊 潜力观察」板块；无则返回空串。"""
+    if not digest:
+        return ""
+    start = digest.find("📊")
+    if start < 0:
+        start = digest.find("潜力观察")
+    if start < 0:
+        return ""
+    rest = digest[start:]
+    # 截到下一个板块标题（📎 其他细节 / 💡 一句话总结 等）或文末
+    m = re.search(r"\n[📎💡🔥🔢👥]\s", rest[1:])
+    block = rest[:m.start() + 1] if m else rest
+    # 清理模型偶发的孤立加粗标记（行首/行尾不成对的 **），避免落盘/显示出现星号；
+    # 行内成对的 ** 保留，交由 TG 端的 _tg_bold 转成 *加粗*
+    block = re.sub(r"\*\*+\s*$", "", block, flags=re.M)
+    block = re.sub(r"^\*\*+\s*", "", block, flags=re.M)
+    return block.strip()
+
+
+def save_watchlist(day_label, digest):
+    """把当日潜力观察落盘：单日文件 + 累积文件（跨日跟踪用）。"""
+    out_dir = os.path.join(HERE, "exports")
+    os.makedirs(out_dir, exist_ok=True)
+    block = extract_watchlist(digest)
+    safe = re.sub(r"[^0-9A-Za-z_~-]", "_", day_label)
+    one = os.path.join(out_dir, "watchlist_%s.txt" % safe)
+    with open(one, "w", encoding="utf-8") as f:
+        if block:
+            f.write("【%s 潜力观察 · 近期可布局】\n%s\n" % (day_label, block))
+        else:
+            f.write("【%s】未识别到潜力观察板块（可能当日无相关讨论）\n" % day_label)
+    allp = os.path.join(out_dir, "watchlist_all.md")
+    with open(allp, "a", encoding="utf-8") as f:
+        f.write("\n---\n### %s\n%s\n" % (day_label, block if block else "（无）"))
+
+
+def watch_summary(n_days=None):
+    """跨日汇总潜力观察，返回 (热点统计头, 合并文本)。n_days=None 表示全部。"""
+    files = sorted(glob.glob(os.path.join(HERE, "exports", "watchlist_*.txt")))
+    if n_days:
+        files = files[-n_days:]
+    if not files:
+        return "", "（还没有任何潜力观察记录，先发 /digest 跑几天日报）"
+    counter = {}
+    blocks = []
+    for fp in files:
+        m = re.search(r"watchlist_([0-9A-Za-z_~.-]+)\.txt$", fp)
+        day = m.group(1) if m else os.path.basename(fp)
+        txt = open(fp, encoding="utf-8").read()
+        blocks.append(txt)
+        toks = set(re.findall(r"SN\d+", txt))
+        toks |= set(re.findall(r"@[A-Za-z0-9_]{2,}", txt))
+        for t in toks:
+            counter.setdefault(t, set()).add(day)
+    merged = "\n\n".join(blocks)
+    hot_lines = []
+    for t, days in sorted(counter.items(), key=lambda kv: len(kv[1]), reverse=True)[:12]:
+        hot_lines.append("• %s：%d 天被提及（%s）" % (t, len(days), ",".join(sorted(days)[-3:])))
+    head = "📈 潜力标的跨日出现天数（近 %s 天，去重）：\n" % (n_days if n_days else "全部") + \
+           ("\n".join(hot_lines) if hot_lines else "（未发现高频标的）")
+    return head, merged
+
+
 def run_one_day(cfg, after_dt, before_dt):
     """导出「某一天」-> 过滤 -> 总结 -> 双推。
     供 main() 在『前一天 / 指定单日 / 指定多日』三种情形复用。"""
@@ -515,6 +583,11 @@ def run_one_day(cfg, after_dt, before_dt):
                 f.write(digest)
             with open(os.path.join(out_dir, "last_digest.txt"), "w", encoding="utf-8") as f:
                 f.write(digest)
+            # 潜力股沉淀（跨日跟踪）
+            try:
+                save_watchlist(day_str, digest)
+            except Exception as e:
+                log("watchlist 落盘异常（忽略）：%s" % e)
         except Exception:
             pass
     else:
@@ -612,6 +685,11 @@ def run_weekly(cfg):
             push_telegram(cfg, title, digest)
         except Exception as e:
             log("Telegram 推送异常：%s" % e)
+        # 潜力股沉淀（周报也纳入跨日跟踪）
+        try:
+            save_watchlist("week_%s~%s" % (day_first, day_last), digest)
+        except Exception as e:
+            log("watchlist 落盘异常（忽略）：%s" % e)
     else:
         log("push_enabled=false，仅打印不推送：\n" + title + "\n" + digest)
     log("===== DTAO 周报流水线结束 =====")

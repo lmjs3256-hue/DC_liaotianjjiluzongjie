@@ -9,6 +9,7 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /digest 2026-10-23           导出指定日
   /digest 2026-10-22 2026-10-23 一次导出多天（逐日推送）
   /weekly                       周报
+  /watch                       查看潜力观察（默认最新一天，可跟天数 /watch 7 或 /watch all）
   /repush 2026-10-23           补推（飞书+TG）
   /repush 2026-10-23 tg        仅补推 TG
   /repush 2026-10-23 feishu    仅补推飞书
@@ -54,6 +55,7 @@ HELP = (
     "/digest 2026-10-23 导出指定日\n"
     "/digest 2026-10-22 2026-10-23 多日\n"
     "/weekly 周报\n"
+    "/watch 查看潜力观察(默认最新; /watch 7 近7天热点; /watch all 全部)\n"
     "/repush 补推最近一次日报(无需日期)\n"
     "/repush 2026-10-23 补推指定日(飞书+TG)\n"
     "/repush 2026-10-23 tg 仅补推 TG\n"
@@ -76,7 +78,7 @@ def tg_api(token, method, params=None, timeout=40):
 _KEYBOARD = {
     "keyboard": [
         ["/digest 昨日", "/repush 最新"],
-        ["/weekly", "/help"]
+        ["/watch 7", "/weekly"]
     ],
     "resize_keyboard": True
 }
@@ -87,6 +89,11 @@ def send(chat_id, text):
     tg_api(P._CFG["telegram_bot_token"], "sendMessage",
            {"chat_id": chat_id, "text": text, "disable_web_page_preview": True,
             "reply_markup": json.dumps(_KEYBOARD)})
+
+
+def _tg_bold(s):
+    # 把 lark_md 的 **加粗** 转成 TG 旧版 Markdown 的 *加粗*
+    return re.sub(r"\*\*(.+?)\*\*", r"*\1*", s)
 
 
 def run_pipeline(args, chat_id):
@@ -130,6 +137,27 @@ def handle(text, chat_id):
         run_pipeline(["daily"] + parts[1:], chat_id)
     elif cmd == "weekly":
         run_pipeline(["weekly"], chat_id)
+    elif cmd == "watch":
+        n = None
+        if len(parts) > 1:
+            a = parts[1].lower()
+            if a in ("all", "最新", "latest"):
+                n = None
+            elif a.isdigit():
+                n = int(a)
+        if n is None:
+            files = sorted(glob.glob(os.path.join(HERE, "exports", "watchlist_*.txt")))
+            if not files:
+                send(chat_id, "（还没有潜力观察记录，先发 /digest 跑几天日报）")
+                return
+            txt = open(files[-1], encoding="utf-8").read()
+            send(chat_id, "📊 最新潜力观察\n" + _tg_bold(txt))
+        else:
+            head, merged = P.watch_summary(n)
+            full = _tg_bold(head + "\n\n" + merged)
+            chunks = P.chunk_text(full, 3800)
+            for i, ch in enumerate(chunks, 1):
+                send(chat_id, (("【%d/%d】\n" % (i, len(chunks))) if len(chunks) > 1 else "") + ch)
     elif cmd == "repush":
         day = None
         targets = []

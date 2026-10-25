@@ -13,6 +13,7 @@
   - 当天**已导出 2 次**（达上限）：不论怎么触发都不再导出，自动**合并两次导出记录**（按 作者+内容 去重）生成一份日报并推送。
 - **实现**：`pipeline.py` 新增 `_digest_state.json`（存于 `exports/`，已被 .gitignore 忽略）记录每天导出时间戳与 json 路径；`_plan_digest()` 决策四态 `export1 / export2 / resummarize / merge`；`merge_substantive()` 合并去重；`resummarize / merge` 时 `call_deepseek` 追加 `DEEPEN_HINT` 做更深入总结。
 - **效果**：单日 Discord user token 实际导出最多 2 次，且两次间隔 ≥12h，大幅降低风控命中概率；频繁手点只触发本地重总结，不消耗 token。
+- **参数可配置**：阈值不再硬编码。在 `config.json` 加 `max_exports_per_day`（默认 2）、`min_export_interval_hours`（默认 12）即可调整；`pipeline.py` 新增 `_throttle_cfg()` 读取并做边界保护（上限 <1 按 1、间隔 <0 按 0）；决策扩展支持 `export3 / export4 / …` 任意次数（不再限于 2 次）。`config.example.json` 已加示例字段。
 - 注意：TG 回传已显示「🔧 本次模式」（导出第N次 / 复用重总结 / 合并重总结），可直观判断是否真导出。
 
 ### 飞书复制优化

@@ -623,22 +623,33 @@ def _day_exports(cfg, day_str):
 def _export_json_path(cfg, day_str, seq):
     return os.path.join(HERE, cfg.get("output_dir", "exports"), "dtao_%s.%d.json" % (day_str, seq))
 
+def _throttle_cfg(cfg):
+    """节流参数：每日最多导出次数 + 两次导出最小间隔（小时），均可在 config.json 覆盖。"""
+    max_per_day = int(cfg.get("max_exports_per_day", 2))
+    interval_h = float(cfg.get("min_export_interval_hours", 12))
+    if max_per_day < 1:
+        max_per_day = 1
+    if interval_h < 0:
+        interval_h = 0
+    return max_per_day, interval_h
+
 def _plan_digest(cfg, day_str, tz):
     """节流决策（按自然日 day_str 计）：
-       export1      -> 当天第 1 次，正常导出
-       export2      -> 当天第 2 次，且距上次导出 ≥12h，正常导出
-       resummarize  -> 当天已有 1 次但间隔 <12h：复用最近一次导出记录重总结，不重新导出
-       merge        -> 当天已导出 2 次（达上限）：合并两次导出记录重总结，不再导出
+       exportN      -> 当天第 N 次，且距上次导出 ≥interval_h，正常导出
+       resummarize  -> 当天不足上限但间隔 <interval_h：复用最近一次导出记录重总结，不重新导出
+       merge        -> 当天已导出达上限：合并所有导出记录重总结，不再导出
+       参数（每日上限 / 最小间隔）可在 config.json 用 max_exports_per_day / min_export_interval_hours 调整。
        返回 (action, source_jsons)
     """
+    max_per_day, interval_h = _throttle_cfg(cfg)
     exps = _day_exports(cfg, day_str)
     now = datetime.datetime.now(tz)
-    if len(exps) >= 2:
+    if len(exps) >= max_per_day:
         return "merge", [e["json"] for e in exps]
-    if len(exps) == 1:
+    if len(exps) >= 1:
         last = _parse_ts(exps[-1]["ts"], tz)
-        if (now - last) >= datetime.timedelta(hours=12):
-            return "export2", []
+        if (now - last) >= datetime.timedelta(hours=interval_h):
+            return "export%d" % (len(exps) + 1), []
         return "resummarize", [exps[-1]["json"]]
     return "export1", []
 
@@ -668,8 +679,10 @@ def merge_substantive(json_paths):
 
 def run_one_day(cfg, after_dt, before_dt):
     """导出「某一天」-> 过滤 -> 总结 -> 双推。
-    内置每日导出节流：当天最多导出 2 次，两次需间隔 ≥12h；未达间隔或已达上限时，
-    复用 / 合并已有导出记录重总结后推送，避免频繁调用 Discord user token。
+    内置每日导出节流（参数可在 config.json 配置）：
+      max_exports_per_day        : 当天最多导出次数（默认 2）
+      min_export_interval_hours : 两次导出最小间隔小时（默认 12）
+    未达间隔或已达上限时，复用 / 合并已有导出记录重总结后推送，避免频繁调用 Discord user token。
     供 main() 在『前一天 / 指定单日 / 指定多日』三种情形复用。"""
     day_str = after_dt.strftime("%Y-%m-%d")
     out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
@@ -678,16 +691,18 @@ def run_one_day(cfg, after_dt, before_dt):
     tz = datetime.timezone(datetime.timedelta(hours=8))
 
     # 1) 节流决策
+    max_per_day, interval_h = _throttle_cfg(cfg)
     action, sources = _plan_digest(cfg, day_str, tz)
-    mode_label = {
-        "export1": "导出第1次",
-        "export2": "导出第2次（距上次≥12h）",
-        "resummarize": "复用最近导出重总结（<12h，未重新导出）",
-        "merge": "合并%d次导出重总结（当日已达2次上限，未重新导出）" % len(sources),
-    }.get(action, action)
+    if action.startswith("export"):
+        seq = len(_day_exports(cfg, day_str)) + 1
+        mode_label = "导出第%d次" % seq
+    elif action == "resummarize":
+        mode_label = "复用最近导出重总结（<%.0fh，未重新导出）" % interval_h
+    else:  # merge
+        mode_label = "合并%d次导出重总结（当日已达%d次上限，未重新导出）" % (len(sources), max_per_day)
     log("节流模式：%s（%s）" % (action, mode_label))
 
-    if action in ("export1", "export2"):
+    if action.startswith("export"):
         seq = len(_day_exports(cfg, day_str)) + 1
         out_json = _export_json_path(cfg, day_str, seq)
         retry(3, run_export, cfg, after_dt, before_dt, out_json)

@@ -12,6 +12,7 @@
 - 自动**过滤水聊**，只保留和 Bittensor 子网 / 重要成员相关的实质内容
 - 用 DeepSeek 生成一份结构化日报（带重点、项目符号、手机端排版）
 - 同时推到飞书群机器人 + 你的 Telegram
+- 飞书日报卡片正文顶部带**可复制的标题与日期**，方便你直接选中粘贴转发
 - 在 Telegram 里发指令就能触发，**不用开电脑终端**
 
 ---
@@ -66,7 +67,7 @@ python pipeline.py
 ```jsonc
 {
   "discord_token": "★你的 Discord user token",      // 见下方「如何拿 token」
-  "discord_tokens": [                               // 可选：多个号轮换，降低封号风险
+  "discord_tokens": [                               // 可选：多个号随机切换，降低封号风险
     "账号A的token", "账号B的token"
   ],
   "channel_id": "1341812134807343114",             // 频道 ID，一般不用改
@@ -83,7 +84,7 @@ python pipeline.py
   "feishu_secret": "★飞书机器人密钥(开启签名校验才需要)",
   "telegram_bot_token": "★TG 机器人 token",
   "telegram_chat_id": "★TG 群/私聊 ID",
-  "allowed_user_ids": ["你的TG数字ID"],            // 只让指定的人触发(见安全)
+  "allowed_user_ids": [],                          // 留空=任何人可触发(开放模式); 填ID数组=仅白名单可触发(见安全)
   "timezone": "Asia/Shanghai",
   "push_enabled": true
 }
@@ -103,7 +104,7 @@ python pipeline.py
 2. 它会给你一个 **bot token**（形如 `123456:ABCdef...`），填到 `telegram_bot_token`
 3. 把机器人拉进你要收推送的群；在群里发任意一条消息
 4. 打开 @RawDataBot 或 @GetIDsBot，转发/查看那条消息，拿到群的 **chat_id**（负数，如 `-5111149587`）填到 `telegram_chat_id`
-5. 想只让自己能触发：填 `allowed_user_ids`（你的 TG 数字 ID，@GetIDsBot 可查）
+5. 默认**任何人**都能触发（开放模式）；想只让指定人触发：填 `allowed_user_ids`（TG 数字 ID，@GetIDsBot 可查）
 6. （可选）在 @BotFather 发 `/setcommands`，选你的机器人，粘贴下面这段，让输入 `/` 时弹出指令菜单：
    ```
    digest - 导出前一天并双推（可跟日期）
@@ -198,7 +199,7 @@ python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 ## 七、安全与合规
 
 1. **user token 封号风险**：个人 token 自动读频道违反 Discord TOS。
-   - 降低风险：配 `discord_tokens` 多个号轮换（每天换一个）；或让每个 token 走不同代理 IP。
+   - 降低风险：配 `discord_tokens` 多个号随机切换（每次导出随机抽一个账号）；或让每个 token 走不同代理 IP。
    - 根治办法：**用 bot token**。在 @BotFather 建 bot，请 DTAO 服务器管理员把 bot 拉进群并给「读取消息历史」权限，然后把 bot token 填进 `discord_token` 即可——这是 Discord 允许的方式，零封号风险。
    - **节流保护（已内置，参数可配置）**：`/digest` 每天最多真正导出指定次数，且两次需间隔指定时长；未达间隔时再触发只复用/合并已有导出记录做「深刻总结」重新推送（不消耗 token）；当日已达上限后无论怎么触发都只合并记录重推。默认值：每天最多 **2 次**、间隔 **≥12 小时**。想调整就在 `config.json` 加两行：
      ```json
@@ -237,18 +238,23 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 
 ## 九、上传到 GitHub（小白步骤）
 
-1. GitHub 上 **New repository** 新建一个仓库（比如 `dtao-daily-bot`）
-2. 在本项目文件夹打开终端，依次执行：
+> 本项目已在本机 `git init` 并完成多次本地提交（含本次功能更新）。你只需把代码推到远程仓库即可。
+
+1. 在 GitHub 上 **New repository** 新建一个仓库（例如 `DC_liaotianjjiluzongjie`），**不要**勾选「Initialize with README / LICENSE」（避免和本地历史冲突导致 rejected）。
+2. 在本项目文件夹打开终端，执行（把地址换成你自己的仓库）：
    ```bash
-   git init
-   git add .
-   git commit -m "DTAO 频道日报小助手"
-   git branch -M main
-   git remote add origin https://github.com/你的用户名/dtao-daily-bot.git
+   git remote add origin https://github.com/lmjs3256-hue/DC_liaotianjjiluzongjie.git
    git push -u origin main
    ```
-3. 因为 `.gitignore` 已拦住 `config.json`，推送时**不会带上你的真实 token**
-4. 别人克隆后，只需自己复制 `config.example.json` → `config.json` 填好即可用
+   - 若提示 `remote origin already exists`（远程已添加过），直接 `git push -u origin main` 即可。
+   - 若提示 `failed to push` / `rejected` / `non-fast-forward`，先拉取再推：
+     ```bash
+     git pull origin main --allow-unrelated-histories
+     git push -u origin main
+     ```
+   - 推送时若要求输入密码，请用 **GitHub Personal Access Token**（不是账号密码）。
+3. 因为 `.gitignore` 已拦住 `config.json`，推送时**不会带上你的真实 token**。
+4. 别人克隆后，只需自己复制 `config.example.json` → `config.json` 填好即可用。
 
 ---
 
@@ -259,6 +265,7 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 | `pipeline.py` | 主程序：导出 → 过滤 → AI 总结 → 推送 |
 | `tg_listener.py` | Telegram 指令监听（发消息触发日报） |
 | `config.example.json` | 配置模板（复制到 `config.json` 再填） |
+| `CHANGELOG.md` | 版本 / 变动记录 |
 | `config.json` | 你的真实配置（含密钥，**不入库**） |
 | `start_tg_listener.bat` | 手动启动监听（带窗口） |
 | `DTAO_TG_Listener.bat` | 开机自启版（放启动文件夹，无窗口） |

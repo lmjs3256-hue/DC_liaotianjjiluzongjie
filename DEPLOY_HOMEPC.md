@@ -59,7 +59,7 @@ cd DC_liaotianjjiluzongjie
 - `dce_backend`: `"local"`、`dce_exe`: `"DiscordChatExporter.Cli.exe"`
 - `timezone`: `"Asia/Shanghai"`（日报按北京时间算“前一天”）
 - `proxy`: `""`（旧电脑开了 Clash 系统代理时）或填代理地址
-- `allowed_user_ids`: `["你的TG数字id"]`（只让你本人触发）
+- `allowed_user_ids`: `[]`（留空=任何人可触发，开放模式；填 ID 数组=仅白名单可触发）
 
 ---
 
@@ -148,5 +148,5 @@ Register-ScheduledTask -TaskName "DTAO_Daily_Report" -Action $action -Trigger $t
 ## 九、安全提醒
 
 - 旧电脑上也存着 `config.json`（Discord user token / TG bot / 飞书 secret）。旧电脑如果被别人使用，
-  注意账号安全；user token 本身违反 Discord TOS，封号风险自担（多号轮换已内置）。
+  注意账号安全；user token 本身违反 Discord TOS，封号风险自担（多号随机切换已内置）。
 - 仓库里**不含** `config.json` 和导出数据，可放心公开。

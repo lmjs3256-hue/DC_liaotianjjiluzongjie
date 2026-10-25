@@ -14,11 +14,10 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /repush 2026-10-23 tg        仅补推 TG
   /repush 2026-10-23 feishu    仅补推飞书
 
-授权规则（config.json）：
-  - 若配置了 allowed_user_ids（数组，填你的 TG 数字 user id），只有这些用户能触发；
-  - 否则，只要消息来自 telegram_chat_id（通常是你建的那个群）就允许。
-    ⚠️ 若 chat_id 是群，则群内任何人都能触发；只想你自己用，就私聊 bot 并把
-       telegram_chat_id 改成你的个人私聊 id，或填 allowed_user_ids。
+授权规则（开放模式）：
+  - 任意会话、任意用户发来的指令都会被处理（已取消「仅本人可触发」限制）。
+  - 每日真实导出仍受 pipeline 内置节流保护（默认每天最多 2 次、间隔 ≥12h），
+    因此即使多人反复触发，单日 user token 实际导出次数也被限制，不会敞开口消耗。
 
 运行（建议本机开机自启 / 后台常驻，且 Clash 系统代理开着）：
   python tg_listener.py
@@ -203,7 +202,8 @@ def main():
     token = cfg.get("telegram_bot_token")
     if not token:
         log("未配置 telegram_bot_token，退出"); return
-    allowed_chat = str(cfg.get("telegram_chat_id", ""))
+    # 可选白名单：配了 allowed_user_ids 才限制仅这些用户触发；不配（默认）则开放给任何人。
+    # 每日真实导出次数仍受 pipeline 内置节流保护，多人反复触发也不会敞开口消耗 token。
     allowed_users = [str(u) for u in (cfg.get("allowed_user_ids") or []) if u]
 
     # 启动即跳过历史消息，只处理之后的新指令
@@ -216,8 +216,10 @@ def main():
         offset = 0
         log("启动清空历史失败（忽略）：%s" % e)
 
-    log("TG 指令监听已启动（allowed_chat=%s, allowed_users=%s）... Ctrl+C 停止"
-        % (allowed_chat, allowed_users or "无(按群授权)"))
+    if allowed_users:
+        log("TG 指令监听已启动（白名单模式：仅 %s 可触发）... Ctrl+C 停止" % allowed_users)
+    else:
+        log("TG 指令监听已启动（开放模式：任意会话/任意用户均可触发，每日导出节流保护）... Ctrl+C 停止")
     while True:
         try:
             resp = tg_api(token, "getUpdates", {"offset": offset, "timeout": 30}, timeout=40)
@@ -230,12 +232,10 @@ def main():
                 msg = u.get("message") or {}
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 from_id = str(msg.get("from", {}).get("id", ""))
-                if allowed_users:
-                    if from_id not in allowed_users:
-                        log("忽略未授权用户 %s 的消息" % from_id)
-                        continue
-                elif chat_id != allowed_chat:
-                    log("忽略非授权会话 %s 的消息" % chat_id)
+                if not msg.get("text"):
+                    continue
+                if allowed_users and from_id not in allowed_users:
+                    log("忽略非白名单用户 %s 的指令（开放模式需清空 allowed_user_ids）" % from_id)
                     continue
                 log("收到指令 chat=%s from=%s text=%s" % (chat_id, from_id, (msg.get("text") or "")[:80]))
                 handle(msg.get("text"), chat_id)

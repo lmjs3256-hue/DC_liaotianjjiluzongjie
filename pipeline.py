@@ -35,6 +35,7 @@ import glob
 import subprocess
 import datetime
 import time
+import random
 import hashlib
 import base64
 import urllib.request
@@ -125,21 +126,17 @@ def load_config():
 # ----------------------------------------------------------------------------
 # 0) 选择 Discord token：支持单 token 兼容 + 多 token 按日期轮换
 # ----------------------------------------------------------------------------
-def pick_discord_token(cfg, day_str):
+def pick_discord_token(cfg):
     """返回本次导出用的 token。
-    - 配置了 discord_tokens（数组，且至少一个非空）-> 按日期确定性轮换，每天用不同 token，
-      把单账号请求密度摊薄，降低 user token 被风控命中的概率。
+    - 配置了 discord_tokens（数组，且至少一个非空）-> 每次随机抽一个，把请求摊到多个账号，
+      降低单个 user token 被风控命中的概率（同一天也可命中不同号）。
     - 否则回退到单个 discord_token（向后兼容）。
-    注意：轮换模式下，每个 token 对应的账号都必须是该服务器成员且能访问目标频道。
+    注意：随机模式下，每个 token 对应的账号都必须是该服务器成员且能访问目标频道。
     """
     pool = [t for t in (cfg.get("discord_tokens") or []) if t]
     if pool:
-        try:
-            d = datetime.datetime.strptime(day_str, "%Y-%m-%d").date()
-            idx = (d - datetime.date(2026, 1, 1)).days % len(pool)
-        except Exception:
-            idx = 0
-        log("使用 discord_tokens 池中第 %d 个（共 %d 个），导出日 %s" % (idx + 1, len(pool), day_str))
+        idx = random.randrange(len(pool))
+        log("使用 discord_tokens 池中第 %d 个（共 %d 个，随机）" % (idx + 1, len(pool)))
         return pool[idx]
     single = cfg.get("discord_token")
     if not single:
@@ -151,7 +148,7 @@ def pick_discord_token(cfg, day_str):
 # ----------------------------------------------------------------------------
 def run_export(cfg, after_dt, before_dt, out_json):
     day_str = after_dt.strftime("%Y-%m-%d")
-    token = pick_discord_token(cfg, day_str)
+    token = pick_discord_token(cfg)
     channel = str(cfg["channel_id"])
     backend = cfg.get("dce_backend", "docker").lower()
     after = after_dt.strftime("%Y-%m-%d")

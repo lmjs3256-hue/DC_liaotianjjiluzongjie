@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-10-25 — 放开触发权限 + 多 token 随机化
+
+### 触发权限改为开放模式
+- 取消「仅本人（allowed_user_ids）可触发」限制：`tg_listener.py` 不再校验来源用户/会话，**任意会话、任意用户**发来的指令都会被处理。
+- 改为「可选白名单」：仅当 `config.json` 里 `allowed_user_ids` 非空时才限制为名单内用户；为空（默认）即开放给任何人。已将本机 `config.json` 的 `allowed_user_ids` 清空以真正开放。
+- **节流仍严格生效**：每日真实导出次数上限（默认 2 次）+ 间隔（默认 12h）由 pipeline 内置保护，多人反复触发也不会突破，确保 user token 不被敞开口滥用。
+- TG 查询指令（/digest /weekly /repush /watch /help）对任意人均可用。
+
+### 多 user token 改为随机触发
+- `pipeline.py` 的 `pick_discord_token()` 由「按日期确定性轮换」改为**每次随机抽一个**（`random.randrange`），把请求摊到多个账号、降低单号风控概率；同一天也可能命中不同号。
+- 单 token（仅 `discord_token`）模式向后兼容不变。新增 `import random`。
+
 ## 2026-10-25 — 每日导出节流 + 飞书复制优化
 
 ### 每日导出节流（防 user token 滥用）

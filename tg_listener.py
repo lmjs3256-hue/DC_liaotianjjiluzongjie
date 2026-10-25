@@ -116,7 +116,11 @@ def run_pipeline(args, chat_id):
             m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
             if m:
                 stat = "\n📊 当日实质消息 %s 条" % m.group(1)
-            send(chat_id, "✅ 已完成：%s%s" % (" ".join(args), stat))
+            mode = ""
+            mm = re.search(r"节流模式：\s*\S+\s*（(.+?)）", out)
+            if mm:
+                mode = "\n🔧 %s" % mm.group(1)
+            send(chat_id, "✅ 已完成：%s%s%s" % (" ".join(args), stat, mode))
         else:
             # 失败才回传错误尾部，便于排错
             tail = out[-1500:] if len(out) > 1500 else out

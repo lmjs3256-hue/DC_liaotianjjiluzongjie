@@ -313,6 +313,12 @@ WEEKLY_SYSTEM_PROMPT = (
     "不用 # 标题、不用 > 引用；客观不臆测，引用具体编号与名字；全文 1100 字以内。"
 )
 
+DEEPEN_HINT = (
+    "\n\n【本次为重总结 / 合并总结】请在保持全部结构的前提下做更深入、更细致的分析："
+    "重点深化「📊 潜力观察·近期可布局」——为每条补充逻辑链条、催化剂确定性(高/中/低)与更具体的时间窗推断；"
+    "对「🔢 重点子网动向」补充更明确的判断与依据；避免流水账式复述，聚焦结论与逻辑。"
+)
+
 def call_deepseek(cfg, text_block, system_prompt=None):
     api_key = cfg["deepseek_api_key"]
     base = cfg.get("deepseek_base_url", "https://api.deepseek.com/v1").rstrip("/")
@@ -420,10 +426,13 @@ def push_feishu(cfg, title, digest):
     # 手机端：wide_screen_mode 铺满屏宽；板块标题加粗，重点更突出
     m = re.search(r"(\d{4}-\d{2}-\d{2})", title)
     day = m.group(1) if m else ""
-    meta = ("📅 %s　·　📱 手机端优化　·　🤖 DeepSeek 生成" % day) if day else "📱 手机端优化　·　🤖 DeepSeek 生成"
     body = prettify_headers(digest)
+    # 正文顶部放「加粗标题 + 日期行」，方便在飞书里复制文案时直接选到标题与日期
+    title_line = "**%s**" % title
+    date_line = ("📅 %s　·　📱 手机端优化　·　🤖 DeepSeek 生成" % day) if day else "📱 手机端优化　·　🤖 DeepSeek 生成"
     elements = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": meta}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": title_line}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": date_line}},
         {"tag": "hr"},
         {"tag": "div", "text": {"tag": "lark_md", "content": body}},
         {"tag": "hr"},
@@ -575,32 +584,133 @@ def watch_summary(n_days=None):
     return head, merged
 
 
+# ----------------------------------------------------------------------------
+# 3.6) 每日导出节流（防止 Discord user token 被频繁滥用）
+# ----------------------------------------------------------------------------
+def _digest_state_path(cfg):
+    return os.path.join(HERE, cfg.get("output_dir", "exports"), "_digest_state.json")
+
+def _load_digest_state(cfg):
+    try:
+        with open(_digest_state_path(cfg), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_digest_state(cfg, state):
+    try:
+        d = os.path.dirname(_digest_state_path(cfg))
+        os.makedirs(d, exist_ok=True)
+        with open(_digest_state_path(cfg), "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log("导出状态保存失败（忽略）：%s" % e)
+
+def _record_export(cfg, day_str, json_path, count):
+    state = _load_digest_state(cfg)
+    day = state.setdefault(day_str, {"exports": []})
+    day.setdefault("exports", [])
+    day["exports"].append({
+        "ts": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(),
+        "json": json_path,
+        "count": count,
+    })
+    _save_digest_state(cfg, state)
+
+def _day_exports(cfg, day_str):
+    return _load_digest_state(cfg).get(day_str, {}).get("exports", [])
+
+def _export_json_path(cfg, day_str, seq):
+    return os.path.join(HERE, cfg.get("output_dir", "exports"), "dtao_%s.%d.json" % (day_str, seq))
+
+def _plan_digest(cfg, day_str, tz):
+    """节流决策（按自然日 day_str 计）：
+       export1      -> 当天第 1 次，正常导出
+       export2      -> 当天第 2 次，且距上次导出 ≥12h，正常导出
+       resummarize  -> 当天已有 1 次但间隔 <12h：复用最近一次导出记录重总结，不重新导出
+       merge        -> 当天已导出 2 次（达上限）：合并两次导出记录重总结，不再导出
+       返回 (action, source_jsons)
+    """
+    exps = _day_exports(cfg, day_str)
+    now = datetime.datetime.now(tz)
+    if len(exps) >= 2:
+        return "merge", [e["json"] for e in exps]
+    if len(exps) == 1:
+        last = _parse_ts(exps[-1]["ts"], tz)
+        if (now - last) >= datetime.timedelta(hours=12):
+            return "export2", []
+        return "resummarize", [exps[-1]["json"]]
+    return "export1", []
+
+def _parse_ts(s, tz):
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except Exception:
+        try:
+            return datetime.datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=tz)
+        except Exception:
+            return datetime.datetime.now(tz)
+
+def merge_substantive(json_paths):
+    """合并多个导出 json 的实质消息，按 (作者, 内容) 去重，按热度降序。"""
+    all_items, seen = [], set()
+    for jp in json_paths:
+        if not os.path.exists(jp):
+            continue
+        for it in extract_substantive(jp):
+            key = (it[2], it[3])
+            if key in seen:
+                continue
+            seen.add(key)
+            all_items.append(it)
+    all_items.sort(key=lambda x: -x[0])
+    return all_items
+
 def run_one_day(cfg, after_dt, before_dt):
     """导出「某一天」-> 过滤 -> 总结 -> 双推。
+    内置每日导出节流：当天最多导出 2 次，两次需间隔 ≥12h；未达间隔或已达上限时，
+    复用 / 合并已有导出记录重总结后推送，避免频繁调用 Discord user token。
     供 main() 在『前一天 / 指定单日 / 指定多日』三种情形复用。"""
     day_str = after_dt.strftime("%Y-%m-%d")
     out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
     os.makedirs(out_dir, exist_ok=True)
-    out_json = os.path.join(out_dir, "dtao_%s.json" % day_str)
     channel_name = cfg.get("channel_name", "price-talk")
+    tz = datetime.timezone(datetime.timedelta(hours=8))
 
-    # 1) 导出（失败自动重试 3 次）
-    retry(3, run_export, cfg, after_dt, before_dt, out_json)
+    # 1) 节流决策
+    action, sources = _plan_digest(cfg, day_str, tz)
+    mode_label = {
+        "export1": "导出第1次",
+        "export2": "导出第2次（距上次≥12h）",
+        "resummarize": "复用最近导出重总结（<12h，未重新导出）",
+        "merge": "合并%d次导出重总结（当日已达2次上限，未重新导出）" % len(sources),
+    }.get(action, action)
+    log("节流模式：%s（%s）" % (action, mode_label))
 
-    # 2) 过滤
-    items = extract_substantive(out_json)
-    log("过滤后保留实质消息 %d 条（%s）" % (len(items), day_str))
+    if action in ("export1", "export2"):
+        seq = len(_day_exports(cfg, day_str)) + 1
+        out_json = _export_json_path(cfg, day_str, seq)
+        retry(3, run_export, cfg, after_dt, before_dt, out_json)
+        items = extract_substantive(out_json)
+        _record_export(cfg, day_str, out_json, len(items))
+        log("过滤后保留实质消息 %d 条（%s，导出#%d）" % (len(items), day_str, seq))
+    else:
+        items = merge_substantive(sources)
+        log("过滤后保留实质消息 %d 条（%s，%s）" % (len(items), day_str, mode_label))
 
-    # 3) 总结
+    # 2) 总结
     if not items:
         digest = "📭 %s 频道 %s 当日无与 Bittensor 子网/重要成员相关的实质讨论。" % (channel_name, day_str)
     else:
         text_block = build_text_block(channel_name, day_str, items)
-        digest = call_deepseek(cfg, text_block)
+        sys_p = SYSTEM_PROMPT
+        if action in ("resummarize", "merge"):
+            sys_p = SYSTEM_PROMPT + DEEPEN_HINT
+        digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
 
     title = "🤖 DTAO price-talk 日报 · %s" % day_str
 
-    # 4) 推送
+    # 3) 推送
     if cfg.get("push_enabled", True):
         try:
             push_feishu(cfg, title, digest)

@@ -200,6 +200,7 @@ python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 1. **user token 封号风险**：个人 token 自动读频道违反 Discord TOS。
    - 降低风险：配 `discord_tokens` 多个号轮换（每天换一个）；或让每个 token 走不同代理 IP。
    - 根治办法：**用 bot token**。在 @BotFather 建 bot，请 DTAO 服务器管理员把 bot 拉进群并给「读取消息历史」权限，然后把 bot token 填进 `discord_token` 即可——这是 Discord 允许的方式，零封号风险。
+   - **节流保护（已内置）**：`/digest` 每天最多真正导出 **2 次**，且两次需间隔 **≥12 小时**；未达间隔时再触发只复用/合并已有导出记录做「深刻总结」重新推送（不消耗 token）；当日已达 2 次后无论怎么触发都只合并两次记录重推。单日 user token 实际导出 ≤2 次，大幅降低风控概率。
 2. **只允许你自己触发**：在 `config.json` 填 `allowed_user_ids: ["你的TG数字ID"]`，
    这样群里其他人发的指令会被忽略（不会执行也不会回消息）。
 3. **密钥别泄露**：`config.json` 含所有密码，**不要上传 GitHub**（本仓库 `.gitignore` 已忽略它）。

@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-10-25 — 修复「昨日日报」无法解析
+
+- **Bug**：TG 按钮 `/digest 昨日`（及 `/repush 最新`）把中文词「昨日 / 最新」当作日期传给 `pipeline.py`，而 daily 模式只认 `YYYY-MM-DD` 或空（空=昨天），导致报 `无法解析日期：昨日`。
+- **修复**：`pipeline.py` 新增 `_resolve_day_alias()`，将 `昨日 / 昨天 / yesterday / latest / 最新 / y` 统一解析为昨天日期；`repush` 模式支持 `最新 / latest` 自动取最新已生成日报。修改后 `/digest 昨日`、`python pipeline.py 昨日`、`/repush 最新` 均正常。
+- 注意：修改代码后需**重启监听进程**才会生效（监听在启动时加载 `pipeline` 模块）。
+
 ## 2026-10-24 — 文档与自启方案收尾
 
 - **`install_task_login.ps1` 修复与增强**

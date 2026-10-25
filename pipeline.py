@@ -628,6 +628,30 @@ def run_one_day(cfg, after_dt, before_dt):
     return digest
 
 
+# 中文 / 英文「昨天 / 最新」等别名，统一解析成具体日期，方便 TG 按钮与手输
+YESTERDAY_ALIASES = {"昨日", "昨天", "yesterday", "latest", "最新", "y"}
+
+
+def _resolve_day_alias(ds, tz):
+    """把「昨日 / 最新 / yesterday」等别名解析成 YYYY-MM-DD；不是别名则原样返回。"""
+    if ds in YESTERDAY_ALIASES:
+        yesterday = (datetime.datetime.now(tz) - datetime.timedelta(days=1)).date()
+        return yesterday.strftime("%Y-%m-%d")
+    return ds
+
+
+def _latest_digest_date(cfg):
+    """扫描 exports/dtao_YYYY-MM-DD.digest.txt，返回最新日期；无则返回 None。"""
+    out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
+    files = glob.glob(os.path.join(out_dir, "dtao_*.digest.txt"))
+    dates = []
+    for f in files:
+        m = re.search(r"dtao_(\d{4}-\d{2}-\d{2})\.digest\.txt$", f)
+        if m:
+            dates.append(m.group(1))
+    return max(dates) if dates else None
+
+
 def main(args):
     log("===== DTAO 流水线启动（半自动 / 手动触发）=====")
     cfg = load_config()
@@ -637,10 +661,11 @@ def main(args):
     if args.extra:
         # 指定日期（可多个，逐日导出并推送）
         for ds in args.extra:
+            ds = _resolve_day_alias(ds, tz)
             try:
                 d = datetime.datetime.strptime(ds, "%Y-%m-%d").date()
             except Exception:
-                log("❌ 无法解析日期：%s（应为 YYYY-MM-DD）" % ds)
+                log("❌ 无法解析日期：%s（应为 YYYY-MM-DD 或 昨日/最新）" % ds)
                 continue
             after_dt = datetime.datetime(d.year, d.month, d.day, tzinfo=tz)
             before_dt = after_dt + datetime.timedelta(days=1)
@@ -743,6 +768,10 @@ if __name__ == "__main__":
             if not args.extra:
                 raise RuntimeError("repush 需要指定日期，例如：python pipeline.py repush 2026-10-23 tg")
             day = args.extra[0]
+            if day in ("最新", "latest"):
+                day = _latest_digest_date(load_config())
+                if not day:
+                    raise RuntimeError("没有可用的日报文件，请先跑 /digest 生成一次。")
             targets = [t for t in args.extra[1:] if t in ("feishu", "tg")] or ["feishu", "tg"]
             run_repush(load_config(), day, targets)
         else:

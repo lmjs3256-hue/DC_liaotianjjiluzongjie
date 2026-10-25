@@ -110,11 +110,17 @@ def run_pipeline(args, chat_id):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=900)
         out = (r.stdout or "") + (r.stderr or "")
-        if len(out) > 3500:
-            out = "...(截断)...\n" + out[-3500:]
-        ok = r.returncode == 0
-        send(chat_id, ("✅ 完成：%s\n%s" % (" ".join(args), out)) if ok
-              else ("❌ 失败：%s\n%s" % (" ".join(args), out)))
+        if r.returncode == 0:
+            # 成功：日报已由 pipeline 自行推送到飞书+TG，这里只回简洁确认，不回传大段日志
+            stat = ""
+            m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
+            if m:
+                stat = "\n📊 当日实质消息 %s 条" % m.group(1)
+            send(chat_id, "✅ 已完成：%s%s" % (" ".join(args), stat))
+        else:
+            # 失败才回传错误尾部，便于排错
+            tail = out[-1500:] if len(out) > 1500 else out
+            send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail))
     except subprocess.TimeoutExpired:
         send(chat_id, "⏱ 执行超时（>15min），请查本机 run.log")
     except Exception as e:

@@ -424,14 +424,14 @@ def push_feishu(cfg, title, digest):
     m = re.search(r"(\d{4}-\d{2}-\d{2})", title)
     day = m.group(1) if m else ""
     body = prettify_headers(digest)
-    # 正文顶部放「加粗标题 + 日期行」，方便在飞书里复制文案时直接选到标题与日期
+    # 正文顶部放「加粗标题 + 日期行」，与正文合并进同一个文本块（不加分隔线），
+    # 这样在飞书手机端长按复制时，标题+日期+正文会被一并选中，日报才有完整意义
     title_line = "**%s**" % title
     date_line = ("📅 %s　·　📱 手机端优化　·　🤖 DeepSeek 生成" % day) if day else "📱 手机端优化　·　🤖 DeepSeek 生成"
+    # 标题、日期、正文合为一个 lark_md 块（以空行分隔，不用 hr），保证整段可复制
+    combined = "%s\n%s\n\n%s" % (title_line, date_line, body)
     elements = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": title_line}},
-        {"tag": "div", "text": {"tag": "lark_md", "content": date_line}},
-        {"tag": "hr"},
-        {"tag": "div", "text": {"tag": "lark_md", "content": body}},
+        {"tag": "div", "text": {"tag": "lark_md", "content": combined}},
         {"tag": "hr"},
         {"tag": "note", "content": "DTAO price-talk 日报 · 由 DeepSeek 生成"},
     ]

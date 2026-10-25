@@ -120,11 +120,31 @@ python pipeline.py
 ```
 
 ### 如何拿 Discord user token（⚠️ 仅自用，风险自担）
-1. 电脑浏览器登录 Discord（网页版）
-2. 按 `F12` 打开开发者工具 → Network（网络）标签
-3. 随便点一下频道，在请求列表里找一个 `api/v9/...` 的请求
-4. 看请求头（Headers）里的 **Authorization**，那串值就是 token
-5. **复制时连 `""` 一起复制，粘到配置里别漏字符**
+
+> 必须用**浏览器**打开 https://discord.com （不是桌面客户端），才能用 F12。界面是英文的，下面每一步都标了英文按钮 / 标签名，照着点即可。
+
+**方法一：Network（请求列表）里抓 authorization（最常用）**
+1. 浏览器登录 Discord 网页版，进入你要导出的频道（price-talk）。
+2. 按 `F12` 打开 **Developer Tools（开发者工具）** 面板（英文机顶部就是这些英文标签）。
+3. 点面板顶部的 **`Network`** 标签（有些中文机显示「网络」，英文机就是 `Network`）。
+4. 在 Network 面板**左上方过滤栏**点 **`Fetch/XHR`**（只显示接口请求，过滤掉图片/css，更好找）。
+   - 若列表是空的：先勾上 **`Preserve log`**（保留日志），然后在频道里点一下 / 发条消息 / 滚动一下，或刷新页面，列表就会出现请求。
+5. 在请求列表里找一个 **Name 以 `api` 开头、或 URL 含 `discord.com/api/v9`** 的请求（例如 `api/v9/channels/.../messages`）。
+6. **点中那条请求**，右侧弹出详情面板，点 **`Headers`** 标签。
+7. 在 **`Request Headers`**（请求标头）区域往下找，有一行叫 **`authorization`**（全小写）——它右边的值（一长串，形如 `MTk4...`；**你的是不带 `Bot ` 前缀的普通用户 token**）就是你的 user token。
+8. **连引号一起复制**整个 `authorization` 的值，粘到 `config.json` 的 `discord_token` 里，别漏字符。
+
+**方法二（备用）：Console 一行命令**
+> 若方法一在 Network 里找不到，可在 **`Console`** 标签粘贴下面命令回车，会直接把 token 打印出来（复制输出即可）：
+> ```js
+> webpackJsonp.push([[''],{},e=>{m=[];for(let c in e.c)m.push(e.c[c])}]);
+> m.find(m=>m?.exports?.default?.getToken!==void 0).exports.default.getToken()
+> ```
+> ⚠️ 该命令依赖 Discord 前端打包结构，偶尔会随版本失效；优先用方法一。
+
+**重要注意**
+- 一定要在**浏览器** discord.com 操作；桌面客户端按 F12 打不开网页开发者工具。
+- token 拿到后尽快用、不要外泄；user token 违反 Discord TOS，封号风险自担（见第七节）。
 
 > 更安全的做法见文末：用 bot token（需服务器管理员把 bot 拉进群）。
 

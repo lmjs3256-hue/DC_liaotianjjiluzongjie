@@ -4,6 +4,11 @@
 
 ---
 
+## 2026-10-25 — 文档修正：Discord user token 获取步骤补全英文界面标签
+
+- **问题**：README 原「如何拿 Discord user token」步骤太简略，且未标注 F12 后英文开发者工具界面的按钮/标签名，用户在 `Network` 标签之后找不到下一步。
+- **修复**：重写该小节，每一步带上英文标签（`Developer Tools` / `Network` / `Fetch/XHR` / `Preserve log` / `Headers` / `Request Headers` / `authorization`），并补充：必须用浏览器 discord.com（非桌面客户端）、列表为空时如何触发请求、以及备用的 `Console` 一行命令取法。
+
 ## 2026-10-25 — 飞书复制优化（标题日期与正文合并）
 
 - **问题**：飞书卡片里标题/日期是独立文本块、且用 `hr` 分隔线与正文隔开；手机端长按复制时默认只选到正文块，标题和日期选不进去，日报失去「标题+日期」的标识意义。

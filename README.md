@@ -129,9 +129,11 @@ python pipeline.py
 3. 点面板顶部的 **`Network`** 标签（有些中文机显示「网络」，英文机就是 `Network`）。
 4. 在 Network 面板**左上方过滤栏**点 **`Fetch/XHR`**（只显示接口请求，过滤掉图片/css，更好找）。
    - 若列表是空的：先勾上 **`Preserve log`**（保留日志），然后在频道里点一下 / 发条消息 / 滚动一下，或刷新页面，列表就会出现请求。
-5. 在请求列表里找一个 **Name 以 `api` 开头、或 URL 含 `discord.com/api/v9`** 的请求（例如 `api/v9/channels/.../messages`）。
+5. 在请求列表里找一个 **Name 以 `api` 开头、或 URL 含 `discord.com/api/v9`** 的请求（例如 `messages?limit=14`、`@me`、`guilds`、`badges`——名字常被截短，认得是接口请求即可）。
+   - ⚠️ **不要选带红色错误图标的请求**（如 `saved-messages?...` 那种失败请求），它的标头可能不完整；选一个**正常（无红色图标）**的接口请求。
 6. **点中那条请求**，右侧弹出详情面板，点 **`Headers`** 标签。
 7. 在 **`Request Headers`**（请求标头）区域往下找，有一行叫 **`authorization`**（全小写）——它右边的值（一长串，形如 `MTk4...`；**你的是不带 `Bot ` 前缀的普通用户 token**）就是你的 user token。
+   - ⚠️ Headers 面板里**有两块**：顶部是 `Request Headers`（请求标头，token 在这里），底部是 `Response Headers`（响应标头，含 `Server: cloudflare` 等，**不是** token）。若只看到 `Server: cloudflare` 那堆，说明看的是响应标头，**往上滚动**到面板顶部找 `Request Headers` 即可。
 8. **连引号一起复制**整个 `authorization` 的值，粘到 `config.json` 的 `discord_token` 里，别漏字符。
 
 **方法二（备用）：Console 一行命令**

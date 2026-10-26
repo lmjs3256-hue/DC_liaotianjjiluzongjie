@@ -2,15 +2,16 @@
   "discord_token": "PASTE_YOUR_DISCORD_USER_TOKEN_HERE",
   "discord_tokens": [
     "TOKEN_ACCOUNT_1",
-    "TOKEN_ACCOUNT_2",
-    "TOKEN_ACCOUNT_3"
+    "TOKEN_ACCOUNT_2"
   ],
   "channel_id": "1341812134807343114",
   "guild_name": "DTAO",
   "channel_name": "price-talk",
   "output_dir": "exports",
-  "dce_backend": "local",
-  "dce_exe": "C:/Users/gzx/dtao-daily-pipeline/DiscordChatExporter.Cli.exe",
+  "dce_backend": "api",
+  "dce_exe": "C:/path/to/dtao-daily-pipeline/DiscordChatExporter.Cli.exe",
+  "api_fallback": true,
+  "dce_timeout": 120,
   "deepseek_api_key": "PASTE_DEEPSEEK_API_KEY",
   "deepseek_base_url": "https://api.deepseek.com/v1",
   "deepseek_model": "deepseek-chat",

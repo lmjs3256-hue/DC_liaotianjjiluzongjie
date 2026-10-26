@@ -30,6 +30,7 @@ import json
 import glob
 import time
 import subprocess
+import threading
 import urllib.request
 import urllib.error
 
@@ -103,31 +104,103 @@ def _feishu_watch(cfg, title, content):
         log("飞书潜力观察推送失败（忽略）：%s" % e)
 
 
-def run_pipeline(args, chat_id):
-    cmd = [sys.executable, os.path.join(HERE, "pipeline.py")] + args
-    send(chat_id, "⏳ 开始执行：%s" % " ".join(args))
+# ---------------------------------------------------------------------------
+# 加固：流水线放到后台线程执行
+#   - 主循环立即返回继续收指令，导出卡住 15 分钟也不会拖垮监听进程
+#   - 超时后主动 kill 整个进程树，避免 DiscordChatExporter 僵尸残留
+#   - _BUSY 锁防止并发重复导出（浪费 user token 配额）
+# ---------------------------------------------------------------------------
+PIPELINE_TIMEOUT = 900          # 单次流水线最长等待（秒）
+_BUSY = False
+_BUSY_LOCK = threading.Lock()
+
+
+def _kill_proc_tree(proc):
+    """超时后杀掉子进程及其整个进程树（Windows 用 taskkill /T）。"""
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=900)
-        out = (r.stdout or "") + (r.stderr or "")
-        if r.returncode == 0:
-            # 成功：日报已由 pipeline 自行推送到飞书+TG，这里只回简洁确认，不回传大段日志
-            stat = ""
-            m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
-            if m:
-                stat = "\n📊 当日实质消息 %s 条" % m.group(1)
-            mode = ""
-            mm = re.search(r"节流模式：\s*\S+\s*（(.+?)）", out)
-            if mm:
-                mode = "\n🔧 %s" % mm.group(1)
-            send(chat_id, "✅ 已完成：%s%s%s" % (" ".join(args), stat, mode))
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
         else:
-            # 失败才回传错误尾部，便于排错
-            tail = out[-1500:] if len(out) > 1500 else out
-            send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail))
-    except subprocess.TimeoutExpired:
-        send(chat_id, "⏱ 执行超时（>15min），请查本机 run.log")
+            proc.kill()
     except Exception as e:
-        send(chat_id, "❌ 触发异常：%s" % e)
+        log("清理子进程树失败（忽略）：%s" % e)
+
+
+def _run_pipeline_sync(args, chat_id):
+    """真正执行流水线（同步逻辑，供后台线程调用）。"""
+    cmd = [sys.executable, os.path.join(HERE, "pipeline.py")] + args
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace")
+    try:
+        out, _ = proc.communicate(timeout=PIPELINE_TIMEOUT)
+        rc = proc.returncode
+    except subprocess.TimeoutExpired:
+        _kill_proc_tree(proc)
+        try:
+            out, _ = proc.communicate(timeout=30)
+        except Exception:
+            out = ""
+        log("流水线超时（>%ds），已终止子进程树：%s" % (PIPELINE_TIMEOUT, " ".join(args)))
+        try:
+            send(chat_id, "⏱ 执行超时（>%d 分钟），已强制终止并清理子进程，请查 run.log"
+                 % (PIPELINE_TIMEOUT // 60))
+        except Exception:
+            pass
+        return
+    out = out or ""
+    if rc == 0:
+        # 成功：日报已由 pipeline 自行推送到飞书+TG，这里只回简洁确认，不回传大段日志
+        stat = ""
+        m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
+        if m:
+            stat = "\n📊 当日实质消息 %s 条" % m.group(1)
+        mode = ""
+        mm = re.search(r"节流模式：\s*\S+\s*（(.+?)）", out)
+        if mm:
+            mode = "\n🔧 %s" % mm.group(1)
+        send(chat_id, "✅ 已完成：%s%s%s" % (" ".join(args), stat, mode))
+    else:
+        # 失败才回传错误尾部，便于排错
+        tail = out[-1500:] if len(out) > 1500 else out
+        send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail))
+
+
+def _pipeline_worker(args, chat_id):
+    """后台线程主体：任何异常都在这里消化，绝不向外抛到主循环。"""
+    global _BUSY
+    try:
+        _run_pipeline_sync(args, chat_id)
+    except Exception as e:
+        log("流水线线程异常：%s" % e)
+        try:
+            send(chat_id, "❌ 触发异常：%s" % e)
+        except Exception:
+            pass
+    finally:
+        with _BUSY_LOCK:
+            _BUSY = False
+        log("流水线线程结束（已释放执行锁）：%s" % " ".join(args))
+
+
+def run_pipeline(args, chat_id):
+    """触发流水线：后台线程执行，监听主循环立刻继续收指令。"""
+    global _BUSY
+    with _BUSY_LOCK:
+        if _BUSY:
+            try:
+                send(chat_id, "⏳ 上一个任务仍在执行中，请稍候再试（避免并发导出浪费 token）")
+            except Exception:
+                pass
+            return
+        _BUSY = True
+    try:
+        send(chat_id, "⏳ 开始执行：%s" % " ".join(args))
+    except Exception as e:
+        log("发送开始提示失败（忽略）：%s" % e)
+    t = threading.Thread(target=_pipeline_worker, args=(args, chat_id), daemon=True)
+    t.start()
+    log("已在后台线程启动流水线：%s" % " ".join(args))
 
 
 def _latest_digest_date():
@@ -220,8 +293,13 @@ def main():
         log("TG 指令监听已启动（白名单模式：仅 %s 可触发）... Ctrl+C 停止" % allowed_users)
     else:
         log("TG 指令监听已启动（开放模式：任意会话/任意用户均可触发，每日导出节流保护）... Ctrl+C 停止")
+    last_hb = time.time()
     while True:
         try:
+            # 心跳：每 10 分钟一行，排查「收不到指令」时可确认监听是否真的活着
+            if time.time() - last_hb > 600:
+                log("💓 心跳：监听存活中（offset=%s）" % offset)
+                last_hb = time.time()
             resp = tg_api(token, "getUpdates", {"offset": offset, "timeout": 30}, timeout=40)
             if not resp.get("ok"):
                 log("getUpdates 异常返回：%s" % resp)
@@ -238,11 +316,16 @@ def main():
                     log("忽略非白名单用户 %s 的指令（开放模式需清空 allowed_user_ids）" % from_id)
                     continue
                 log("收到指令 chat=%s from=%s text=%s" % (chat_id, from_id, (msg.get("text") or "")[:80]))
-                handle(msg.get("text"), chat_id)
+                # 单条指令处理异常绝不影响主循环（第二层兜底）
+                try:
+                    handle(msg.get("text"), chat_id)
+                except Exception as e:
+                    log("处理指令异常（已忽略，监听继续）：%s" % e)
         except KeyboardInterrupt:
             log("已停止"); break
-        except Exception as e:
-            log("监听异常：%s" % e)
+        except BaseException as e:
+            # 兜底：连 BaseException 也不让监听退出（KeyboardInterrupt 上面已处理）
+            log("监听异常(BaseException，已忽略继续运行)：%s" % e)
             time.sleep(10)
 
 

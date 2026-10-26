@@ -9,11 +9,14 @@
 - 🤖 **AI 日报**：DeepSeek 把频道讨论总结成结构化日报（必读重点 / 子网动向 / 重要人物 / 潜力观察 / 一句话总结）
 - 📱 **手机端友好排版**：飞书卡片铺满屏宽，标题+日期与正文合并在**同一可复制文本块**（长按整段选中）
 - ⏱ **每日导出节流（防封号）**：默认每天最多真实导出 **2 次**、间隔 **≥12 小时**；未达间隔/达上限时只复用或合并已有记录做「深刻总结」重推，不消耗 token（阈值可在 `config.json` 配置）
-- 🎲 **多账号随机触发**：配置 `discord_tokens` 多个号，每次导出随机抽一个，摊薄风控概率
+- 🎲 **多账号随机触发**：配置 `discord_tokens` 多个号，每次导出随机抽一个，摊薄风控概率；数组里若有空串会被自动忽略，绝不抽到空 token
 - 💬 **Telegram 指令触发**：`/digest` `/weekly` `/repush` `/watch` `/help`，并有常驻按钮栏，点一下就发
 - 🔓 **开放触发（可选白名单）**：默认任意用户可触发；填 `allowed_user_ids` 即切换为仅白名单
 - 📊 **潜力股跨日跟踪**：自动沉淀「潜力观察」板块，支持 `/watch 7` 近 7 天跨日热点汇总
-- 🔧 **开机自启**：监听程序登录自动后台运行，随时收指令
+- 🚀 **内置 API 导出后端（默认）**：不依赖 DiscordChatExporter，直接调 Discord REST API 导出，秒级完成；若仍用 DCE，超时（120s）会自动回退到 API 后端兜底
+- 🛡 **监听崩溃自愈**：流水线在后台线程执行、异常全兜底；守护脚本在监听意外退出后 **15 秒自动重启**，导出卡住也不会拖垮监听
+- 🏷 **导出元信息脚注**：日报末尾标注 `令牌：1/2 · 次数：1/2`，一眼看出本次用了第几个 token、池中共几个、当日还剩几次导出额度
+- 🔧 **开机自启（带崩溃自愈）**：监听程序登录自动后台运行，随时收指令
 
 ---
 
@@ -70,10 +73,16 @@
 2. 安装时**务必勾选「Add Python to PATH」**，然后点 Install Now。
 3. 验证：按 `Win+R` → 输入 `cmd` → 回车，输入 `python --version`，能显示版本号就成功了。
 
-### 第 2 步：下载 DiscordChatExporter
+### 第 2 步：（可选）下载 DiscordChatExporter
+> **这一步可以不装**。项目默认用**内置 API 后端**（`config.json` 里 `dce_backend: "api"`）
+> 直接调 Discord REST API 导出，秒级完成，不需要任何外部程序。
+> 只有你想改用 DCE 导出时才需要下面这几步（不建议：DCE 是 .NET 程序、没有 `--proxy` 参数，
+> 常卡在 `Resolving channel(s)...` 一步十几分钟不返回）。
+
 1. 打开 https://github.com/Tyrrrz/DiscordChatExporter/releases
 2. 下载 **DiscordChatExporter.Cli-win-x64.zip**（带 Cli 的那个，不是 GUI 版）
 3. 解压，把里面的 **`DiscordChatExporter.Cli.exe`** 复制到本项目文件夹里
+4. 在 `config.json` 里把 `"dce_backend"` 改成 `"local"`，并把 `dce_exe` 填成该 exe 的完整路径
 
 ### 第 3 步：准备配置文件
 1. 把本项目的 `config.example.json` **复制一份**，改名为 `config.json`
@@ -96,15 +105,17 @@ python pipeline.py
 ```jsonc
 {
   "discord_token": "★你的 Discord user token",      // 见下方「如何拿 token」
-  "discord_tokens": [                               // 可选：多个号随机切换，降低封号风险
-    "账号A的token", "账号B的token"
+  "discord_tokens": [                               // 可选：多个号随机切换；数组里空串会被自动忽略，不会抽到空
+    "账号A的token", "账号B的token"                  // 想几个就写几个（≥2 才有随机意义）；数组为空时回退到上面的 discord_token
   ],
   "channel_id": "1341812134807343114",             // 频道 ID，一般不用改
   "guild_name": "DTAO",
   "channel_name": "price-talk",
   "output_dir": "exports",
-  "dce_backend": "local",                          // 用本地 exe，不用 docker
-  "dce_exe": "C:/.../DiscordChatExporter.Cli.exe",  // 第2步放的那个 exe 路径
+  "dce_backend": "api",                            // 导出后端：api(推荐)|local|docker
+  "dce_exe": "C:/.../DiscordChatExporter.Cli.exe",  // 仅 local 后端需要：第2步放的那个 exe 路径
+  "api_fallback": true,                            // local/docker 超时或失败时，自动改用内置 api 后端兜底
+  "dce_timeout": 120,                              // DCE 超时秒数（正常导出约 30s），超时即触发上面的兜底
   "deepseek_api_key": "★DeepSeek 的 key",
   "deepseek_base_url": "https://api.deepseek.com/v1",
   "deepseek_model": "deepseek-chat",
@@ -176,11 +187,15 @@ python pipeline.py
 
 ### 方式 A：在终端里手动跑
 ```bash
-python pipeline.py                 # 导出「昨天」并双推飞书+TG
-python pipeline.py 2026-10-23      # 导出指定某一天
-python pipeline.py weekly          # 生成本周周报
+python pipeline.py                        # 导出「昨天」并双推飞书+TG
+python pipeline.py daily 2026-10-23       # 导出指定某一天（⚠️ 日期前必须写 daily）
+python pipeline.py daily 昨日              # 「昨日/昨天/最新」等中文别名也认
+python pipeline.py weekly                 # 生成本周周报
 python pipeline.py repush 2026-10-23      # 只把已生成的日报重推一遍(不重导)
 python pipeline.py repush 2026-10-23 tg   # 只重推 TG
+
+# ⚠️ 注意：第一个参数只能是 daily / weekly / repush 之一。
+# 直接写 python pipeline.py 2026-10-23 会报 argument mode: invalid choice。
 ```
 
 ### 方式 B：在 Telegram 里发一句话（最方便）
@@ -226,12 +241,15 @@ python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 默认脚本不会自己跑，需要有一个「监听程序」在后台常驻，才能随时收你的 TG 指令。
 
 **最简单：开机自启（推荐，无需管理员）**
-- 本项目已附带 `DTAO_TG_Listener.bat`。请把它做成**快捷方式**放进你电脑的「启动」文件夹
-  （路径：`C:/Users/你的用户名/AppData/Roaming/Microsoft/Windows/Start Menu/Startup/`）。
-  ⚠️ **务必放「快捷方式」而不是文件本身**：脚本用 `%~dp0` 定位 `tg_listener.py`，
-  直接拷文件进启动文件夹会找不到程序、自启失效。
-- 放好快捷方式后，**下次登录 Windows 会自动后台（无窗口）运行**监听，不碍事。
-- 也可以现在就双击 `DTAO_TG_Listener.bat` 立刻启动（无窗口）。
+- 把 `DTAO_Listener_Autostart.bat` 放进「启动」文件夹（路径见下）。它负责拉起项目里的
+  `DTAO_TG_Listener_Guard.bat` —— **守护版**，监听崩溃或退出后 **15 秒自动重启**。
+  - 启动文件夹路径：`C:/Users/你的用户名/AppData/Roaming/Microsoft/Windows/Start Menu/Startup/`
+    （`Win+R` → 输入 `shell:startup` → 回车即可直接打开）
+  - ⚠️ 别把 `DTAO_TG_Listener_Guard.bat` 直接拷进启动文件夹：它用 `%~dp0` 定位
+    `tg_listener.py`，拷过去会找不到程序、自启失效。用 `DTAO_Listener_Autostart.bat`
+    （内部写死了项目路径）就没这个问题。
+- 放好后，**下次开机 / 登录 Windows 会自动运行**监听，窗口最小化、不碍事（别关那个黑色小窗）。
+- 想现在立刻启动：双击项目里的 `DTAO_TG_Listener_Guard.bat`。
 
 **手动临时跑（看得到窗口）**
 双击 `start_tg_listener.bat` 即可，关掉窗口就停。
@@ -250,7 +268,7 @@ python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 ## 七、安全与合规
 
 1. **user token 封号风险**：个人 token 自动读频道违反 Discord TOS。
-   - 降低风险：配 `discord_tokens` 多个号随机切换（每次导出随机抽一个账号）；或让每个 token 走不同代理 IP。
+   - 降低风险：配 `discord_tokens` 多个号随机切换（每次导出随机抽一个账号；数组里若有空串会被自动忽略，不会抽到空）；或让每个 token 走不同代理 IP。
    - 根治办法：**用 bot token**。在 @BotFather 建 bot，请 DTAO 服务器管理员把 bot 拉进群并给「读取消息历史」权限，然后把 bot token 填进 `discord_token` 即可——这是 Discord 允许的方式，零封号风险。
    - **节流保护（已内置，参数可配置）**：`/digest` 每天最多真正导出指定次数，且两次需间隔指定时长；未达间隔时再触发只复用/合并已有导出记录做「深刻总结」重新推送（不消耗 token）；当日已达上限后无论怎么触发都只合并记录重推。默认值：每天最多 **2 次**、间隔 **≥12 小时**。想调整就在 `config.json` 加两行：
      ```json
@@ -273,6 +291,20 @@ A：监听程序没在跑。按第六节启动 `start_tg_listener.bat` 或重启
 
 **Q：提示连不上 Discord / Telegram（502 / 超时）？**
 A：确认 Clash（或你的代理）「系统代理」是开着的；`proxy` 留空即可自动继承。
+
+**Q：日报一直出不来，run.log 停在「检测到系统代理 / 导出命令」后再无动静？**
+A：这是 DiscordChatExporter（.NET 程序，无 `--proxy` 参数）卡在 `Resolving channel(s)...` 一步，
+   表现为挂起十几分钟不返回、也不报错，跟 token 无关。解决办法：把 `config.json` 里的
+   `"dce_backend"` 改成 `"api"`，改用内置的 API 导出后端（直接调 Discord REST API，秒级完成，
+   产出格式与 DCE 完全一致）。保持 `"api_fallback": true` 时，即使仍用 DCE，超时
+   （默认 120 秒）也会自动切到 API 后端兜底。
+
+**Q：日报末尾的「令牌：1/2 · 次数：1/2」是什么意思？**
+A：这是导出元信息脚注，帮你确认多 token 轮换和节流配额是否按预期工作：
+   - `令牌 1/2` = 本次**随机抽中的是第 1 个** token，`discord_tokens` 池里**共 2 个**（多号轮换生效）。
+     若显示 `令牌 -/2`，说明本次是复用已有记录重总结、**没有真实导出**，因此不归属任何 token。
+   - `次数 1/2` = 该自然日**已累计导出 1 次**，每日上限 **2 次**（`max_exports_per_day`）。
+     改配置里的上限，这里的分母会跟着变。
 
 **Q：飞书推送报 19021？**
 A：飞书签名校验没对上。要么 `feishu_secret` 填错，要么机器人没开签名校验却填了 secret。
@@ -321,6 +353,8 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 | `config.json` | 你的真实配置（含密钥，**不入库**） |
 | `start_tg_listener.bat` | 手动启动监听（带窗口） |
 | `DTAO_TG_Listener.bat` | 开机自启版（放启动文件夹，无窗口） |
+| `DTAO_TG_Listener_Guard.bat` | 守护版启动脚本：监听崩溃/退出后 **15 秒自动重启**（带最小化窗口，可看崩溃报错） |
+| `DTAO_Listener_Autostart.bat` | 放「启动」文件夹用的自启引导（内部写死项目路径，开机自动拉起上面的守护脚本） |
 | `install_task_login.ps1` | 注册任务计划程序自启（更稳，失败自动重启；**需以管理员身份运行**） |
 | `DEPLOY_HOMEPC.md` | 部署到另一台常开 Windows 电脑的完整教程 |
 | `exports/` | 导出的聊天记录和生成的日报（**不入库**） |

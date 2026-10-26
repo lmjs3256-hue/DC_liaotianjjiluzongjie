@@ -126,6 +126,11 @@ def load_config():
 # ----------------------------------------------------------------------------
 # 0) 选择 Discord token：支持单 token 兼容 + 多 token 按日期轮换
 # ----------------------------------------------------------------------------
+# 记录本次实际使用的 token 编号，供日报末尾展示「令牌：n/m」
+# 未发生真实导出（复用/合并重总结）时保持 None，日报里显示为「-」
+_TOKEN_INFO = {"index": None, "total": None}
+
+
 def pick_discord_token(cfg):
     """返回本次导出用的 token。
     - 配置了 discord_tokens（数组，且至少一个非空）-> 每次随机抽一个，把请求摊到多个账号，
@@ -133,19 +138,139 @@ def pick_discord_token(cfg):
     - 否则回退到单个 discord_token（向后兼容）。
     注意：随机模式下，每个 token 对应的账号都必须是该服务器成员且能访问目标频道。
     """
-    pool = [t for t in (cfg.get("discord_tokens") or []) if t]
+    raw = cfg.get("discord_tokens") or []
+    pool = [t for t in raw if t]
+    # 防御：discord_tokens 数组中若混入空串/空值，一律忽略，绝不会随机抽到空 token 导致导出失败
+    if len(raw) != len(pool):
+        log("discord_tokens 共 %d 项，已忽略 %d 个空/无效项，实际可用 %d 个"
+            % (len(raw), len(raw) - len(pool), len(pool)))
     if pool:
         idx = random.randrange(len(pool))
         log("使用 discord_tokens 池中第 %d 个（共 %d 个，随机）" % (idx + 1, len(pool)))
+        _TOKEN_INFO["index"] = idx + 1
+        _TOKEN_INFO["total"] = len(pool)
         return pool[idx]
     single = cfg.get("discord_token")
     if not single:
         raise RuntimeError("config.json 缺少 discord_token，且 discord_tokens 为空")
+    _TOKEN_INFO["index"] = 1
+    _TOKEN_INFO["total"] = 1
     return single
 
 # ----------------------------------------------------------------------------
 # 1) 用 DiscordChatExporter 导出「前一天」频道记录为 JSON
 # ----------------------------------------------------------------------------
+DISCORD_EPOCH_MS = 1420070400000
+
+def _snow_to_ms(sid):
+    """Discord snowflake ID -> Unix 毫秒"""
+    return (int(sid) >> 22) + DISCORD_EPOCH_MS
+
+def _ms_to_snow(ms):
+    """Unix 毫秒 -> Discord snowflake ID"""
+    return (int(ms) - DISCORD_EPOCH_MS) << 22
+
+def _api_fetch(url, token, tries=5):
+    """调用 Discord REST API（代理由 _opener() 按 config.proxy 决定）。
+    429 限速自动等待重试；401/403 直接判定为 token 无效或无权访问。"""
+    last = None
+    for i in range(tries):
+        req = urllib.request.Request(url, headers={
+            "Authorization": token,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DTAO-Pipeline/1.0",
+            "Accept": "application/json",
+        })
+        try:
+            with _opener().open(req, timeout=30) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", "replace")
+            except Exception:
+                body = ""
+            if e.code == 429:
+                wait = 2.0
+                try:
+                    wait = float(json.loads(body).get("retry_after", 2))
+                except Exception:
+                    pass
+                wait = min(max(wait, 1.0), 30.0)
+                log("Discord API 429 限速，等待 %.1fs 后重试（第 %d/%d 次）" % (wait, i + 1, tries))
+                time.sleep(wait)
+                last = "HTTP 429: %s" % body[:200]
+                continue
+            if e.code in (401, 403):
+                raise RuntimeError("Discord API 拒绝访问（HTTP %s）：token 无效、过期，或该账号无权访问此频道" % e.code)
+            last = "HTTP %s: %s" % (e.code, body[:200])
+            time.sleep(2)
+        except Exception as e:
+            last = str(e)
+            time.sleep(2)
+    raise RuntimeError("Discord API 请求失败（已重试 %d 次）：%s" % (tries, last))
+
+def export_via_api(cfg, token, channel, after_date, before_date, out_json):
+    """内置 API 后端：不用 DiscordChatExporter，直接调 Discord REST API 拉指定日期的消息。
+    好处：不走 .NET 的代理解析逻辑（DCE 常在此卡死），代理完全由 config.proxy / 系统代理控制。
+    产出 JSON 与 DCE 兼容：messages[] 含 author.name / content / timestamp / reactions[].count
+    日期语义与 DCE 一致：按 UTC 解释，[after 00:00, before 00:00) 左闭右开。
+    """
+    import datetime as _dt
+    start_ms = int(_dt.datetime.strptime(after_date, "%Y-%m-%d")
+                   .replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    end_ms = int(_dt.datetime.strptime(before_date, "%Y-%m-%d")
+                 .replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
+
+    base = "https://discord.com/api/v9/channels/%s/messages" % channel
+    url = "%s?limit=100&before=%d" % (base, _ms_to_snow(end_ms))
+    collected, seen, pages = [], set(), 0
+
+    while url and pages < 300:
+        pages += 1
+        data = _api_fetch(url, token)
+        if not isinstance(data, list) or not data:
+            break
+        oldest = None
+        for m in data:
+            mid = str(m.get("id") or "")
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            ms = _snow_to_ms(mid)
+            if start_ms <= ms < end_ms:
+                collected.append(m)
+            if oldest is None or int(mid) < int(oldest):
+                oldest = mid
+        if len(data) < 100 or not oldest:
+            break
+        if _snow_to_ms(oldest) < start_ms:
+            break
+        url = "%s?limit=100&before=%s" % (base, oldest)
+
+    collected.sort(key=lambda m: int(m["id"]))
+    out = []
+    for m in collected:
+        a = m.get("author") or {}
+        name = a.get("global_name") or a.get("username") or "?"
+        nick = ((m.get("member") or {}).get("nick")) or name
+        out.append({
+            "id": m.get("id"),
+            "timestamp": m.get("timestamp"),
+            "content": m.get("content") or "",
+            "author": {"id": a.get("id"), "name": name, "nickname": nick},
+            "reactions": [{"count": r.get("count", 0),
+                           "emoji": {"name": (r.get("emoji") or {}).get("name", "")}}
+                          for r in (m.get("reactions") or [])],
+            "attachments": [{"url": x.get("url")} for x in (m.get("attachments") or [])],
+        })
+
+    os.makedirs(os.path.dirname(out_json), exist_ok=True)
+    with open(out_json, "w", encoding="utf-8") as f:
+        json.dump({"channel": {"id": channel}, "messages": out}, f, ensure_ascii=False, indent=1)
+    log("API 后端导出成功：%s（%d 条消息，%d 字节，翻页 %d 次）"
+        % (out_json, len(out), os.path.getsize(out_json), pages))
+    if not out:
+        log("提示：该区间 API 返回 0 条消息，请确认日期与频道是否有发言")
+
 def run_export(cfg, after_dt, before_dt, out_json):
     day_str = after_dt.strftime("%Y-%m-%d")
     token = pick_discord_token(cfg)
@@ -153,6 +278,11 @@ def run_export(cfg, after_dt, before_dt, out_json):
     backend = cfg.get("dce_backend", "docker").lower()
     after = after_dt.strftime("%Y-%m-%d")
     before = before_dt.strftime("%Y-%m-%d")
+
+    # 内置 API 后端：完全绕开 DiscordChatExporter（.NET），代理可控、速度秒级
+    if backend == "api":
+        export_via_api(cfg, token, channel, after, before, out_json)
+        return
 
     if backend == "docker":
         out_dir = os.path.dirname(out_json)
@@ -194,18 +324,29 @@ def run_export(cfg, after_dt, before_dt, out_json):
             log("检测到 Windows 系统代理，导出将走：%s" % http)
         else:
             log("未检测到 Windows 系统代理（proxy=空）。如需翻墙导出 Discord，请在 Clash/V2Ray 开启「系统代理」，或在 config.json 显式填写 proxy")
-    # 超时保护：避免网络不通时无限卡死
+    # 超时保护：避免网络不通时无限卡死（默认 120s，正常导出只需 30s 左右）
+    dce_timeout = int(cfg.get("dce_timeout", 120) or 120)
+    fallback = bool(cfg.get("api_fallback", True))
+    failed = None
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           env=env, timeout=600)
+                           env=env, timeout=dce_timeout)
+        if r.returncode != 0:
+            failed = "DiscordChatExporter 退出码 %s：%s" % (r.returncode, ((r.stderr or r.stdout or "")[:300]))
+        elif not os.path.exists(out_json):
+            failed = "DiscordChatExporter 执行完成但未生成文件"
     except subprocess.TimeoutExpired:
-        raise RuntimeError("DiscordChatExporter 超时（600s）：很可能网络无法连到 Discord，"
-                           "请检查本机 VPN/代理，或在 config.json 设置 proxy")
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or "")[:2000]
-        raise RuntimeError("DiscordChatExporter 执行失败：\n%s" % err)
-    if not os.path.exists(out_json):
-        raise RuntimeError("导出完成但未生成文件：%s" % out_json)
+        failed = "DiscordChatExporter 超时（%ss），多半卡在代理/网络连接" % dce_timeout
+    except Exception as e:
+        failed = "DiscordChatExporter 调用异常：%s" % e
+
+    if failed:
+        if fallback:
+            log("⚠ %s —— 自动回退到内置 API 后端导出" % failed)
+            export_via_api(cfg, token, channel, after, before, out_json)
+            return
+        raise RuntimeError(failed + "\n（如需自动改用内置 API 后端，请在 config.json 设置 \"api_fallback\": true）")
+
     log("导出成功：%s (%d 字节)" % (out_json, os.path.getsize(out_json)))
 
 # ----------------------------------------------------------------------------
@@ -719,6 +860,22 @@ def run_one_day(cfg, after_dt, before_dt):
         if action in ("resummarize", "merge"):
             sys_p = SYSTEM_PROMPT + DEEPEN_HINT
         digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
+
+    # 末尾标注：本次使用的 token 编号（第几个/共几个）+ 当日导出次数（已用/每日上限）
+    # 令牌 n/m：本次随机抽中的是第 n 个，池中共 m 个；复用未导出时显示为「-」
+    # 次数 x/y：该自然日已累计导出 x 次，每日上限 y 次
+    used = len(_day_exports(cfg, day_str))
+    t_idx = _TOKEN_INFO.get("index")
+    t_total = len([t for t in (cfg.get("discord_tokens") or []) if t]) \
+        or (1 if cfg.get("discord_token") else 0)
+    idx_str = str(t_idx) if t_idx else "-"
+    footer = "\n\n---\n令牌：%s/%d · 次数：%d/%d" % (idx_str, t_total, used, max_per_day)
+    if not action.startswith("export"):
+        footer += "（本次复用已有记录，未重新导出）"
+    digest = (digest or "") + footer
+    log("日报标注：令牌 %s/%d，当日导出次数 %d/%d%s"
+        % (idx_str, t_total, used, max_per_day,
+           "" if action.startswith("export") else "（复用，未重新导出）"))
 
     title = "🤖 DTAO price-talk 日报 · %s" % day_str
 

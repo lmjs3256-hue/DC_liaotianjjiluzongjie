@@ -4,6 +4,46 @@
 
 ---
 
+## 2026-10-26 — 文档全面同步（API 后端 / 自愈自启 / 令牌脚注 / 命令修正）
+
+- **README.md**
+  - 第 2 步「下载 DiscordChatExporter」改为**可选**：默认 `dce_backend: "api"` 不需要任何外部程序，并说明 DCE 为何不建议（.NET 无 `--proxy` 参数，常卡在 `Resolving channel(s)...`）。
+  - 核心特性新增 3 条：内置 API 导出后端、监听崩溃自愈（守护脚本 15 秒重启）、导出元信息脚注。
+  - **修正命令示例**：`python pipeline.py 2026-10-23` 会报 `argument mode: invalid choice`，正确写法是 `python pipeline.py daily 2026-10-23`（第一个参数只能是 `daily` / `weekly` / `repush`）；补充中文别名 `daily 昨日` 用法。
+  - 第六节开机自启改为「`DTAO_Listener_Autostart.bat` 放启动文件夹 → 拉起 `DTAO_TG_Listener_Guard.bat` 守护版」，并说明为何不能直接拷 Guard 本体（`%~dp0` 定位问题）。
+  - 文件说明表新增 `DTAO_TG_Listener_Guard.bat`、`DTAO_Listener_Autostart.bat`。
+  - 常见问题新增两条：DCE 卡死如何切 API 后端、「令牌：1/2 · 次数：1/2」含义。
+- **DEPLOY_HOMEPC.md**：前置条件 .NET 改为「一般不需要」；文件清单 / config 校验项改为 `dce_backend: "api"`（并说明 `api_fallback` / `dce_timeout`）；自启方案改为 Autostart + Guard；排错表新增「导出卡住」「令牌脚注」「心跳日志排查」等条目。
+- **config.example.json**：同步 `dce_backend: "api"`、`api_fallback: true`、`dce_timeout: 120`。
+
+## 2026-10-26 — 日报末尾标注「令牌：n/m · 次数：x/y」
+
+- **需求**：给 Discord token 编号，日报末尾显示本次用的是第几个 token、池中共几个；并附带当日导出次数与配额上限，一眼看出 token 轮换是否生效、今天还剩几次导出额度。
+- **实现**：`pick_discord_token()` 在随机抽中后把「第几个 / 共几个」记入全局 `_TOKEN_INFO`；`run_one_day()` 生成日报文本后追加一行脚注。
+- **显示格式**（飞书 / Telegram / 落盘 txt 三处一致）：
+  - 真实导出：`令牌：1/2 · 次数：1/2`（本次抽中第 1 个 token，池中共 2 个；当日已导出 1 次，上限 2 次）
+  - 复用未导出：`令牌：-/2 · 次数：1/2（本次复用已有记录，未重新导出）` —— 未发生导出时不归属任何 token，故编号显示 `-`，但总数与已用次数照常显示。
+- `次数` 分母取自 `max_exports_per_day`，分子为该自然日累计导出次数（`_digest_state.json` 实测），二者联动，改配置即改显示。
+
+## 2026-10-26 — 新增内置 API 导出后端（根治 DiscordChatExporter 卡死）
+
+- **问题**：10-25/10-26 连续三次导出全部卡死，日志停在「检测到系统代理」后再无输出。实测 `DiscordChatExporter.Cli.exe`（v2.48.0，.NET）卡在 `Resolving channel(s)...` 一步超过 120 秒不返回，导出失败；连带监听进程被拖崩。而同一时刻用 curl/urllib 走 `127.0.0.1:7890` 访问 Discord API 正常（401/200，0.4s），token 有效、频道可读 —— 问题只在 DCE 自身的 .NET 代理解析行为（DCE 无 `--proxy` 参数，只能靠 .NET 读代理）。
+- **修复**：新增内置导出后端 `dce_backend="api"` —— 不依赖 DCE，直接用 Discord REST API 分页拉取指定日期消息（snowflake 翻页、`[after 00:00, before 00:00)` 左闭右开、UTC 语义与 DCE 一致），产出 JSON 与 DCE 完全兼容（`messages[].author.name / content / timestamp / reactions[].count`）；429 限速自动等待重试，401/403 明确报「token 无效或无权访问」。
+- **自动兜底**：`api_fallback: true`（默认开）+ `dce_timeout: 120`（默认，原为 600）。local/docker 后端超时、非 0 退出或未产出文件时，自动回退到 API 后端，不再干等 10 分钟。
+- **实测**：10-25 全天导出由 DCE 的「卡死 10 分钟无产出」变为 **1 秒拿到 70 条消息**，端到端日报 9 秒完成并双推飞书 + TG。
+- **配置**：`config.json` 已切为 `dce_backend: "api"`；想用回 DCE 改回 `"local"` 即可（仍有 API 兜底）。
+
+## 2026-10-26 — 开机自启缺失修复
+
+- **问题**：电脑重启后 TG 监听未自动起来 —— 启动文件夹（`shell:startup`）实际是空的，此前并未真正放入自启项。
+- **修复**：新增 `DTAO_Listener_Autostart.bat` 到启动文件夹，开机/登录后自动拉起 `DTAO_TG_Listener_Guard.bat`（带崩溃自愈：监听退出后 15 秒自动重启）。
+
+## 2026-10-25 — 防御性加固：discord_tokens 空项自动忽略（绝不抽到空 token）
+
+- **背景**：用户担心 `discord_tokens` 数组里混入空串（例如复制数组行却漏填 token）会被随机抽中，导致 Discord 导出失败。
+- **修复**：`pick_discord_token()` 在构建抽取池时用 `[t for t in raw if t]` 过滤空/假值；并在原始项数与实际可用数不一致时打印一行日志：`discord_tokens 共 N 项，已忽略 M 个空/无效项，实际可用 K 个`，便于直观确认空项未被计入。
+- **结论**：多个 token 随机模式下，抽取池只含非空 token，绝不会抽到空串导致导出失败；单值 `discord_token`（空串）仅作数组全空时的兜底，且同样校验非空，不会被并入数组计数。无破坏性改动，下次真导出日志会显示真实的「共 M 个（随机）」。
+
 ## 2026-10-25 — 文档修正：Discord user token 获取步骤补全英文界面标签
 
 - **问题**：README 原「如何拿 Discord user token」步骤太简略，且未标注 F12 后英文开发者工具界面的按钮/标签名，用户在 `Network` 标签之后找不到下一步。

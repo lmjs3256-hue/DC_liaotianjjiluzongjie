@@ -29,6 +29,7 @@ import sys
 import json
 import glob
 import time
+import datetime
 import subprocess
 import threading
 import urllib.request
@@ -60,6 +61,9 @@ HELP = (
     "/repush 2026-10-23 补推指定日(飞书+TG)\n"
     "/repush 2026-10-23 tg 仅补推 TG\n"
     "/repush 2026-10-23 feishu 仅补推飞书\n"
+    "/retry 反馈内容 按你的意见/补充事实重总结并重推\n"
+    "   例：/retry SN34 是宣布转型，不是跑路\n"
+    "   可指定日期：/retry 2026-10-30 反馈内容\n"
     "/help 显示本帮助\n"
     "💡 也可直接点下方按钮栏操作"
 )
@@ -127,11 +131,25 @@ def _kill_proc_tree(proc):
         log("清理子进程树失败（忽略）：%s" % e)
 
 
+def _clean_tail(out, limit=1200):
+    """清洗子进程输出尾部：去掉乱码替换字符与控制字符，避免回传时刷屏。"""
+    out = (out or "").replace("\ufffd", "")
+    out = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", out)
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    tail = "\n".join(lines[-25:])
+    return tail[-limit:] if len(tail) > limit else tail
+
+
 def _run_pipeline_sync(args, chat_id):
     """真正执行流水线（同步逻辑，供后台线程调用）。"""
     cmd = [sys.executable, os.path.join(HERE, "pipeline.py")] + args
+    # 强制子进程以 UTF-8 输出：中文 Windows 默认 GBK，父进程按 UTF-8 解码会变乱码
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONFAULTHANDLER"] = "1"   # 进程级崩溃时能留下堆栈，便于排查
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, encoding="utf-8", errors="replace")
+                            text=True, encoding="utf-8", errors="replace", env=env)
     try:
         out, _ = proc.communicate(timeout=PIPELINE_TIMEOUT)
         rc = proc.returncode
@@ -161,9 +179,9 @@ def _run_pipeline_sync(args, chat_id):
             mode = "\n🔧 %s" % mm.group(1)
         send(chat_id, "✅ 已完成：%s%s%s" % (" ".join(args), stat, mode))
     else:
-        # 失败才回传错误尾部，便于排错
-        tail = out[-1500:] if len(out) > 1500 else out
-        send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail))
+        # 失败才回传错误尾部（清洗乱码、只留最后几行有意义的）
+        tail = _clean_tail(out)
+        send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail or "（无输出，详见 run.log）"))
 
 
 def _pipeline_worker(args, chat_id):
@@ -214,6 +232,34 @@ def _latest_digest_date():
     return max(dates) if dates else None
 
 
+YESTERDAY_ALIASES = {"昨日", "昨天", "yesterday", "latest", "最新", "y"}
+
+
+def _resolve_day(ds):
+    """把「昨日/最新」等别名解析成 YYYY-MM-DD。"""
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    return P._resolve_day(ds, tz)
+
+
+def _feedback_worker(day, feedback, chat_id):
+    """后台线程：按用户反馈重总结并双推。"""
+    try:
+        send(chat_id, "🧠 正在按你的反馈重总结 %s …" % day)
+        P.resummarize_with_feedback(P._CFG, day, feedback)
+        send(chat_id, "✅ 已按反馈重新总结并推送（%s）" % day)
+    except Exception as e:
+        log("反馈重总结失败：%s" % e)
+        try:
+            send(chat_id, "❌ 重总结失败：%s" % e)
+        except Exception:
+            pass
+
+
+def run_feedback(day, feedback, chat_id):
+    threading.Thread(target=_feedback_worker, args=(day, feedback, chat_id), daemon=True).start()
+    log("已按用户反馈启动重总结：%s / %s" % (day, feedback[:60]))
+
+
 def handle(text, chat_id):
     text = (text or "").strip()
     if not text:
@@ -251,6 +297,28 @@ def handle(text, chat_id):
                 send(chat_id, (("【%d/%d】\n" % (i, len(chunks))) if len(chunks) > 1 else "") + ch)
             # 飞书：跨日汇总较长，只推「热点统计」核心信号（完整明细已在 TG）
             _feishu_watch(P._CFG, "📊 DTAO 潜力观察 · 近%d天热点" % n, head)
+    elif cmd in ("retry", "fix", "resummarize", "重总结", "修正"):
+        # /retry 反馈内容             -> 对最近一次日报重总结
+        # /retry 2026-10-30 反馈内容  -> 对指定日期重总结
+        rest = parts[1:]
+        day = None
+        if rest and re.match(r"^\d{4}-\d{2}-\d{2}$", rest[0]):
+            day = rest[0]
+            rest = rest[1:]
+        elif rest and rest[0] in YESTERDAY_ALIASES:
+            day = _resolve_day(rest[0])
+            rest = rest[1:]
+        if not day:
+            day = _latest_digest_date()
+        feedback = " ".join(rest).strip()
+        if not day:
+            send(chat_id, "还没有可修订的日报，请先发 /digest 生成一次。")
+            return
+        if not feedback:
+            send(chat_id, "用法：/retry 反馈或要补充的事实\n例：/retry SN34 是团队宣布转型，不是跑路\n"
+                          "也可指定日期：/retry 2026-10-30 反馈内容")
+            return
+        run_feedback(day, feedback, chat_id)
     elif cmd == "repush":
         day = None
         targets = []

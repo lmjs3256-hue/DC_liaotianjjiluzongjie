@@ -38,6 +38,30 @@ import time
 import random
 import hashlib
 import base64
+
+# ----------------------------------------------------------------------------
+# 输出编码保护（重要）
+# 中文 Windows 下，进程 stdout 被重定向为管道时默认用 GBK(cp936) 编码。
+# 日志里一旦出现 ↳ / ❌ / ✅ / 🔥 等 GBK 无法编码的符号，print() 会抛
+# UnicodeEncodeError；若此时异常正向上冒泡，就会连带把整个进程干掉且不留日志。
+# 这里统一改成 UTF-8 输出（并容错替换），同时消除监听侧的乱码问题。
+# ----------------------------------------------------------------------------
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    try:
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# ----------------------------------------------------------------------------
+# 版本号：遵循语义化版本（MAJOR.MINOR.PATCH）
+#   修 bug / 内部优化      -> PATCH +1
+#   新增功能（向后兼容）    -> MINOR +1
+#   不兼容的配置/命令变更   -> MAJOR +1
+# 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
+# ----------------------------------------------------------------------------
+__version__ = "1.0.0"
 import urllib.request
 import urllib.error
 
@@ -107,7 +131,15 @@ def _windows_system_proxy():
 def log(msg):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = "[%s] %s" % (ts, msg)
-    print(line, flush=True)
+    try:
+        print(line, flush=True)
+    except Exception:
+        # 任何编码/管道异常都不能让日志把进程带走
+        try:
+            enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+            print(line.encode(enc, "replace").decode(enc, "replace"), flush=True)
+        except Exception:
+            pass
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -417,19 +449,69 @@ SYSTEM_PROMPT = (
     "- 忽略：纯表情包、水聊、无信息量的喊单、与 Bittensor 无关的话题。\n"
     "\n"
     "【输出结构（严格按顺序；无内容的小节写「暂无」或省略；所有小节标题都用 **加粗**）】\n"
-    "**🔥 必读重点**（2-4 条，当天最该知道的；每条一句说清「谁/什么 + 关键结论」，并把关键人物、**SN编号/子网名**、事件用 **加粗**）\n"
-    "**🔢 重点子网动向**（有异动的子网：写 **SN编号 / 子网名** + 一句话状态；上线/rug/机制变更/算力异动务必标 ⚠️ 或 ✅）\n"
-    "**👥 重要人物观点**（点名 **@人物/开发者**，他讲了什么、对什么有影响；普通群友无关发言不列）\n"
-    "**📊 潜力观察 · 近期可布局**（核心新增：从讨论中挖掘值得提前关注的子网/标的/事件。每条含：标的/子网 → 预期(上所/升级/需求/合作/机制变更) → 催化剂与时间窗 → 逻辑 → 确定性(高/中/低)。最多 3-5 条，按临近度+确定性排序。仅基于讨论内容不臆造；仅暗示请标「推测」。当日无明显催化写「暂无明确催化」）\n"
+    "**🔥 必读重点**（3-6 条，当天最该知道的全部内容；每条一句说清「谁/什么 + 关键结论」，"
+    "并把关键人物、**SN编号/子网名**、事件用 **加粗**；子网异动、上线、rug、机制变更、算力变化都写在这里，"
+    "用 ⚠️ 或 ✅ 标注。**本节即子网动向的唯一出口，不要再单列子网汇总小节，避免重复**）\n"
+    "**👥 重要人物观点**（点名 **@人物/开发者**，他讲了什么、对什么有影响；与上面重复的事实不用复述，只补充观点与依据；普通群友无关发言不列）\n"
     "**📎 其他细节**（补遗：前面没覆盖但有价值的细节，确保不错过）\n"
     "**💡 一句话总结**（当天全局判断，一句收束）\n"
+    "\n"
+    "【不要输出潜力观察】「潜力观察/布局建议」由另一个专门流程单独生成，日报正文中**不要**出现该板块，"
+    "也不要在其他小节里写布局建议、目标价、催化剂清单。\n"
     "\n"
     "【排版与强调规范（飞书/TG 双平台通用，务必遵守）】\n"
     "- 关键主体一律 **加粗**：人物名、**SN编号/子网名**、代币、事件、关键数字。\n"
     "- 用 emoji 标注程度：🔥 重大利好/热点、✅ 已落地、⚠️ 风险/异动、📌 值得关注、❌ 利空。\n"
     "- 每条要点单独成行，用 - 项目符号；小节之间空一行；避免横排长句，适合手机端。\n"
     "- 不要用 # 标题、不要用 > 引用（部分平台不渲染）。\n"
-    "- 客观、不臆测、引用具体编号与名字；全文 900 字以内（潜力板块优先保住）。"
+    "- 客观、不臆测、引用具体编号与名字；全文 800 字以内。\n"
+    "\n"
+    "【事实核查与验证规则（最高优先级，违反任何一条即为不合格日报）】\n"
+    "1. **定性必须有依据**：对「跑路/弃盘/rug/转型/换方向/清仓」等重大定性，只能依据聊天记录中的明确表述或官方公告原文。"
+    "若频道内出现官方澄清、更正或后续进展（如团队宣布转型、发布说明），**必须以最新的澄清为准**重写结论，"
+    "并明确写出「官方澄清为转型/换方向」等表述；严禁沿用此前群友的猜测作为最终结论。\n"
+    "2. **区分事实与猜测**：机器人/转发播报的官方公告是「事实」，群友的解读是「观点」，两者不得混写。"
+    "群友的负面猜测若与官方公告矛盾，一律以公告为准；无公告、无明确说法时只能写「原因不明，社区有XX猜测」。\n"
+    "3. **排名与最高级必须落地**：凡出现「第一/最大/最高/涨幅冠军」等表述，必须写明**具体的 SN 编号/子网名与数据**（如「SN27 当日 alpha 涨幅第一」）。"
+    "若原消息本身没有指明是哪个子网，只能引用原话并标注「（原文未指明具体子网）」，或直接舍弃该条，**严禁脑补编号**。\n"
+    "4. **数字/时间/代号照抄**：SN 编号、代币名、价格、时间等必须照抄原文，禁止改写、补全或张冠李戴；不确定的内容宁可不写。\n"
+    "5. **重要事件多来源交叉**：单一消息来源的重大利好/利空，需标注「（单一消息源，待确认）」；"
+    "频道内有多人讨论或有链接佐证的才可直接陈述。\n"
+    "\n"
+    "【溯源与禁止臆造（最高优先级，逐条自检）】\n"
+    "6. **每条结论必须可溯源**：写进日报的每个事实，都必须能在聊天记录中找到对应原文；必要时用「某某称/据某某」标明说话人。"
+    "找不到原文支撑的，一律删除，不要用常识补全。\n"
+    "7. **禁止推断手段、动机与因果**：原文只说「有人卖了某标的」，就只能写「有群友称有人卖出」；"
+    "不得自行添加「通过质押卖出」「本人承认卖出」「为了砸盘」「团队授意」等原文没有的手段、动机或因果链。"
+    "原文没说清楚的地方，就写「具体方式/来源原文未说明」。\n"
+    "8. **禁止拼接与移花接木**：不得把 A 的说法与 B 的说法合成一条因果事实，"
+    "也不得把某人的观点安到另一个人头上；不同人、不同时间的表述要分别归属。\n"
+    "9. **全文表述一致**：同一事实在「必读重点」「子网动向」「人物观点」等各小节中的定性必须一致，不得一处说「疑似跑路」、另一处说「已确认转型」。\n"
+    "10. **宁可少写，不许补全**：信息不足时写「原文未提及」，绝不用推测填补空白；推测内容必须显式标注「（推测）」，且不得出现在「必读重点」里。\n"
+    "11. **输出前自检**：逐条回看自己写的每一句，删除所有无法在原文找到依据的句子；"
+    "重点检查数字、买卖方向、主体归属、时间先后这四类最容易出错的信息。\n"
+    "\n"
+    "【稳定性要求】相同输入应给出相同结论：优先复述原文事实，不做发散联想；"
+    "对同一事件的定性只有一种写法，不要在不同表述之间摇摆。"
+)
+
+# 独立的「潜力观察」生成（只在 /watch 类场景需要，不随日报推送）
+POTENTIAL_PROMPT = (
+    "你是一名 Bittensor 生态的资深研究员，任务是从当日 Discord 频道「DTAO - price-talk」的聊天记录中，"
+    "挖掘值得提前关注的布局线索，输出「潜力观察 · 近期可布局」板块，供人工参考。\n"
+    "\n"
+    "【输出格式（只输出这一块，不要任何其他小节）】\n"
+    "**📊 潜力观察 · 近期可布局**\n"
+    "- **SN编号/子网名或标的** → 预期：… → 催化：…（时间窗） → 逻辑：… → 确定性：**高/中/低**\n"
+    "（最多 3-5 条，按临近度+确定性排序；当日确实没有可写的催化，就只输出「**📊 潜力观察 · 近期可布局**\n暂无明显催化」）\n"
+    "\n"
+    "【硬性规则（违反即不合格）】\n"
+    "1. 每条必须能追溯到聊天记录中的具体讨论；凭空推断的市场预期一律不写。\n"
+    "2. 预期/催化剂必须是记录里出现过的说法（如团队称上线时间、某人称将回购），并标明是谁说的；"
+    "原文没给时间就写「时间未定」，不要编造「1-2 个月」「下周」这类窗口。\n"
+    "3. 确定性只能按证据强度判断：多人讨论+官方公告=高；单一成员表态=中；纯个人感觉=低并标「（推测）」。\n"
+    "4. 禁止把别人的观点安错人；禁止补充原文没有的数字、价格、市值。\n"
+    "5. 关键主体用 **加粗**，数字与 SN 编号照抄原文。\n"
 )
 
 WEEKLY_SYSTEM_PROMPT = (
@@ -439,25 +521,41 @@ WEEKLY_SYSTEM_PROMPT = (
     "【内容边界】同日报：只关注子网、代币机制、核心成员动态、催化事件；忽略水聊与无关内容。\n"
     "\n"
     "【输出结构（严格按顺序；小节标题用 **加粗**）】\n"
-    "**🔥 本周核心趋势**（3-5 条一周主线；标注哪些是「多次提及/持续升温」的）\n"
-    "**🔢 重点子网动向**（本周有变化的子网：**SN编号/子网名** + 状态；上线/rug/机制变更标 ⚠️✅）\n"
-    "**👥 重要人物观点**（**@人物** 本周关键表态及影响）\n"
-    "**📊 潜力观察 · 近期可布局**（基于一周累积信号给更确定的布局线索：标的/子网 → 预期 → 催化剂与时间窗 → 逻辑 → 确定性(高/中/低)。最多 5 条，按确定性+临近度排序。仅基于讨论不臆造；推测项标「推测」）\n"
+    "**🔥 本周核心趋势**（4-6 条一周主线，趋势与子网变化合并写在这里；标注哪些是「多次提及/持续升温」的，"
+    "子网写成 **SN编号/子网名** + 状态，上线/rug/机制变更标 ⚠️✅。**本节即子网动向的唯一出口，不另设子网汇总小节**）\n"
+    "**👥 重要人物观点**（**@人物** 本周关键表态及影响，不重复上面的事实）\n"
     "**⚠️ 风险汇总**（本周风险点/警示）\n"
     "**📎 其他细节**（补遗，不错过有价值信息）\n"
     "**💡 一句话总结**\n"
     "\n"
+    "【不要输出潜力观察】布局建议由独立流程生成，周报正文中**不要**出现潜力观察/布局/目标价板块。\n"
+    "\n"
     "【排版规范】同日报：关键主体 **加粗**；🔥✅⚠️📌❌ 标注程度；- 项目符号、空行分段、手机端友好；"
-    "不用 # 标题、不用 > 引用；客观不臆测，引用具体编号与名字；全文 1100 字以内。"
+    "不用 # 标题、不用 > 引用；客观不臆测，引用具体编号与名字；全文 1000 字以内。\n"
+    "【事实核查规则】同日报【事实核查与验证规则】：重大定性以最新官方澄清为准；"
+    "排名/最高级必须落到具体 SN 编号与数据，原文未指明就标「（原文未指明）」或舍弃；数字/代号照抄，严禁脑补。"
 )
 
 DEEPEN_HINT = (
     "\n\n【本次为重总结 / 合并总结】请在保持全部结构的前提下做更深入、更细致的分析："
-    "重点深化「📊 潜力观察·近期可布局」——为每条补充逻辑链条、催化剂确定性(高/中/低)与更具体的时间窗推断；"
-    "对「🔢 重点子网动向」补充更明确的判断与依据；避免流水账式复述，聚焦结论与逻辑。"
+    "对「🔥 必读重点」补充更明确的判断与依据（谁说的、原文如何表述），"
+    "把散落在各条消息里的同一事件合并成一条完整脉络；"
+    "避免流水账式复述，聚焦结论与逻辑。注意：仍然不要输出潜力观察/布局建议板块。"
 )
 
-def call_deepseek(cfg, text_block, system_prompt=None):
+FEEDBACK_HINT = (
+    "\n\n【本次为人工反馈重总结】用户对上一版日报提出了具体意见/事实补充，"
+    "请在严守【事实核查与验证规则】【溯源与禁止臆造】全部条款的前提下，据此修正并重新输出完整日报：\n"
+    "——用户反馈开始——\n%s\n——用户反馈结束——\n"
+    "执行要求：\n"
+    "1. 与反馈直接冲突的旧结论必须删除或改写，不得原样保留；\n"
+    "2. 反馈中提供的事实如果在聊天记录里没有直接对应原文，必须写成「据用户补充」，"
+    "不得表述为群内共识或既定事实；\n"
+    "3. 反馈只用于纠错与补充，不得借机新增无依据的推测内容；\n"
+    "4. 未涉及的部分保持原有结构与依据不变；输出完整日报（不是修改说明）。"
+)
+
+def call_deepseek(cfg, text_block, system_prompt=None, tries=3):
     api_key = cfg["deepseek_api_key"]
     base = cfg.get("deepseek_base_url", "https://api.deepseek.com/v1").rstrip("/")
     model = cfg.get("deepseek_model", "deepseek-chat")
@@ -468,20 +566,31 @@ def call_deepseek(cfg, text_block, system_prompt=None):
             {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
             {"role": "user", "content": text_block},
         ],
-        "temperature": 0.3,
+        "temperature": float(cfg.get("deepseek_temperature", 0)),
         "max_tokens": 2500,
     }).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method="POST")
-    req.add_header("Authorization", "Bearer %s" % api_key)
-    req.add_header("Content-Type", "application/json")
-    try:
-        with _opener().open(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        return data["choices"][0]["message"]["content"].strip()
-    except urllib.error.HTTPError as e:
-        raise RuntimeError("DeepSeek HTTP 错误 %s: %s" % (e.code, e.read().decode("utf-8")[:500]))
-    except Exception as e:
-        raise RuntimeError("DeepSeek 调用失败：%s" % e)
+    last = None
+    for i in range(tries):
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Authorization", "Bearer %s" % api_key)
+        req.add_header("Content-Type", "application/json")
+        try:
+            with _opener().open(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:500]
+            last = "DeepSeek HTTP 错误 %s: %s" % (e.code, detail)
+            # 4xx（key 错误/参数错误）重试无意义，直接抛出
+            if 400 <= e.code < 500 and e.code != 429:
+                raise RuntimeError(last)
+        except Exception as e:
+            last = "DeepSeek 调用失败：%s" % e
+        if i < tries - 1:
+            log("  ↳ DeepSeek 第 %d/%d 次尝试失败（%s），%ds 后重试"
+                % (i + 1, tries, last, 10 * (i + 1)))
+            time.sleep(10 * (i + 1))
+    raise RuntimeError(last)
 
 def build_text_block(channel_name, day, items):
     lines = ["频道：%s    日期：%s    当日实质讨论 %d 条（已按热度排序，仅含子网/成员相关）\n"
@@ -676,6 +785,39 @@ def extract_watchlist(digest):
     block = re.sub(r"\*\*+\s*$", "", block, flags=re.M)
     block = re.sub(r"^\*\*+\s*", "", block, flags=re.M)
     return block.strip()
+
+
+def save_potential(day_label, block):
+    """把潜力观察板块落盘（单日文件 + 累积文件），不推送。"""
+    out_dir = os.path.join(HERE, "exports")
+    os.makedirs(out_dir, exist_ok=True)
+    block = (block or "").strip()
+    safe = re.sub(r"[^0-9A-Za-z_~-]", "_", day_label)
+    one = os.path.join(out_dir, "watchlist_%s.txt" % safe)
+    with open(one, "w", encoding="utf-8") as f:
+        if block:
+            f.write("【%s 潜力观察 · 近期可布局】\n%s\n" % (day_label, block))
+        else:
+            f.write("【%s】当日无明显催化\n" % day_label)
+    allp = os.path.join(out_dir, "watchlist_all.md")
+    with open(allp, "a", encoding="utf-8") as f:
+        f.write("\n---\n### %s\n%s\n" % (day_label, block if block else "（无）"))
+
+
+def generate_potential(cfg, day_str, items):
+    """单独生成潜力观察并落盘（不推送）。失败不影响日报主流程。"""
+    if not items:
+        save_potential(day_str, "")
+        return ""
+    try:
+        text_block = build_text_block(cfg.get("channel_name", "price-talk"), day_str, items)
+        block = call_deepseek(cfg, text_block, system_prompt=POTENTIAL_PROMPT)
+        save_potential(day_str, block)
+        log("潜力观察已单独生成并落盘（%s，不随日报推送）" % day_str)
+        return block
+    except Exception as e:
+        log("潜力观察生成失败（不影响日报）：%s" % e)
+        return ""
 
 
 def save_watchlist(day_label, digest):
@@ -895,15 +1037,68 @@ def run_one_day(cfg, after_dt, before_dt):
                 f.write(digest)
             with open(os.path.join(out_dir, "last_digest.txt"), "w", encoding="utf-8") as f:
                 f.write(digest)
-            # 潜力股沉淀（跨日跟踪）
-            try:
-                save_watchlist(day_str, digest)
-            except Exception as e:
-                log("watchlist 落盘异常（忽略）：%s" % e)
         except Exception:
             pass
+        # 潜力观察单独生成并落盘，只在 /watch 时推送，不随日报一起发
+        try:
+            generate_potential(cfg, day_str, items)
+        except Exception as e:
+            log("潜力观察流程异常（忽略）：%s" % e)
     else:
         log("push_enabled=false，仅打印不推送：\n" + title + "\n" + digest)
+    return digest
+
+
+def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
+    """按用户反馈重新总结某天日报（复用已有导出，不重新导出、不消耗 Discord 配额）。
+    targets: None=双推；列表可含 "tg"/"feishu" 只推指定渠道。
+    返回新 digest 文本。"""
+    feedback = (feedback or "").strip()
+    if not feedback:
+        raise RuntimeError("反馈内容为空")
+    out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
+    sources = [e["json"] for e in _day_exports(cfg, day_str)]
+    if not sources:
+        raise RuntimeError("%s 还没有导出记录，无法重总结（请先跑 /digest）" % day_str)
+    items = merge_substantive(sources)
+    if not items:
+        raise RuntimeError("%s 的导出记录里没有实质消息" % day_str)
+
+    channel_name = cfg.get("channel_name", "price-talk")
+    text_block = build_text_block(channel_name, day_str, items)
+    sys_p = SYSTEM_PROMPT + (FEEDBACK_HINT % feedback)
+    log("按用户反馈重总结（%s，%d 条消息）：%s" % (day_str, len(items), feedback[:80]))
+    digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
+
+    max_per_day, _ = _throttle_cfg(cfg)
+    used = len(_day_exports(cfg, day_str))
+    t_total = len([t for t in (cfg.get("discord_tokens") or []) if t]) \
+        or (1 if cfg.get("discord_token") else 0)
+    digest = (digest or "").rstrip() + \
+        "\n\n---\n令牌：-/%d · 次数：%d/%d（人工反馈重总结，未重新导出）" % (t_total, used, max_per_day)
+    title = "🤖 DTAO price-talk 日报 · %s（按反馈修订）" % day_str
+    want = [x.lower() for x in (targets or ["feishu", "tg"])]
+    if cfg.get("push_enabled", True):
+        if "feishu" in want:
+            try:
+                push_feishu(cfg, title, digest)
+            except Exception as e:
+                log("飞书推送异常：%s" % e)
+        if "tg" in want:
+            try:
+                push_telegram(cfg, title, digest)
+            except Exception as e:
+                log("Telegram 推送异常：%s" % e)
+    else:
+        log("push_enabled=false，仅打印：\n" + digest)
+
+    try:
+        with open(os.path.join(out_dir, "dtao_%s.digest.txt" % day_str), "w", encoding="utf-8") as f:
+            f.write(digest)
+        with open(os.path.join(out_dir, "last_digest.txt"), "w", encoding="utf-8") as f:
+            f.write(digest)
+    except Exception as e:
+        log("日报落盘异常（忽略）：%s" % e)
     return digest
 
 
@@ -932,7 +1127,7 @@ def _latest_digest_date(cfg):
 
 
 def main(args):
-    log("===== DTAO 流水线启动（半自动 / 手动触发）=====")
+    log("===== DTAO 流水线启动 v%s（半自动 / 手动触发）=====" % __version__)
     cfg = load_config()
     global _CFG
     _CFG = cfg
@@ -1022,11 +1217,11 @@ def run_weekly(cfg):
             push_telegram(cfg, title, digest)
         except Exception as e:
             log("Telegram 推送异常：%s" % e)
-        # 潜力股沉淀（周报也纳入跨日跟踪）
+        # 潜力观察单独生成（不随周报推送，只落盘供 /watch 读取）
         try:
-            save_watchlist("week_%s~%s" % (day_first, day_last), digest)
+            generate_potential(cfg, "week_%s~%s" % (day_first, day_last), all_items)
         except Exception as e:
-            log("watchlist 落盘异常（忽略）：%s" % e)
+            log("潜力观察流程异常（忽略）：%s" % e)
     else:
         log("push_enabled=false，仅打印不推送：\n" + title + "\n" + digest)
     log("===== DTAO 周报流水线结束 =====")
@@ -1034,6 +1229,8 @@ def run_weekly(cfg):
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="DTAO price-talk 半自动流水线")
+    ap.add_argument("-V", "--version", action="version",
+                    version="DTAO price-talk pipeline v%s" % __version__)
     ap.add_argument("mode", nargs="?", default="daily", choices=["daily", "weekly", "repush"],
                     help="daily=导出并推送（可跟日期，省略则前一天）；weekly=周报；"
                          "repush=仅补推已生成的日报（不重导/不重算）")
@@ -1055,8 +1252,11 @@ if __name__ == "__main__":
             run_repush(load_config(), day, targets)
         else:
             main(args)
-    except Exception as e:
-        log("❌ 流水线失败：%s" % e)
+    except BaseException as e:
+        # 连 KeyboardInterrupt / 编码错误等非 Exception 也一并记录，绝不再静默退出
+        import traceback as _tb
+        _stack = _tb.format_exc()
+        log("❌ 流水线失败：%s\n%s" % (e, _stack))
         # 失败时也尝试推送告警
         try:
             cfg = load_config()

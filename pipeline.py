@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DTAO price-talk 每日流水线：Discord 导出 -> DeepSeek 总结 -> 飞书 + Telegram 双推
+DTAO price-talk 每日流水线：Discord 导出 -> LLM 总结 -> 飞书 + Telegram 双推
 =============================================================================
 仅依赖 Python 标准库（无需 pip install）。半自动模式：由人工手动触发
 （终端命令 / 在 WorkBuddy 对话里让我执行），也可接入 cron / 任务计划程序。
-默认导出「前一天」指定频道的聊天记录，过滤闲聊，用 DeepSeek 生成中文结构化
+默认导出「前一天」指定频道的聊天记录，过滤闲聊，用一个 OpenAI 兼容的大模型生成中文结构化
 日报，并推送到飞书群机器人和 Telegram Bot。支持指定日期查询、以及 repush 补推。
 
 ========= 首次使用 Setup =========
 1) 复制 config.example.json -> config.json，填入你的密钥：
    - discord_token      : 你的 Discord user token（能读该频道）
    - channel_id         : 频道 ID（默认 DTAO price-talk = 1341812134807343114）
-   - deepseek_api_key   : DeepSeek API key
+   - deepseek_api_key   : 大模型 API key（字段名沿用 deepseek_*，可填任意 OpenAI 兼容服务）
    - feishu_webhook_url : 飞书自定义群机器人 webhook 地址
    - feishu_secret      : 飞书机器人签名密钥（没开签名则留空 "")
    - telegram_bot_token : @BotFather 拿到的 bot token
@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -528,7 +528,7 @@ SYSTEM_PROMPT = (
     "- 忽略：纯表情包、水聊、无信息量的喊单、与 Bittensor 无关的话题。\n"
     "\n"
     "【输出结构（严格按顺序；无内容的小节写「暂无」或省略；所有小节标题都用 **加粗**）】\n"
-    "**🔥 必读重点**（3-7 条，当天最该知道的全部内容；每条一句说清「谁/什么 + 关键结论」，"
+    "**🔥 必读重点**（5-7 条，当天最该知道的全部内容；每条一句说清「谁/什么 + 关键结论」，长度控制在 50-70 字，"
     "并把关键人物、**SN编号/子网名**、事件用 **加粗**；子网异动、上线、rug、机制变更、算力变化都写在这里，"
     "用 ⚠️ 或 ✅ 标注。**本节即子网动向的唯一出口，不要再单列子网汇总小节，避免重复**）\n"
     "**👥 重要人物观点**（点名 **@人物/开发者**，他讲了什么、对什么有影响；与上面重复的事实不用复述，只补充观点与依据；普通群友无关发言不列）\n"
@@ -543,7 +543,21 @@ SYSTEM_PROMPT = (
     "- 用 emoji 标注程度：🔥 重大利好/热点、✅ 已落地、⚠️ 风险/异动、📌 值得关注、❌ 利空。\n"
     "- 每条要点单独成行，用 - 项目符号；小节之间空一行；避免横排长句，适合手机端。\n"
     "- 不要用 # 标题、不要用 > 引用（部分平台不渲染）。\n"
-    "- 客观、不臆测、引用具体编号与名字；全文 1000 字以内。\n"
+    "- 客观、不臆测、引用具体编号与名字。\n"
+    "\n"
+    "【篇幅与精炼（务必遵守，写长了即不合格）】\n"
+    "- **全文 1100-1400 字**（含标点），手机两屏内能读完；写不到下限也不要注水。\n"
+    "- 配额：🔥 必读重点 **5-7 条**，每条 **50-70 字**；👥 重要人物观点 **3-5 条**，每条 **45-60 字**；"
+    "📎 其他细节 **最多 6 条**，每条 **35-50 字**；💡 一句话总结 **40-60 字**。\n"
+    "- 一条只说一件事：先写结论，再写一句依据（谁说的/原文怎么讲），不铺垫、不结尾升华。\n"
+    "- **禁止废话**：不写「值得一提的是」「此外」「总体来看」「可以看出」这类填充词；"
+    "不复述前面已经说过的事实；同一子网的碎片讨论合并成一条，不要拆成多条凑数。\n"
+    "- 数字只留关键的（金额、TAO 数、涨幅、时间窗），次要数字删掉；形容词能删就删。\n"
+    "- **精炼不等于省略**：当天发生的子网事件、机制变更、明确质疑、未解答的疑问都必须保留，"
+    "只是用更短的话说清；宁可删形容词，也不能丢事实。\n"
+    "- **压缩禁区（违反即不合格）**：不能为了短把不同时间的独立线索并成一句；"
+    "人物的身份/所属子网没有直接原文支持时，删掉归属，只写他讲了什么；"
+    "孤立、无上下文的碎片编号（如单独一句「103 capcom」）干脆不写进日报，不许猜它对应谁。\n"
     "\n"
     "【事实核查与验证规则（最高优先级，违反任何一条即为不合格日报）】\n"
     "1. **定性必须有依据**：对「跑路/弃盘/rug/转型/换方向/清仓」等重大定性，只能依据聊天记录中的明确表述或官方公告原文。"
@@ -553,7 +567,8 @@ SYSTEM_PROMPT = (
     "群友的负面猜测若与官方公告矛盾，一律以公告为准；无公告、无明确说法时只能写「原因不明，社区有XX猜测」。\n"
     "3. **排名与最高级必须落地**：凡出现「第一/最大/最高/涨幅冠军」等表述，必须写明**具体的 SN 编号/子网名与数据**（如「SN27 当日 alpha 涨幅第一」）。"
     "若原消息本身没有指明是哪个子网，只能引用原话并标注「（原文未指明具体子网）」，或直接舍弃该条，**严禁脑补编号**。\n"
-    "4. **数字/时间/代号照抄**：SN 编号、代币名、价格、时间等必须照抄原文，禁止改写、补全或张冠李戴；不确定的内容宁可不写。\n"
+    "4. **数字/时间/代号照抄**：SN 编号、代币名、价格、时间等必须照抄原文，禁止改写、补全或张冠李戴；不确定的内容宁可不写。"
+    "引用数字时必须确认**说话人正确**（是谁在什么时间说的），不得把 A 说的数字记到 B 头上。\n"
     "5. **重要事件多来源交叉**：单一消息来源的重大利好/利空，需标注「（单一消息源，待确认）」；"
     "频道内有多人讨论或有链接佐证的才可直接陈述。\n"
     "\n"
@@ -562,7 +577,8 @@ SYSTEM_PROMPT = (
     "找不到原文支撑的，一律删除，不要用常识补全。\n"
     "7. **禁止推断手段、动机与因果**：原文只说「有人卖了某标的」，就只能写「有群友称有人卖出」；"
     "不得自行添加「通过质押卖出」「本人承认卖出」「为了砸盘」「团队授意」等原文没有的手段、动机或因果链。"
-    "原文没说清楚的地方，就写「具体方式/来源原文未说明」。\n"
+    "原文没说清楚的地方，就写「具体方式/来源原文未说明」。"
+    "**也不得给数字补上原文没有的频率与单位**（原文只写「504t chain buys」，就不能写成「每天回购 504 个 TAO」）。\n"
     "8. **禁止拼接与移花接木**：不得把 A 的说法与 B 的说法合成一条因果事实，"
     "也不得把某人的观点安到另一个人头上；不同人、不同时间的表述要分别归属。\n"
     "9. **全文表述一致**：同一事实在「必读重点」「子网动向」「人物观点」等各小节中的定性必须一致，不得一处说「疑似跑路」、另一处说「已确认转型」。\n"
@@ -596,16 +612,26 @@ SYSTEM_PROMPT = (
     "19. **跨消息的推断必须标注**：如果一条结论需要把两条以上消息拼起来才能得出"
     "（典型如「某人说的那个子网，就是另一人单独提到的编号」），必须写成「…（推断，原文未明示）」，"
     "不得使用「确认」「即」「就是」「实为」这类断言词。宁可分开写成两句各自有据的话，也不要合成一句。\n"
+    "20. **禁止给编号绑定子网名**：只有原文明确写过「117 就是 Higgsfield」这类对应关系，才能写成「SN117（Higgsfield）」；"
+    "只是同一段讨论里同时出现编号和项目名，不许用括号绑定。"
+    "凡用「即 / 就是 / 实为 / 后确认 / 确认为 / 对应」把两条消息连起来的句子，一律视为编造嫌疑，必须拆开重写。\n"
+    "21. **一人一句，不许合成**：转述多人信息时，必须分别写清「A 说了什么」「B 说了什么」。"
+    "典型错误是把「A 说很兴奋，因为英伟达投了某项目」和「B 说已向某人确认他认识创始人」合成"
+    "「A 表示 B 已确认该项目拿到投资」——这是编造。原文各自只支持各自的半句，就分开写两句，或者只写有直接依据的那句。\n"
     "\n"
     "【稳定性要求】相同输入应给出相同结论：优先复述原文事实，不做发散联想；"
     "对同一事件的定性只有一种写法，不要在不同表述之间摇摆。\n"
     "\n"
     "【语言风格（面向普通读者）】\n"
-    "- **用大白话写**，像给朋友讲今天发生了什么；少用行话，避免「SOTA」「BD」「NDAs」这类缩写直接甩出来，"
+    "- **用大白话写**，像给朋友讲今天发生了什么；避免「SOTA」「BD」「NDAs」「cabal」这类行话直接甩出来，"
     "必须用时就写成「中文（英文缩写）」的形式。\n"
-    "- **除人名、子网名/项目名、代币名（如 TAO、dTao）保留原文外，其余尽量用中文**；"
-    "不要整句英文照搬，也不要在中文句子里夹杂无必要的英文单词。\n"
-    "- 中文读者不熟悉的英文原话，翻译成中文并在括号里保留关键词即可，不必逐字直译。"
+    "- **只有这些可以保留英文**：SN 编号、子网名/项目名（Engy、Lium、Gittensor、Chutes…）、"
+    "人名/昵称（BROdin、τFIG、5GuRL…）、代币名（TAO、dTAO、Alpha）。\n"
+    "- **其余一律用中文**：emission→排放、buyback→回购、burn→销毁、staking→质押、"
+    "liquidity/LP→流动性池、miner→矿工、validator→验证人、owner→所有者、deregister→注销、"
+    "registration→注册、incentive→激励、revenue→营收、whitelist→白名单。\n"
+    "- 不要把整句英文照搬进中文句子；英文原话只翻成中文，必要关键词放括号里，不逐字直译。\n"
+    "- 除上面允许的专有名词外，一句话里出现两个以上英文单词，基本就是没翻译干净，必须改写。"
 )
 
 # 独立的「潜力观察」生成（只在 /watch 类场景需要，不随日报推送）
@@ -644,7 +670,8 @@ WEEKLY_SYSTEM_PROMPT = (
     "【不要输出潜力观察】布局建议由独立流程生成，周报正文中**不要**出现潜力观察/布局/目标价板块。\n"
     "\n"
     "【排版规范】同日报：关键主体 **加粗**；🔥✅⚠️📌❌ 标注程度；- 项目符号、空行分段、手机端友好；"
-    "不用 # 标题、不用 > 引用；客观不臆测，引用具体编号与名字；全文 1000 字以内。\n"
+    "不用 # 标题、不用 > 引用；客观不臆测，引用具体编号与名字；全文 1300-1600 字，"
+    "每条 50-70 字，一条只说一件事，禁写填充词与重复内容。\n"
     "【事实核查规则】同日报【事实核查与验证规则】：重大定性以最新官方澄清为准；"
     "排名/最高级必须落到具体 SN 编号与数据，原文未指明就标「（原文未指明）」或舍弃；数字/代号照抄，严禁脑补。"
 )
@@ -655,6 +682,7 @@ DEEPEN_HINT = (
     "**不得新增「重点子网动向」「潜力观察」「布局建议」等任何额外小节**。"
     "在此结构内做更深入的分析：对「🔥 必读重点」补充更明确的判断与依据（谁说的、原文如何表述），"
     "把散落在各条消息里的同一事件合并成一条完整脉络；避免流水账式复述，聚焦结论与逻辑。"
+    "**长度仍受【篇幅与精炼】约束（1100-1400 字），不要因为「更深入」而写成 2000 字以上**。"
 )
 
 FEEDBACK_HINT = (
@@ -669,6 +697,24 @@ FEEDBACK_HINT = (
     "4. 未涉及的部分保持原有结构与依据不变；输出完整日报（不是修改说明）。"
 )
 
+# 第二遍：对照原文校错（数字/归属/定性/残留英文），只纠错不改结构
+VERIFY_PROMPT = (
+    "你是日报校对员，不是作者。用户消息里包含【原始聊天记录】和一份【日报初稿】。"
+    "你的任务：逐条对照原文核对初稿，只做纠错与压缩，不改章节结构，输出修正后的完整日报。\n"
+    "\n【必须核对的四类错误】\n"
+    "1. **数字与人名**：每个数字（金额、TAO 数、百分比、时间）都要回原文确认，并确认**说话人正确**——"
+    "初稿最常见的错误就是把 A 说的数字写成 B 说的。原文对不上就删掉这个数字，或改成正确的归属。\n"
+    "2. **人物—子网归属**：初稿写「某人的子网是 SNxx」「某人的子网被关停/注销」时，"
+    "必须有同一条消息或紧邻几句直接支持；如果只是靠相隔很久的孤立碎片（例如单独一句「103 capcom」）推出来的，"
+    "一律删掉归属，只保留「某成员称其子网……（原文未指明编号）」。\n"
+    "3. **无依据的定性**：原文没有明说的手段、动机、因果（如「为了砸盘」「团队授意」「正在预热」），"
+    "删掉或改成原文的表述；单来源的重大利空/利好要标「（单一消息源，待确认）」。\n"
+    "4. **语言**：除 SN 编号、子网名、人名、代币名（TAO、dTAO、Alpha）外，不得残留英文单词，一律译成中文。\n"
+    "\n【输出要求】只输出修正后的四个小节：🔥 必读重点 / 👥 重要人物观点 / 📎 其他细节 / 💡 一句话总结；"
+    "篇幅 1100-1400 字；不要输出核对说明、不要写「已修改」之类的话；"
+    "**不确定的内容宁可删除，也不要保留猜测**。"
+)
+
 # ----------------------------------------------------------------------------
 # 输出结构兜底清洗：无论模型返回什么，都强制剔除不该出现在日报里的板块
 # （历史上出现过模型自行补出「潜力观察」「重点子网动向」，或旧代码残留提示词导致
@@ -678,6 +724,26 @@ _SECTION_WORDS = ("必读重点", "重点子网动向", "重要人物观点", "�
                   "可布局", "其他细节", "一句话总结", "本周核心趋势", "风险汇总")
 # 日报 / 周报里禁止出现的板块
 _FORBIDDEN_SECTIONS = ("重点子网动向", "潜力观察", "可布局")
+
+
+def polish_digest(cfg, text_block, draft):
+    """第二遍校对（可关：config.llm_verify_pass=false）：
+    让模型带着原文再读一遍初稿，专门纠「数字记错人」「人物-子网归属靠碎片推出来」
+    「原文没有的定性」「残留英文」四类错。校对失败一律保留初稿，不影响推送。"""
+    if not draft or not cfg.get("llm_verify_pass", True):
+        return draft
+    try:
+        fixed = call_llm(cfg, text_block + "\n\n【日报初稿】\n" + draft, system_prompt=VERIFY_PROMPT)
+        fixed = sanitize_digest(fixed or "")
+        n = len(re.sub(r"\s", "", fixed))
+        if n < 500:
+            log("校对稿过短（%d 字），保留初稿" % n)
+            return draft
+        log("校对完成：数字/人物-子网归属/定性/英文 已按原文复核（%d 字）" % n)
+        return fixed
+    except Exception as e:
+        log("校对失败（保留初稿继续推送）：%s" % e)
+        return draft
 
 
 def _section_title(line):
@@ -754,6 +820,162 @@ def _attribution_ok(name, num, idx_of, sn_at, window, total):
     return False
 
 
+# 「…（后确认为 SN103）」这类断言式绑定：模型最爱在这里编造归属
+_LINK_ASSERT = re.compile(
+    r"[（(][^（）()\n]{0,12}?(?:即|就是|实为|后确认|最终确认|确认为|对应|指的是)"
+    r"[^（）()\n]{0,12}?SN\s?(\d{1,3})[^（）()\n]{0,8}[)）]")
+_INLINE_ASSERT = re.compile(r"[，,；;]\s*(?:即|也就是|实为)\s*\**SN\s?(\d{1,3})\**")
+
+
+def scrub_unsupported_links(digest, items, window=2):
+    """兜底：若「A 的子网就是 SNxx」这类断言在原文查无实据，就把它降级成「（原文未指明编号）」。
+    只处理上面两种高风险句式，不动其他内容。返回 (新文本, 改动条数)。"""
+    if not digest or not items:
+        return digest, 0
+    authors, seen = [], set()
+    for _r, _t, _a, _c in items:
+        if _a and _a not in seen:
+            seen.add(_a)
+            authors.append(_a)
+    authors.sort(key=len, reverse=True)
+    idx_of, sn_at = {}, []
+    for i, (_r, _t, _a, _c) in enumerate(items):
+        idx_of.setdefault(_a, []).append(i)
+        sn_at.append({int(x) for x in re.findall(r"(?i)\b(\d{1,3})\b", _c)})
+
+    fixed, n = [], 0
+    for line in digest.split("\n"):
+        def ok(num):
+            names = [a for a in authors if a in line]
+            if not names:
+                return True
+            return any(_attribution_ok(nm, num, idx_of, sn_at, window, len(items)) for nm in names)
+
+        def repl_paren(m):
+            nonlocal n
+            if ok(int(m.group(1))):
+                return m.group(0)
+            n += 1
+            return "（原文未指明编号）"
+
+        def repl_inline(m):
+            nonlocal n
+            if ok(int(m.group(1))):
+                return m.group(0)
+            n += 1
+            return ""
+
+        new = _LINK_ASSERT.sub(repl_paren, line)
+        new = _INLINE_ASSERT.sub(repl_inline, new)
+        fixed.append(new)
+    if n:
+        log("归属兜底：%d 处「某人→SN」断言在原文查无实据，已降级为「原文未指明编号」" % n)
+    return "\n".join(fixed), n
+
+
+# 常见英文术语 -> 中文（人名/子网名/代币名不动，避免误伤）
+_EN_TERMS = [
+    (r"(?i)\bcrater(?:ing|ed)?\b", "暴跌"),
+    (r"(?i)\bcrash(?:ing|ed)?\b", "暴跌"),
+    (r"(?i)\bAPY\b", "年化收益率"),
+    (r"(?i)\bAPR\b", "年化收益率"),
+    (r"(?i)\bbacking\b", "资本支持"),
+    (r"(?i)\bbuybacks?\b", "回购"),
+    (r"(?i)\bbuy(?:ing)?\s+back\b", "回购"),
+    (r"(?i)\bemissions?\b", "排放"),
+    (r"(?i)\bburn(?:ing|ed)?\b", "销毁"),
+    (r"(?i)\bstaking\b", "质押"),
+    (r"(?i)\bliquidity\b", "流动性"),
+    (r"(?i)\bminers?\b", "矿工"),
+    (r"(?i)\bvalidators?\b", "验证人"),
+    (r"(?i)\bowners?\b", "所有者"),
+    (r"(?i)\bdereg\w*\b", "注销"),
+    (r"(?i)\brevenue\b", "营收"),
+    (r"(?i)\bwhitelist\b", "白名单"),
+    (r"(?i)\bincentives?\b", "激励"),
+    (r"(?i)\bsubnets?\b", "子网"),
+    (r"(?i)\bpre[- ]?sale\b", "预售"),
+    (r"(?i)\bairdrop\b", "空投"),
+    (r"(?i)\brug(?:ged|pull)?\b", "跑路"),
+]
+
+
+def reduce_english(text):
+    """把日报里残留的通用英文术语换成中文；人名/子网名/代币名不在替换表内，不会被误改。"""
+    if not text:
+        return text
+    s = text
+    for pat, zh in _EN_TERMS:
+        s = re.sub(pat, zh, s)
+    # 清掉替换后留下的空括号与重复括号（如「暴跌（暴跌）」→「暴跌」）
+    s = re.sub(r"[（(][\s,，、/]*[)）]", "", s)
+    s = re.sub(r"([\u4e00-\u9fa5]{2,5})[（(]\1[)）]", r"\1", s)
+    # 英文原词被翻成中文后，括号里只剩同一个中文词，直接去掉整个括号
+    s = re.sub(r"[（(]\s*(?:暴跌|回购|排放|质押|销毁|流动性|矿工|验证人|所有者|注销|营收|白名单|激励|子网|预售|空投|跑路|年化收益率|资本支持)\s*[)）]", "", s)
+    s = re.sub(r"[，,]{2,}", "，", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s
+
+
+def _bigrams(s):
+    s = re.sub(r"[\s*\-·，。、；：:（）()\[\]【】]", "", s)
+    return {s[i:i + 2] for i in range(len(s) - 1)} if len(s) > 1 else {s}
+
+
+def dedupe_bullets(text, threshold=0.45):
+    """跨小节去重：同一件事在「必读重点」和「其他细节」里各写一遍时，保留先出现的那条。
+    只跟**其他小节**的要点比（同小节内的并列要点通常各说一件事，不动），
+    用字符二元组 Jaccard 相似度判断，只删高度重复的行。"""
+    kept, out, dropped = [], [], 0
+    section = -1
+    for line in text.split("\n"):
+        s = line.strip()
+        if _section_title(line) is not None:
+            section += 1
+        if s.startswith(("-", "•")) and len(s) > 24:
+            bg = _bigrams(s)
+            dup = False
+            for kg, kl, sec in kept:
+                if sec == section:
+                    continue
+                inter = len(bg & kg)
+                if not inter:
+                    continue
+                jac = inter / max(1, len(bg | kg))
+                cont = inter / max(1, min(len(bg), len(kg)))
+                # 相似度高，或「短的那条几乎被长的那条覆盖」且两者长度接近，即视为重复
+                if jac >= threshold or (cont >= 0.75 and len(bg) <= kl * 1.15):
+                    dup = True
+                    break
+            if dup:
+                dropped += 1
+                continue
+            kept.append((bg, len(bg), section))
+        out.append(line)
+    if dropped:
+        log("去重：删除 %d 条与其他小节重复的要点" % dropped)
+    return "\n".join(out)
+
+
+def _tidy_layout(text):
+    """美化：列表项之间不空行（模型常把每条要点之间都空一行，手机上会拉得很长）。"""
+    lines = [ln.rstrip() for ln in text.split("\n")]
+    out = []
+    for i, ln in enumerate(lines):
+        if ln.strip() == "" and 0 < i < len(lines) - 1:
+            prev = next((x for x in reversed(out) if x.strip()), "")
+            nxt = None
+            for j in range(i + 1, len(lines)):
+                if lines[j].strip():
+                    nxt = lines[j]
+                    break
+            if prev.strip().startswith(("-", "•")) and nxt and nxt.strip().startswith(("-", "•")):
+                continue
+        out.append(ln)
+    txt = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", txt).strip()
+
+
 def sanitize_digest(text):
     """删除日报中不应出现的板块（潜力观察 / 重点子网动向），返回清洗后的文本。"""
     if not text:
@@ -772,6 +994,9 @@ def sanitize_digest(text):
         out.append(line)
     txt = re.sub(r"\n[ \t]+\n", "\n\n", "\n".join(out))
     txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    txt = reduce_english(txt)
+    txt = dedupe_bullets(txt)
+    txt = _tidy_layout(txt)
     if dropped:
         log("结构清洗：已剔除多余板块 %s" % "、".join(dropped))
     return txt
@@ -952,6 +1177,27 @@ def prettify_headers(text):
     return "\n".join(out)
 
 
+# 模型显示名：底部署名要跟着 config 里的 deepseek_model 走，不能写死
+_MODEL_LABELS = {
+    "kimi-k3": "Kimi K3",
+    "kimi-k2": "Kimi K2",
+    "kimi-k2-turbo-preview": "Kimi K2",
+    "deepseek-chat": "DeepSeek V3",
+    "deepseek-reasoner": "DeepSeek R1",
+    "gpt-4o": "GPT-4o",
+    "gpt-4o-mini": "GPT-4o mini",
+    "claude-sonnet-4-5": "Claude Sonnet 4.5",
+    "glm-4.6": "GLM-4.6",
+    "qwen-max": "Qwen Max",
+}
+
+
+def model_label(cfg):
+    """返回用于底部署名的模型名（读 config.deepseek_model，未知型号原样显示）。"""
+    raw = str((cfg or {}).get("deepseek_model") or "deepseek-chat").strip()
+    return _MODEL_LABELS.get(raw.lower(), raw)
+
+
 def push_feishu(cfg, title, digest):
     url = cfg.get("feishu_webhook_url")
     if not url:
@@ -965,13 +1211,14 @@ def push_feishu(cfg, title, digest):
     # 正文顶部放「加粗标题 + 日期行」，与正文合并进同一个文本块（不加分隔线），
     # 这样在飞书手机端长按复制时，标题+日期+正文会被一并选中，日报才有完整意义
     title_line = "**%s**" % title
-    date_line = ("📅 %s　·　📱 手机端优化　·　🤖 DeepSeek 生成" % day) if day else "📱 手机端优化　·　🤖 DeepSeek 生成"
+    label = model_label(cfg)
+    date_line = ("📅 %s　·　📱 手机端优化　·　🤖 %s 生成" % (day, label)) if day else ("📱 手机端优化　·　🤖 %s 生成" % label)
     # 标题、日期、正文合为一个 lark_md 块（以空行分隔，不用 hr），保证整段可复制
     combined = "%s\n%s\n\n%s" % (title_line, date_line, body)
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": combined}},
         {"tag": "hr"},
-        {"tag": "note", "content": "DTAO price-talk 日报 · 由 DeepSeek 生成"},
+        {"tag": "note", "content": "DTAO price-talk 日报 · 由 %s 生成" % label},
     ]
     card = {
         "msg_type": "interactive",
@@ -1006,7 +1253,8 @@ def push_telegram(cfg, title, digest):
     body = _tg_md(prettify_headers(digest))
     sep = "────────────"
     t = _tg_md(title)
-    full = "*%s*\n%s\n\n%s\n\n%s\n🤖 由 DeepSeek 生成 · DTAO price-talk 日报" % (t, sep, body, sep)
+    full = "*%s*\n%s\n\n%s\n\n%s\n🤖 由 %s 生成 · DTAO price-talk 日报" % (
+        t, sep, body, sep, model_label(cfg))
     for i, part in enumerate(chunk_text(full, 3900), 1):
         payload = {"chat_id": chat_id, "text": part,
                    "parse_mode": "Markdown", "disable_web_page_preview": True}
@@ -1319,6 +1567,7 @@ def run_one_day(cfg, after_dt, before_dt):
         log("过滤后保留实质消息 %d 条（%s，%s）" % (len(items), day_str, mode_label))
 
     # 2) 总结
+    text_block = ""
     if not items:
         digest = "📭 %s 频道 %s 当日无与 Bittensor 子网/重要成员相关的实质讨论。" % (channel_name, day_str)
     else:
@@ -1328,6 +1577,13 @@ def run_one_day(cfg, after_dt, before_dt):
             sys_p = SYSTEM_PROMPT + DEEPEN_HINT
         digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
     digest = sanitize_digest(digest)
+    digest = polish_digest(cfg, text_block, digest)
+    digest, _ = scrub_unsupported_links(digest, items)
+    _len = len(re.sub(r"\s", "", digest or ""))
+    if _len > 1700:
+        log("⚠️ 篇幅偏长：%d 字（目标 1100-1400），如嫌冗长可在 TG 用 /retry 加一句「更精炼」" % _len)
+    else:
+        log("篇幅：%d 字（目标 1100-1400）" % _len)
 
     # 末尾标注：本次使用的 token 编号（第几个/共几个）+ 当日导出次数（已用/每日上限）
     # 令牌 n/m：本次随机抽中的是第 n 个，池中共 m 个；复用未导出时显示为「-」
@@ -1413,6 +1669,8 @@ def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
     log("按用户反馈重总结（%s，%d 条消息）：%s" % (day_str, len(items), feedback[:80]))
     digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
     digest = sanitize_digest(digest)
+    digest = polish_digest(cfg, text_block, digest)
+    digest, _ = scrub_unsupported_links(digest, items)
 
     max_per_day, _ = _throttle_cfg(cfg)
     used = len(_day_exports(cfg, day_str))

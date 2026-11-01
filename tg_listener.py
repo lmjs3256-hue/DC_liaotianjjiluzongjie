@@ -242,11 +242,16 @@ def _resolve_day(ds):
 
 
 def _feedback_worker(day, feedback, chat_id):
-    """后台线程：按用户反馈重总结并双推。"""
+    """后台线程：按用户反馈重总结并双推。
+
+    必须走**独立子进程**（不能像早期版本那样直接调用 P.resummarize_with_feedback）：
+    监听是常驻进程，import 时已把 pipeline.py 当时的代码固化在内存里，
+    之后修改提示词/模板都不会生效。历史事故：/retry 用了旧提示词，
+    把日报里已删除的「重点子网动向」「潜力观察」板块又写了回来。
+    """
     try:
-        send(chat_id, "🧠 正在按你的反馈重总结 %s …" % day)
-        P.resummarize_with_feedback(P._CFG, day, feedback)
-        send(chat_id, "✅ 已按反馈重新总结并推送（%s）" % day)
+        send(chat_id, "🧠 正在按你的反馈重总结 %s（独立进程，使用最新提示词）…" % day)
+        _run_pipeline_sync(["resummarize", day, feedback], chat_id)
     except Exception as e:
         log("反馈重总结失败：%s" % e)
         try:
@@ -340,6 +345,10 @@ def handle(text, chat_id):
 def main():
     cfg = P.load_config()
     P._CFG = cfg
+    # 记录本次加载的 pipeline 版本：常驻进程会把代码固化在内存里，
+    # 之后若 pipeline.py 有更新，必须重启监听才会同步（这条日志便于排查）
+    log("已加载 pipeline 模块 v%s（若 pipeline.py 更新，请重启监听）"
+        % getattr(P, "__version__", "?"))
     token = cfg.get("telegram_bot_token")
     if not token:
         log("未配置 telegram_bot_token，退出"); return

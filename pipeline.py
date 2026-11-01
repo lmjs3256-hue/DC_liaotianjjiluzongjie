@@ -61,9 +61,10 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 import urllib.request
 import urllib.error
+import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -91,6 +92,48 @@ def _opener():
         http, https = sp
         return urllib.request.build_opener(urllib.request.ProxyHandler({"http": http, "https": https}))
     return urllib.request.build_opener()
+
+
+# 国内大模型 API 直连白名单：这些服务不需要翻墙，走 Clash 反而会被节点 502 掐断。
+# 可用 config.json 的 no_proxy_hosts 追加（例如自建的 OpenAI 兼容网关）。
+_DIRECT_HOSTS = (
+    "api.deepseek.com",
+    "api.moonshot.cn",
+    "api.moonshot.ai",
+    "dashscope.aliyuncs.com",
+    "open.bigmodel.cn",
+    "ark.cn-beijing.volces.com",
+    "qianfan.baidubce.com",
+)
+
+
+def _host_of(url):
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _is_direct_host(host):
+    if not host:
+        return False
+    hosts = list(_DIRECT_HOSTS)
+    if _CFG:
+        hosts += [str(h).lower() for h in (_CFG.get("no_proxy_hosts") or []) if h]
+    return any(host == h or host.endswith("." + h) for h in hosts)
+
+
+def _opener_for(url):
+    """按目标域名选 opener：国内 LLM 直连，其余（Discord/Telegram）走代理。
+
+    代理抖动时，国内 API 请求被硬塞进 Clash 会出现 502，导致「总结失败」，
+    而它其实根本不需要代理。这里按域名分流，能消掉一大半莫名失败。
+    """
+    host = _host_of(url)
+    if _is_direct_host(host) and not (_CFG and _CFG.get("llm_direct") is False):
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _opener()
+
 
 def _windows_system_proxy():
     """读取 Windows 系统代理（注册表 Internet Settings），返回 (http_proxy, https_proxy) 或 None。
@@ -595,10 +638,11 @@ WEEKLY_SYSTEM_PROMPT = (
 )
 
 DEEPEN_HINT = (
-    "\n\n【本次为重总结 / 合并总结】请在保持全部结构的前提下做更深入、更细致的分析："
-    "对「🔥 必读重点」补充更明确的判断与依据（谁说的、原文如何表述），"
-    "把散落在各条消息里的同一事件合并成一条完整脉络；"
-    "避免流水账式复述，聚焦结论与逻辑。注意：仍然不要输出潜力观察/布局建议板块。"
+    "\n\n【本次为重总结 / 合并总结】严格按上面【输出结构】的四个小节输出："
+    "🔥 必读重点 / 👥 重要人物观点 / 📎 其他细节 / 💡 一句话总结，"
+    "**不得新增「重点子网动向」「潜力观察」「布局建议」等任何额外小节**。"
+    "在此结构内做更深入的分析：对「🔥 必读重点」补充更明确的判断与依据（谁说的、原文如何表述），"
+    "把散落在各条消息里的同一事件合并成一条完整脉络；避免流水账式复述，聚焦结论与逻辑。"
 )
 
 FEEDBACK_HINT = (
@@ -612,6 +656,54 @@ FEEDBACK_HINT = (
     "3. 反馈只用于纠错与补充，不得借机新增无依据的推测内容；\n"
     "4. 未涉及的部分保持原有结构与依据不变；输出完整日报（不是修改说明）。"
 )
+
+# ----------------------------------------------------------------------------
+# 输出结构兜底清洗：无论模型返回什么，都强制剔除不该出现在日报里的板块
+# （历史上出现过模型自行补出「潜力观察」「重点子网动向」，或旧代码残留提示词导致
+#  重复板块被写回，这里做最后一道硬性过滤）
+# ----------------------------------------------------------------------------
+_SECTION_WORDS = ("必读重点", "重点子网动向", "重要人物观点", "潜力观察",
+                  "可布局", "其他细节", "一句话总结", "本周核心趋势", "风险汇总")
+# 日报 / 周报里禁止出现的板块
+_FORBIDDEN_SECTIONS = ("重点子网动向", "潜力观察", "可布局")
+
+
+def _section_title(line):
+    """若该行是「**xxx**」形式的板块标题，返回标题文字，否则 None。"""
+    s = (line or "").strip()
+    if not s.startswith("**"):
+        return None
+    m = re.match(r"^\*\*([^*\n]{1,40})\*\*", s)
+    if not m:
+        return None
+    title = m.group(1)
+    for w in _SECTION_WORDS:
+        if w in title:
+            return title
+    return None
+
+
+def sanitize_digest(text):
+    """删除日报中不应出现的板块（潜力观察 / 重点子网动向），返回清洗后的文本。"""
+    if not text:
+        return text
+    out, skipping, dropped = [], False, []
+    for line in text.split("\n"):
+        title = _section_title(line)
+        if title is not None:
+            if any(w in title for w in _FORBIDDEN_SECTIONS):
+                skipping = True
+                dropped.append(title)
+                continue
+            skipping = False
+        if skipping:
+            continue
+        out.append(line)
+    txt = re.sub(r"\n[ \t]+\n", "\n\n", "\n".join(out))
+    txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    if dropped:
+        log("结构清洗：已剔除多余板块 %s" % "、".join(dropped))
+    return txt
 
 def call_deepseek(cfg, text_block, system_prompt=None, tries=3):
     api_key = cfg["deepseek_api_key"]
@@ -628,12 +720,13 @@ def call_deepseek(cfg, text_block, system_prompt=None, tries=3):
         "max_tokens": 2500,
     }).encode("utf-8")
     last = None
+    op = _opener_for(url)   # 国内 LLM 直连、其余走代理，避免被 Clash 节点 502
     for i in range(tries):
         req = urllib.request.Request(url, data=body, method="POST")
         req.add_header("Authorization", "Bearer %s" % api_key)
         req.add_header("Content-Type", "application/json")
         try:
-            with _opener().open(req, timeout=120) as resp:
+            with op.open(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             return data["choices"][0]["message"]["content"].strip()
         except urllib.error.HTTPError as e:
@@ -1097,6 +1190,7 @@ def run_one_day(cfg, after_dt, before_dt):
         if action in ("resummarize", "merge"):
             sys_p = SYSTEM_PROMPT + DEEPEN_HINT
         digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
+    digest = sanitize_digest(digest)
 
     # 末尾标注：本次使用的 token 编号（第几个/共几个）+ 当日导出次数（已用/每日上限）
     # 令牌 n/m：本次随机抽中的是第 n 个，池中共 m 个；复用未导出时显示为「-」
@@ -1170,6 +1264,7 @@ def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
     sys_p = SYSTEM_PROMPT + (FEEDBACK_HINT % feedback)
     log("按用户反馈重总结（%s，%d 条消息）：%s" % (day_str, len(items), feedback[:80]))
     digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
+    digest = sanitize_digest(digest)
 
     max_per_day, _ = _throttle_cfg(cfg)
     used = len(_day_exports(cfg, day_str))
@@ -1308,6 +1403,7 @@ def run_weekly(cfg):
     day_last = files[0].split("dtao_")[1].split(".")[0]
     text_block = build_text_block("price-talk(周报)", "%s~%s" % (day_first, day_last), all_items)
     digest = call_deepseek(cfg, text_block, WEEKLY_SYSTEM_PROMPT) if all_items else "本周无与 Bittensor 子网/重要成员相关的实质讨论。"
+    digest = sanitize_digest(digest)
     title = "🤖 DTAO price-talk 周报 · %s~%s" % (day_first, day_last)
     if cfg.get("push_enabled", True):
         try:
@@ -1332,11 +1428,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="DTAO price-talk 半自动流水线")
     ap.add_argument("-V", "--version", action="version",
                     version="DTAO price-talk pipeline v%s" % __version__)
-    ap.add_argument("mode", nargs="?", default="daily", choices=["daily", "weekly", "repush"],
+    ap.add_argument("mode", nargs="?", default="daily", choices=["daily", "weekly", "repush", "resummarize"],
                     help="daily=导出并推送（可跟日期，省略则前一天）；weekly=周报；"
-                         "repush=仅补推已生成的日报（不重导/不重算）")
+                         "repush=仅补推已生成的日报（不重导/不重算）；"
+                         "resummarize=按反馈重总结（日期 反馈内容 [tg|feishu]）")
     ap.add_argument("extra", nargs="*",
-                    help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）")
+                    help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）；"
+                         "resummarize: 日期 反馈内容 [tg|feishu]")
     args = ap.parse_args()
     try:
         if args.mode == "weekly":
@@ -1351,6 +1449,20 @@ if __name__ == "__main__":
                     raise RuntimeError("没有可用的日报文件，请先跑 /digest 生成一次。")
             targets = [t for t in args.extra[1:] if t in ("feishu", "tg")] or ["feishu", "tg"]
             run_repush(load_config(), day, targets)
+        elif args.mode == "resummarize":
+            if len(args.extra) < 2:
+                raise RuntimeError(
+                    "resummarize 需要：日期 反馈内容 [tg|feishu]\n"
+                    "例如：python pipeline.py resummarize 2026-10-31 \"Namikaze 运营哪个子网需核实\"")
+            day = args.extra[0]
+            rest = list(args.extra[1:])
+            targets = []
+            while rest and rest[-1].lower() in ("feishu", "tg"):
+                targets.insert(0, rest.pop().lower())
+            feedback = " ".join(rest).strip()
+            if not feedback:
+                raise RuntimeError("反馈内容为空")
+            resummarize_with_feedback(load_config(), day, feedback, targets or None)
         else:
             main(args)
     except BaseException as e:

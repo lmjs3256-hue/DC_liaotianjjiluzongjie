@@ -4,7 +4,7 @@
 > 用 AI（DeepSeek）总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.0.1** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.0.2** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 
 ## ✨ 核心特性
 
@@ -14,6 +14,7 @@
 - 👤 **人名保真**：输入里带「当日发言者名单」，模型只能从中取名字、逐字照抄（含 `τFIG`、`kτwτ` 等特殊字符）；生成后还会自动核对，发现名单外的名字就在 `run.log` 告警
 - 🧷 **禁止臆造（溯源规则）**：每条结论必须能在聊天原文找到出处；不确定就写「原文未提及」；「第一/最大」等排名必须落到具体 SN 编号，原文没指明就标注或舍弃；重大定性（跑路/转型等）以官方最新澄清为准，群友猜测不得当结论
 - 🎯 **结论稳定**：`deepseek_temperature` 默认 **0**，同一份记录重复总结不会一天一个说法
+- 🧱 **结构硬过滤**：日报/周报生成后强制剔除「重点子网动向」「潜力观察」等不应出现的板块，模型写歪了也推不出去
 - ✍️ **TG 反馈重总结（/retry）**：日报有错或你有补充事实，直接在群里发 `/retry <你的反馈>`，AI 按你的反馈重写并重推，不用改代码、不用重导出
 - 🗣 **大白话风格**：少用行话，除人名/子网名/代币名外尽量用中文，「SOTA」这类缩写写成「中文（英文缩写）」
 - 📱 **手机端友好排版**：飞书卡片铺满屏宽，标题+日期与正文合并在**同一可复制文本块**（长按整段选中）
@@ -129,6 +130,8 @@ python pipeline.py
   "deepseek_base_url": "https://api.deepseek.com/v1",
   "deepseek_model": "deepseek-chat",
   "deepseek_temperature": 0,                       // 0=结论最稳定（推荐）；调高会更发散，同一份记录可能给出不同说法
+  "llm_direct": true,                              // 国内大模型 API 直连、不走代理（默认开，避免被 Clash 节点掐断）
+  "no_proxy_hosts": [],                            // 追加要直连的域名，如自建的 OpenAI 兼容网关
   "proxy": "",                                     // 留空=自动用系统代理(Clash)
   "feishu_webhook_url": "★飞书机器人 Webhook 地址",
   "feishu_secret": "★飞书机器人密钥(开启签名校验才需要)",
@@ -204,9 +207,10 @@ python pipeline.py daily 昨日              # 「昨日/昨天/最新」等中�
 python pipeline.py weekly                 # 生成本周周报
 python pipeline.py repush 2026-10-23      # 只把已生成的日报重推一遍(不重导)
 python pipeline.py repush 2026-10-23 tg   # 只重推 TG
+python pipeline.py resummarize 2026-10-23 "orange 说的第一涨幅是 SN27"  # 按反馈重总结(不重导)
 python pipeline.py --version              # 查看当前版本号
 
-# ⚠️ 注意：第一个参数只能是 daily / weekly / repush 之一。
+# ⚠️ 注意：第一个参数只能是 daily / weekly / repush / resummarize 之一。
 # 直接写 python pipeline.py 2026-10-23 会报 argument mode: invalid choice。
 ```
 
@@ -340,10 +344,30 @@ A：两种办法：① `deepseek_temperature` 设为 `0`（默认已是 0），�
 AI 会按你的补充重写并重推，不会把你的话当成群内事实。
 
 **Q：总结用的是哪个模型？可以换吗？**
-A：默认 `deepseek-chat`（DeepSeek V3），改 `config.json` 里的 `deepseek_model` 即可换。
-想用推理更强的可填 `deepseek-reasoner`（更慢、更贵）。
-但要注意：**多数「漏信息 / 说错」并不是模型能力问题**，而是喂进去的数据被过滤掉或顺序打乱了
+A：默认 `deepseek-chat`（DeepSeek V3 系列）。换模型只改 `config.json` 三个字段，接口是 OpenAI 兼容格式：
+
+| 想换成 | `deepseek_base_url` | `deepseek_model` | 备注 |
+|---|---|---|---|
+| DeepSeek（默认，最便宜） | `https://api.deepseek.com/v1` | `deepseek-chat` | 国内直连，无需代理 |
+| DeepSeek 强推理 | 同上 | `deepseek-reasoner` | 更慢更贵；推理模型对温度不敏感，结构可能更啰嗦 |
+| Kimi（长文召回最强） | `https://api.moonshot.cn/v1` | `kimi-k2-0905-preview` 等 | 中文更自然、长列表不易漏项；需在 Moonshot 开放平台申请 key |
+| 通义千问（稳、便宜） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` / `qwen-max` | 阿里云百炼，稳定性好 |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus` | 结构化输出较听话 |
+
+> 具体模型名请以各平台文档为准（模型迭代快，名字会变）。只要接口是 OpenAI 兼容的 `/chat/completions`，
+> 本项目都能直接用；`llm_direct` 白名单里已包含上面这些国内域名，加了新平台记得往 `no_proxy_hosts` 补域名。
+> 换完模型建议先用 `python pipeline.py daily 2026-10-30` 之类跑一天历史数据对比，别直接在生产日上看效果。
+
+但先提醒一句：**多数「漏信息 / 说错」并不是模型能力问题**，而是喂进去的数据被过滤掉或顺序打乱了
 （v1.0.1 已修：裸数字子网号不再被丢、保留上下文、按时间排序）。先确认输入完整，再考虑换模型。
+
+**Q：`/retry` 之后日报反而变差，还多出「重点子网动向」「潜力观察」两个板块？**
+A：这是 v1.0.2 修掉的问题。原因是监听是常驻进程，`import pipeline` 时就把当时的代码固化在内存里，
+早期 `/retry` 在监听**进程内**调用重总结函数，用的是启动那一刻的旧提示词和旧过滤规则
+（现象：消息量从 156 条掉回 69 条，多出早已删除的板块）。
+现在 `/retry` 改为启动**独立子进程**执行（`pipeline.py resummarize 日期 反馈`），永远用磁盘上的最新代码；
+另外日报/周报输出都加了一层结构硬过滤，模型就算硬写「潜力观察」也会被剔除。
+**升级到 v1.0.2 后需要重启一次监听**，`/retry` 才会走新路径。
 
 **Q：日报里出现的人名，我在 Discord 里搜不到？**
 A：日报里的人名全部取自消息原始 `author` 字段（服务器昵称），不改写、不音译，生成后还会自动与

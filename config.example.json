@@ -16,6 +16,8 @@
   "deepseek_base_url": "https://api.deepseek.com/v1",
   "deepseek_model": "deepseek-chat",
   "deepseek_temperature": 0,
+  "llm_direct": true,
+  "no_proxy_hosts": [],
   "proxy": "",
   "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/PASTE_HOOK_ID",
   "feishu_secret": "",

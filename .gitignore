@@ -1,5 +1,8 @@
 # ===== 敏感信息（绝对不要上传到 GitHub）=====
 config.json
+config.json.bak*
+*.bak
+*.bak_*
 
 # ===== 日志 =====
 run.log

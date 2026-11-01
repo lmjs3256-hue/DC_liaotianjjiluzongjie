@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -584,6 +584,18 @@ SYSTEM_PROMPT = (
     "16. **人名只能从「当日发言者名单」里取**：名字必须与名单**逐字一致**（含大小写与特殊字符，"
     "如 τFIG、kτwτ、Squirτle Baggins），不得音译、缩写、改写，更不能凭空造名；"
     "名单里没有的人名不得作为「某人说」出现。转述某人的观点时，务必确认那句话确实出自他本人。\n"
+    "17. **禁止跨时段拼装身份与归属**：给某人贴上身份标签（如「某子网所有者」「前某子网负责人」）、"
+    "或把 A 的话与 B 的事连成因果，**必须有同一条消息或紧邻的上下几句直接支持**。"
+    "输入里凡出现「~~~~ 时间跳转 ~~~~」标记，说明前后两条消息相隔数小时、彼此无关，"
+    "**绝对不可把标记两侧的人物、事件、子网拼在一起**；"
+    "只写「103 capcom」「61」这类没有主语的碎片消息，只能当成一条独立线索，不得用来给任何人贴身份。\n"
+    "18. **反例（务必避免）**：原文 13:18 有人说「我的子网被关了排放」，19:11 另一个人单发一句「103 capcom」，"
+    "这两条隔了 6 小时、中间毫无连接，**绝不能**写成「某人被注销的就是 SN103」。"
+    "建立「人—子网」关系只有两种情况：他本人说出了编号，或者紧邻的几句里有人当场对号入座。"
+    "不满足就只写「其子网（原文未指明编号，另有一条无主语的『103 capcom』碎片消息，无法确认是否相关）」。\n"
+    "19. **跨消息的推断必须标注**：如果一条结论需要把两条以上消息拼起来才能得出"
+    "（典型如「某人说的那个子网，就是另一人单独提到的编号」），必须写成「…（推断，原文未明示）」，"
+    "不得使用「确认」「即」「就是」「实为」这类断言词。宁可分开写成两句各自有据的话，也不要合成一句。\n"
     "\n"
     "【稳定性要求】相同输入应给出相同结论：优先复述原文事实，不做发散联想；"
     "对同一事件的定性只有一种写法，不要在不同表述之间摇摆。\n"
@@ -683,6 +695,65 @@ def _section_title(line):
     return None
 
 
+_SN_IN_TEXT = re.compile(r"(?i)\bSN\s?(\d{1,3})\b")
+
+
+def audit_attribution(digest, items, window=2):
+    """核验日报里「人物 ↔ 子网编号」的关联是否有原文直接依据。
+
+    模型很容易把相隔数小时的两条无关消息拼成「某人是某子网所有者」，
+    实测光靠提示词改不动，所以这里做机器核验，把结果交给调用方提示用户。
+
+    可信条件（满足其一）：
+      1) 该人物自己的某条发言里出现过这个编号；
+      2) 该人物发言前后 window 条之内，有人提到过这个编号（当场对号入座）。
+
+    返回 [(人物, 编号, 句子片段)]。
+    """
+    if not digest or not items:
+        return []
+    authors, _seen = [], set()
+    for _r, _t, _a, _c in items:
+        if _a and _a not in _seen:
+            _seen.add(_a)
+            authors.append(_a)
+    authors.sort(key=len, reverse=True)   # 长名优先，避免短名把长名切碎
+
+    idx_of, sn_at = {}, []
+    for i, (_r, _t, _a, _c) in enumerate(items):
+        idx_of.setdefault(_a, []).append(i)
+        nums = set()
+        for m in re.finditer(r"(?i)\b(?:SN\s?)?(\d{1,3})\b", _c):
+            nums.add(int(m.group(1)))
+        sn_at.append(nums)
+
+    bad = []
+    for line in digest.split("\n"):
+        s = line.strip()
+        if len(s) < 12:
+            continue
+        sns = set(int(x) for x in _SN_IN_TEXT.findall(s))
+        if not sns:
+            continue
+        for nm in [a for a in authors if a in s]:
+            for num in sns:
+                if _attribution_ok(nm, num, idx_of, sn_at, window, len(items)):
+                    continue
+                bad.append((nm, num, s[:60]))
+    return bad
+
+
+def _attribution_ok(name, num, idx_of, sn_at, window, total):
+    for i in idx_of.get(name, []):
+        if num in sn_at[i]:
+            return True
+        lo, hi = max(0, i - window), min(total, i + window + 1)
+        for j in range(lo, hi):
+            if j != i and num in sn_at[j]:
+                return True
+    return False
+
+
 def sanitize_digest(text):
     """删除日报中不应出现的板块（潜力观察 / 重点子网动向），返回清洗后的文本。"""
     if not text:
@@ -705,20 +776,34 @@ def sanitize_digest(text):
         log("结构清洗：已剔除多余板块 %s" % "、".join(dropped))
     return txt
 
-def call_deepseek(cfg, text_block, system_prompt=None, tries=3):
+def call_llm(cfg, text_block, system_prompt=None, tries=3):
+    """调用任意 OpenAI 兼容的 /chat/completions 接口。
+
+    所有渠道差异都通过 config 控制，不写死在代码里：
+      deepseek_base_url / deepseek_model / deepseek_api_key
+      deepseek_timeout         超时秒数（推理模型建议 180-300）
+      deepseek_max_tokens      输出上限（推理模型要留足思考空间）
+      deepseek_extra_params    额外请求体，原样合并（如 {"enable_thinking": false}）
+    """
     api_key = cfg["deepseek_api_key"]
     base = cfg.get("deepseek_base_url", "https://api.deepseek.com/v1").rstrip("/")
     model = cfg.get("deepseek_model", "deepseek-chat")
+    timeout = int(cfg.get("deepseek_timeout", 120))
+    max_tokens = int(cfg.get("deepseek_max_tokens", 2500))
     url = base + "/chat/completions"
-    body = json.dumps({
+    payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
             {"role": "user", "content": text_block},
         ],
         "temperature": float(cfg.get("deepseek_temperature", 0)),
-        "max_tokens": 2500,
-    }).encode("utf-8")
+        "max_tokens": max_tokens,
+    }
+    extra = cfg.get("deepseek_extra_params")
+    if isinstance(extra, dict):
+        payload.update(extra)
+    body = json.dumps(payload).encode("utf-8")
     last = None
     op = _opener_for(url)   # 国内 LLM 直连、其余走代理，避免被 Clash 节点 502
     for i in range(tries):
@@ -726,22 +811,43 @@ def call_deepseek(cfg, text_block, system_prompt=None, tries=3):
         req.add_header("Authorization", "Bearer %s" % api_key)
         req.add_header("Content-Type", "application/json")
         try:
-            with op.open(req, timeout=120) as resp:
+            with op.open(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"].strip()
+            choice = (data.get("choices") or [{}])[0]
+            msg = choice.get("message") or {}
+            content = (msg.get("content") or "").strip()
+            usage = data.get("usage") or {}
+            _u = usage.get("completion_tokens_details") or {}
+            log("  %s 用量：输入 %s / 输出 %s（其中思考 %s）"
+                % (model, usage.get("prompt_tokens", "?"), usage.get("completion_tokens", "?"),
+                   _u.get("reasoning_tokens", 0)))
+            if not content:
+                # 推理模型常见坑：思考把 max_tokens 吃光，正文被截成空串。
+                reasoning = msg.get("reasoning_content") or ""
+                raise RuntimeError(
+                    "%s 返回空正文（finish_reason=%s，思考 %d 字符，输出 %s tokens）；"
+                    "多半是 deepseek_max_tokens 不够，或模型在思考阶段被截断"
+                    % (model, choice.get("finish_reason"), len(reasoning),
+                       usage.get("completion_tokens", "?")))
+            return content
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:500]
-            last = "DeepSeek HTTP 错误 %s: %s" % (e.code, detail)
+            last = "%s HTTP 错误 %s: %s" % (model, e.code, detail)
             # 4xx（key 错误/参数错误）重试无意义，直接抛出
             if 400 <= e.code < 500 and e.code != 429:
                 raise RuntimeError(last)
         except Exception as e:
-            last = "DeepSeek 调用失败：%s" % e
+            last = "%s 调用失败：%s" % (model, e)
         if i < tries - 1:
-            log("  ↳ DeepSeek 第 %d/%d 次尝试失败（%s），%ds 后重试"
-                % (i + 1, tries, last, 10 * (i + 1)))
+            log("  ↳ %s 第 %d/%d 次尝试失败（%s），%ds 后重试"
+                % (model, i + 1, tries, last, 10 * (i + 1)))
             time.sleep(10 * (i + 1))
     raise RuntimeError(last)
+
+
+# 向后兼容：老代码（监听、脚本）仍调用 call_deepseek
+def call_deepseek(cfg, text_block, system_prompt=None, tries=3):
+    return call_llm(cfg, text_block, system_prompt=system_prompt, tries=tries)
 
 def build_text_block(channel_name, day, items):
     # 发言者名单：给模型一份白名单，防止人名被音译、缩写或凭空编造
@@ -756,13 +862,33 @@ def build_text_block(channel_name, day, items):
              "当日发言者名单（共 %d 人；引用人名时必须原样照抄，不得音译/缩写/改写大小写，"
              "名单外的名字不得作为发言者出现）：%s"
              % (len(authors), "、".join(authors))]
+    prev_t = None
     for i, (react, t, author, c) in enumerate(items, 1):
         c1 = c.replace("\n", " ").strip()
         if len(c1) > 600:
             c1 = c1[:600] + "…"
         hot = " 🔥%d" % react if react >= 2 else ""
+        # 时间断层标记：防止模型把相隔数小时的两条无关消息拼成因果关系
+        if i > 1:
+            _gap = _minutes_between(prev_t, t)
+            if _gap is not None and _gap >= 60:
+                lines.append("    ~~~~ 时间跳转：上一条与本条相隔约 %d 小时 %d 分，"
+                             "两者无上下文关系，不得拼接 ~~~~"
+                             % (_gap // 60, _gap % 60))
         lines.append("%d. [%s] <%s>%s %s" % (i, t, author, hot, c1))
+        prev_t = t
     return "\n".join(lines)
+
+
+def _minutes_between(t1, t2):
+    """把 'HH:MM' 两个时间点换算成分钟差（跨零点返回 None）。"""
+    try:
+        h1, m1 = [int(x) for x in str(t1).split(":")[:2]]
+        h2, m2 = [int(x) for x in str(t2).split(":")[:2]]
+        d = (h2 * 60 + m2) - (h1 * 60 + m1)
+        return d if d >= 0 else None
+    except Exception:
+        return None
 
 # ----------------------------------------------------------------------------
 # 4) 推送：飞书（带签名）+ Telegram（分片）
@@ -1126,14 +1252,25 @@ def _audit_names(digest, items):
     authors = {a for _r, _t, a, _c in items if a}
     if not authors:
         return
-    # 只匹配「- **名字**：」或「- **@名字**：」这种人物条目，避免把子网名/项目名当人名
-    cands = re.findall(r"^\s*-\s*\*\*@?([^*\n]{2,30}?)\*\*\s*[：:]", digest or "", re.M)
+    # 1) 只在「重要人物观点」板块里按「- **名字**：」抓取，其他板块的加粗多为小标题
+    seg = digest or ""
+    m = re.search(r"\*\*[^*\n]*重要人物观点[^*\n]*\*\*(.*?)(?=\n\*\*[^*\n]+\*\*|\Z)", seg, re.S)
+    if m:
+        seg = m.group(1)
+    cands = re.findall(r"^\s*-\s*\*\*@?([^*\n]{2,30}?)\*\*\s*[：:]", seg, re.M)
+    # 2) 全文补充：句中「**名字** 称/表示/说…」这类明确指向发言人的写法
+    cands += re.findall(r"\*\*@?([^*\n]{2,24}?)\*\*\s*"
+                        r"(?:称|表示|说|认为|指出|提到|回应|质疑|追问|强调|补充|解释|承认|反驳|感叹|建议|披露)",
+                        digest or "")
     unknown = []
     for name in cands:
         n = name.strip()
         # 去掉「（SN23）」这类括注后再比对
         n = re.sub(r"[（(].*?[）)]", "", n).strip()
         if not n:
+            continue
+        # 有的模型爱写「- **小标题**：正文」，含中文且较长的多半是标题不是人名，跳过
+        if len(re.findall(r"[\u4e00-\u9fff]", n)) > 0 and len(n) > 6:
             continue
         if any(n == a or n.startswith(a) or a.startswith(n) for a in authors):
             continue
@@ -1213,6 +1350,17 @@ def run_one_day(cfg, after_dt, before_dt):
         _audit_names(digest, items)
     except Exception as e:
         log("人名核对异常（忽略）：%s" % e)
+
+    # 归属核验（仅写日志，噪声较大，供人工复核）
+    try:
+        _bad = audit_attribution(digest, items)
+        if _bad:
+            log("⚠️ 归属核验：%d 处「人物-子网」关联在原文未直接共现，建议 /retry 复核：%s"
+                % (len(_bad), "、".join("%s→SN%d" % (n, s) for n, s, _ in _bad[:6])))
+        else:
+            log("✅ 归属核验通过（人物与子网编号均有原文依据）")
+    except Exception as e:
+        log("归属核验异常（忽略）：%s" % e)
 
     title = "🤖 DTAO price-talk 日报 · %s" % day_str
 

@@ -4,7 +4,7 @@
 > 用 AI（DeepSeek）总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.0.2** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.1.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 
 ## ✨ 核心特性
 
@@ -14,6 +14,9 @@
 - 👤 **人名保真**：输入里带「当日发言者名单」，模型只能从中取名字、逐字照抄（含 `τFIG`、`kτwτ` 等特殊字符）；生成后还会自动核对，发现名单外的名字就在 `run.log` 告警
 - 🧷 **禁止臆造（溯源规则）**：每条结论必须能在聊天原文找到出处；不确定就写「原文未提及」；「第一/最大」等排名必须落到具体 SN 编号，原文没指明就标注或舍弃；重大定性（跑路/转型等）以官方最新澄清为准，群友猜测不得当结论
 - 🎯 **结论稳定**：`deepseek_temperature` 默认 **0**，同一份记录重复总结不会一天一个说法
+- 🔌 **任意 OpenAI 兼容模型可换**：`deepseek_base_url` + `deepseek_model` + key 三处配置即可切换渠道；超时、输出上限、额外请求体（如推理模型关思考）都可配，不写死任何厂商
+- ⏱ **时间断层可见**：输入里凡相隔 1 小时以上的两条消息之间会插入「~~~~ 时间跳转 ~~~~」标记，明确告诉模型「这两条无关」，防止把相隔数小时的两件事拼成因果（模型天生爱这么干）
+- 🔍 **自动核验写日志**：生成后会核对人名是否都在当日发言者名单内（`✅ 人名核对通过`），并检查「人物↔子网编号」关联是否有原文依据，可疑处写入 `run.log` 供复核
 - 🧱 **结构硬过滤**：日报/周报生成后强制剔除「重点子网动向」「潜力观察」等不应出现的板块，模型写歪了也推不出去
 - ✍️ **TG 反馈重总结（/retry）**：日报有错或你有补充事实，直接在群里发 `/retry <你的反馈>`，AI 按你的反馈重写并重推，不用改代码、不用重导出
 - 🗣 **大白话风格**：少用行话，除人名/子网名/代币名外尽量用中文，「SOTA」这类缩写写成「中文（英文缩写）」
@@ -126,10 +129,13 @@ python pipeline.py
   "dce_exe": "C:/.../DiscordChatExporter.Cli.exe",  // 仅 local 后端需要：第2步放的那个 exe 路径
   "api_fallback": true,                            // local/docker 超时或失败时，自动改用内置 api 后端兜底
   "dce_timeout": 120,                              // DCE 超时秒数（正常导出约 30s），超时即触发上面的兜底
-  "deepseek_api_key": "★DeepSeek 的 key",
-  "deepseek_base_url": "https://api.deepseek.com/v1",
+  "deepseek_api_key": "★模型服务的 key",
+  "deepseek_base_url": "https://api.deepseek.com/v1",  // 任何 OpenAI 兼容网关都行（见下方「换模型」）
   "deepseek_model": "deepseek-chat",
   "deepseek_temperature": 0,                       // 0=结论最稳定（推荐）；调高会更发散，同一份记录可能给出不同说法
+  "deepseek_max_tokens": 5000,                     // 输出上限；推理模型要留足思考空间，否则正文可能为空
+  "deepseek_timeout": 120,                         // 单次请求超时秒数；推理模型建议 180-300
+  "deepseek_extra_params": {},                     // 额外请求体，原样合并；如 {"thinking":{"type":"disabled"}} 关思考
   "llm_direct": true,                              // 国内大模型 API 直连、不走代理（默认开，避免被 Clash 节点掐断）
   "no_proxy_hosts": [],                            // 追加要直连的域名，如自建的 OpenAI 兼容网关
   "proxy": "",                                     // 留空=自动用系统代理(Clash)
@@ -344,19 +350,32 @@ A：两种办法：① `deepseek_temperature` 设为 `0`（默认已是 0），�
 AI 会按你的补充重写并重推，不会把你的话当成群内事实。
 
 **Q：总结用的是哪个模型？可以换吗？**
-A：默认 `deepseek-chat`（DeepSeek V3 系列）。换模型只改 `config.json` 三个字段，接口是 OpenAI 兼容格式：
+A：当前默认接 **Engy（Bittensor SN53）上的 `kimi-k3`**，并关闭了思考模式。换模型只改 `config.json`，接口是 OpenAI 兼容格式：
 
-| 想换成 | `deepseek_base_url` | `deepseek_model` | 备注 |
+| 渠道 | `deepseek_base_url` | `deepseek_model` | 备注 |
 |---|---|---|---|
-| DeepSeek（默认，最便宜） | `https://api.deepseek.com/v1` | `deepseek-chat` | 国内直连，无需代理 |
+| **Engy / Kimi K3（当前）** | `https://api.engy.ai/v1` | `kimi-k3` | SN53 验证推理网络，$1.95/$9.75 每百万 token；**需在 `deepseek_extra_params` 里关思考**，否则可能思考到没正文 |
+| DeepSeek（最便宜） | `https://api.deepseek.com/v1` | `deepseek-chat` | 国内直连，无需代理 |
 | DeepSeek 强推理 | 同上 | `deepseek-reasoner` | 更慢更贵；推理模型对温度不敏感，结构可能更啰嗦 |
-| Kimi（长文召回最强） | `https://api.moonshot.cn/v1` | `kimi-k2-0905-preview` 等 | 中文更自然、长列表不易漏项；需在 Moonshot 开放平台申请 key |
+| Moonshot 官方 Kimi | `https://api.moonshot.cn/v1` | `kimi-k3` | ¥20/¥100 每百万 token，比 Engy 贵，胜在稳定 |
 | 通义千问（稳、便宜） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` / `qwen-max` | 阿里云百炼，稳定性好 |
 | 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4-plus` | 结构化输出较听话 |
 
 > 具体模型名请以各平台文档为准（模型迭代快，名字会变）。只要接口是 OpenAI 兼容的 `/chat/completions`，
-> 本项目都能直接用；`llm_direct` 白名单里已包含上面这些国内域名，加了新平台记得往 `no_proxy_hosts` 补域名。
-> 换完模型建议先用 `python pipeline.py daily 2026-10-30` 之类跑一天历史数据对比，别直接在生产日上看效果。
+> 本项目都能直接用；`llm_direct` 白名单里已包含国内域名，境外渠道（如 Engy）会走系统代理。
+> 换完模型建议先跑 `python pipeline.py daily <某天>` 用历史数据对比，别直接在生产日上看效果。
+
+**Q：为什么「思考模式」要关掉？**
+推理模型（Kimi K3、deepseek-reasoner 等）会先输出一段思考，再写正文，**思考也计入 `max_tokens`、也按输出价计费**。
+实测同一份日报数据：开着思考时消耗 1.6 万~2 万 token（其中思考占 92%），耗时 65~116 秒，且**多次出现思考吃满预算、正文为空**；
+关掉后是 1200~1400 token、约 10 秒，结构更听话。所以：
+
+```jsonc
+"deepseek_extra_params": {"thinking": {"type": "disabled"}}   // Kimi K3
+```
+
+如果哪天换成别的推理模型，对应的关思考参数可能是 `reasoning_effort: "low"` 或 `enable_thinking: false`，
+用 `deepseek_extra_params` 试即可（不同厂商参数名不同，试错成本很低，一次调用几分钱）。
 
 但先提醒一句：**多数「漏信息 / 说错」并不是模型能力问题**，而是喂进去的数据被过滤掉或顺序打乱了
 （v1.0.1 已修：裸数字子网号不再被丢、保留上下文、按时间排序）。先确认输入完整，再考虑换模型。

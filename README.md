@@ -4,7 +4,7 @@
 > 用 AI（DeepSeek）总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.2.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.2.1** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 
 ## ✨ 核心特性
 

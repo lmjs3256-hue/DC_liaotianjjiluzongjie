@@ -1,0 +1,131 @@
+
+## 2026-11-01
+- 新增：SN0 Root
+- 新增：SN1 Apex
+- 新增：SN2 DaniLabs
+- 新增：SN3 Teutonic
+- 新增：SN4 Targon
+- 新增：SN5 Hone
+- 新增：SN6 Numinous
+- 新增：SN7 Allways
+- 新增：SN8 Vanta
+- 新增：SN9 iota
+- 新增：SN10 Pareton
+- 新增：SN11 TrajectoryRL
+- 新增：SN12 Compute Horde
+- 新增：SN13 Data Universe
+- 新增：SN14 Cacheon
+- 新增：SN15 ORO
+- 新增：SN16 Unknown
+- 新增：SN17 404—GEN
+- 新增：SN18 Zeus
+- 新增：SN19 blockmachine
+- 新增：SN20 Witness
+- 新增：SN21 AdTAO
+- 新增：SN22 Desearch
+- 新增：SN23 Trishool
+- 新增：SN24 ms.computer
+- 新增：SN25 UR
+- 新增：SN26 Perturb
+- 新增：SN27 Komms
+- 新增：SN28 SayGM
+- 新增：SN29 hoτfloaτ
+- 新增：SN30 Endure Network
+- 新增：SN31 rec4ll
+- 新增：SN32 ItsAI
+- 新增：SN33 ReadyAI
+- 新增：SN34 Yugos
+- 新增：SN35 Unknown
+- 新增：SN36 Bittensor
+- 新增：SN37 Aurelius
+- 新增：SN38 ChronoLLM
+- 新增：SN39 deprecated
+- 新增：SN40 Ralph
+- 新增：SN41 Almanac
+- 新增：SN42 Unknown
+- 新增：SN43 Graphite
+- 新增：SN44 Score
+- 新增：SN45 AlphaRidge.ai
+- 新增：SN46 Instant
+- 新增：SN47 GPUForge
+- 新增：SN48 Quantum Compute
+- 新增：SN49 Nepher Robotics
+- 新增：SN50 Synth
+- 新增：SN51 lium.io
+- 新增：SN52 Dojo
+- 新增：SN53 engy
+- 新增：SN54 Yanez
+- 新增：SN55 NIOME
+- 新增：SN56 Gradients
+- 新增：SN57 Unknown
+- 新增：SN58 Attune
+- 新增：SN59 Unknown
+- 新增：SN60 Bitsec.ai
+- 新增：SN61 RedTeam
+- 新增：SN62 Ridges
+- 新增：SN63 Enigma
+- 新增：SN64 Chutes
+- 新增：SN65 True Performance Network
+- 新增：SN66 conjectures
+- 新增：SN67 Harnyx
+- 新增：SN68 NOVA
+- 新增：SN69 Herald
+- 新增：SN70 Unknown
+- 新增：SN71 Leadpoet
+- 新增：SN72 StreetVision by NATIX
+- 新增：SN73 Elenost
+- 新增：SN74 Gittensor
+- 新增：SN75 Hippius
+- 新增：SN76 Ormas
+- 新增：SN77 Liquidity
+- 新增：SN78 Umi
+- 新增：SN79 MVTRX
+- 新增：SN80 OpenRoboto
+- 新增：SN81 Reliquary
+- 新增：SN82 Noah
+- 新增：SN83 CliqueAI
+- 新增：SN84 Unknown
+- 新增：SN85 Vidaio
+- 新增：SN86 OnSale
+- 新增：SN87 Provenonce
+- 新增：SN88 Investing
+- 新增：SN89 InfiniteQuant
+- 新增：SN90 KubeTEE
+- 新增：SN91 cascade
+- 新增：SN92 REAX
+- 新增：SN93 Bitcast
+- 新增：SN94 Cathedral
+- 新增：SN95 Actual
+- 新增：SN96 Verathos
+- 新增：SN97 Ingot
+- 新增：SN98 NeverPlayAlone
+- 新增：SN99 Thirty Spokes
+- 新增：SN100 Cortex
+- 新增：SN101 Tag101
+- 新增：SN102 ConnitoAI
+- 新增：SN103 Terza Inference
+- 新增：SN104 TAOstatus
+- 新增：SN105 Beam
+- 新增：SN106 Nodexo
+- 新增：SN107 Minos
+- 新增：SN108 ChipForge
+- 新增：SN109 Finsight
+- 新增：SN110 Green Compute
+- 新增：SN111 Claims
+- 新增：SN112 THOR
+- 新增：SN113 Unknown
+- 新增：SN114 SOMA
+- 新增：SN115 MoirAI
+- 新增：SN116 Carbon
+- 新增：SN117 everyframe.studio
+- 新增：SN118 Ditto
+- 新增：SN119 CapabilityForge Next
+- 新增：SN120 Affine
+- 新增：SN121 sundae_bar
+- 新增：SN122 CookingTAO
+- 新增：SN123 MANTIS
+- 新增：SN124 Swarm
+- 新增：SN125 Refinery
+- 新增：SN126 Attelier
+- 新增：SN127 Astrid
+- 新增：SN128 ByteLeap

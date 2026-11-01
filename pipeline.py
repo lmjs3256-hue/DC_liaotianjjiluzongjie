@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -540,6 +540,8 @@ SYSTEM_PROMPT = (
     "\n"
     "【排版与强调规范（飞书/TG 双平台通用，务必遵守）】\n"
     "- 关键主体一律 **加粗**：人物名、**SN编号/子网名**、代币、事件、关键数字。\n"
+    "- **子网第一次出现时写成「SN53 Engy」这种「编号 + 名字」**（名字以子网对照表为准），"
+    "同一篇里后文可以只写编号；对照表里查不到名字的，只写编号，不要编名字。\n"
     "- 用 emoji 标注程度：🔥 重大利好/热点、✅ 已落地、⚠️ 风险/异动、📌 值得关注、❌ 利空。\n"
     "- 每条要点单独成行，用 - 项目符号；小节之间空一行；避免横排长句，适合手机端。\n"
     "- 不要用 # 标题、不要用 > 引用（部分平台不渲染）。\n"
@@ -620,6 +622,10 @@ SYSTEM_PROMPT = (
     "21. **一人一句，不许合成**：转述多人信息时，必须分别写清「A 说了什么」「B 说了什么」。"
     "典型错误是把「A 说很兴奋，因为英伟达投了某项目」和「B 说已向某人确认他认识创始人」合成"
     "「A 表示 B 已确认该项目拿到投资」——这是编造。原文各自只支持各自的半句，就分开写两句，或者只写有直接依据的那句。\n"
+    "22. **子网对照表只用来认名字**：输入开头可能附一份「子网对照表」（SN 编号 ↔ 子网名 ↔ 业务）。"
+    "它的作用是让你把「117」「Engy」这类称呼对上号、写出正确的 **SN编号/子网名**，"
+    "**不是当日新闻**：不得把表里的业务描述当作今天发生的事写进日报，也不得据此推断价格、团队、融资。"
+    "表里写「未知」的不许补全；聊天原文与表冲突时以原文为准，并注明「该编号可能已换项目」。\n"
     "\n"
     "【稳定性要求】相同输入应给出相同结论：优先复述原文事实，不做发散联想；"
     "对同一事件的定性只有一种写法，不要在不同表述之间摇摆。\n"
@@ -714,8 +720,8 @@ VERIFY_PROMPT = (
     "删掉或改成原文的表述；单来源的重大利空/利好要标「（单一消息源，待确认）」。\n"
     "4. **语言**：除 SN 编号、子网名、人名、代币名（TAO、dTAO、Alpha）外，不得残留英文单词，一律译成中文。\n"
     "\n【输出要求】只输出修正后的四个小节：🔥 必读重点 / 👥 重要人物观点 / 📎 其他细节 / 💡 一句话总结；"
-    "篇幅 1100-1400 字；不要输出核对说明、不要写「已修改」之类的话；"
-    "**不确定的内容宁可删除，也不要保留猜测**。"
+    "篇幅 1100-1400 字，**不得比初稿更长**——纠错只能「改写或删除」，不许新增句子、不许补细节、不许加总结段；"
+    "不要输出核对说明、不要写「已修改」之类的话；**不确定的内容宁可删除，也不要保留猜测**。"
 )
 
 # ----------------------------------------------------------------------------
@@ -739,8 +745,12 @@ def polish_digest(cfg, text_block, draft):
         fixed = call_llm(cfg, text_block + "\n\n【日报初稿】\n" + draft, system_prompt=VERIFY_PROMPT)
         fixed = sanitize_digest(fixed or "")
         n = len(re.sub(r"\s", "", fixed))
+        base = len(re.sub(r"\s", "", draft))
         if n < 500:
             log("校对稿过短（%d 字），保留初稿" % n)
+            return draft
+        if base and n > base * 1.08:
+            log("校对稿变成 %d 字（初稿 %d 字），超过 8%% 视为扩写跑偏，保留初稿" % (n, base))
             return draft
         log("校对完成：数字/人物-子网归属/定性/英文 已按原文复核（%d 字）" % n)
         return fixed
@@ -900,6 +910,12 @@ _EN_TERMS = [
     (r"(?i)\bpre[- ]?sale\b", "预售"),
     (r"(?i)\bairdrop\b", "空投"),
     (r"(?i)\brug(?:ged|pull)?\b", "跑路"),
+    (r"(?i)\bdodgy\b", "可疑"),
+    (r"(?i)\bdump(?:ing|ed)?\b", "抛售"),
+    (r"(?i)\bpost[- ]?mortem\b", "事后复盘"),
+    (r"(?i)\bextractor\b", "收割者"),
+    (r"(?i)\bgrifter\b", "骗子"),
+    (r"(?i)\bbacked by\b", "由…投资"),
 ]
 
 
@@ -910,11 +926,21 @@ def reduce_english(text):
     s = text
     for pat, zh in _EN_TERMS:
         s = re.sub(pat, zh, s)
+    # 括号里只剩英文原词（多是「可疑（dodgy）」这类翻译残渣）→ 整段去掉；常见代币/技术缩写保留
+    _KEEP = {"tao", "dtao", "alpha", "gpu", "api", "ai", "agi", "llm", "defi", "nft", "sn"}
+
+    def _drop_gloss(m):
+        w = m.group(1).strip().lower()
+        return m.group(0) if w in _KEEP else ""
+
+    s = re.sub(r"[（(]\s*([A-Za-z][A-Za-z .'\-/]{0,18})\s*[)）]", _drop_gloss, s)
+    # 「**@某人**」的 @ 去掉（日报里不需要 at）
+    s = re.sub(r"\*\*@([^*\n]{1,24})\*\*", r"**\1**", s)
     # 清掉替换后留下的空括号与重复括号（如「暴跌（暴跌）」→「暴跌」）
     s = re.sub(r"[（(][\s,，、/]*[)）]", "", s)
     s = re.sub(r"([\u4e00-\u9fa5]{2,5})[（(]\1[)）]", r"\1", s)
     # 英文原词被翻成中文后，括号里只剩同一个中文词，直接去掉整个括号
-    s = re.sub(r"[（(]\s*(?:暴跌|回购|排放|质押|销毁|流动性|矿工|验证人|所有者|注销|营收|白名单|激励|子网|预售|空投|跑路|年化收益率|资本支持)\s*[)）]", "", s)
+    s = re.sub(r"[（(]\s*(?:暴跌|回购|排放|质押|销毁|流动性|矿工|验证人|所有者|注销|营收|白名单|激励|子网|预售|空投|跑路|年化收益率|资本支持|事后复盘|可疑|抛售|收割者|骗子)\s*[)）]", "", s)
     s = re.sub(r"[，,]{2,}", "，", s)
     s = re.sub(r"[ \t]{2,}", " ", s)
     return s
@@ -1090,6 +1116,9 @@ def build_text_block(channel_name, day, items):
              "当日发言者名单（共 %d 人；引用人名时必须原样照抄，不得音译/缩写/改写大小写，"
              "名单外的名字不得作为发言者出现）：%s"
              % (len(authors), "、".join(authors))]
+    _hint = subnet_hint_block(items)
+    if _hint:
+        lines.append(_hint)
     prev_t = None
     for i, (react, t, author, c) in enumerate(items, 1):
         c1 = c.replace("\n", " ").strip()
@@ -1106,6 +1135,75 @@ def build_text_block(channel_name, day, items):
         lines.append("%d. [%s] <%s>%s %s" % (i, t, author, hot, c1))
         prev_t = t
     return "\n".join(lines)
+
+
+_SUBNET_KB = None
+
+
+def _subnet_kb():
+    """加载本地子网知识库（subnets.json，由 update_subnets.py 每周更新）。"""
+    global _SUBNET_KB
+    if _SUBNET_KB is None:
+        path = os.path.join(HERE, "subnets.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                _SUBNET_KB = json.load(f)
+        except Exception:
+            _SUBNET_KB = {}
+    return _SUBNET_KB
+
+
+def subnet_hint_block(items, limit=45):
+    """把当天消息里提到的子网编号，映射成「SNxx 名称：业务」的对照表。
+    只喂被提到的编号（不整表塞进去），并明确禁止把业务描述当日新闻写。"""
+    kb = _subnet_kb() or {}
+    subs = kb.get("subnets") or {}
+    dead = kb.get("deregistered") or {}
+    if not subs and not dead:
+        return ""
+    text = " ".join(c for _r, _t, _a, c in items)
+    weight = {}
+    for m in re.finditer(r"(?i)\bSN\s?(\d{1,3})\b", text):
+        n = int(m.group(1)); weight[n] = weight.get(n, 0) + 100
+    # 裸数字：只收 1-256（排除价格 61.5、版本 2.0、带单位的 2t 等）
+    for m in re.finditer(r"(?<![\d.$])(\d{1,3})(?![\d.%tTkKMm])", text):
+        n = int(m.group(1))
+        if 1 <= n <= 256:
+            weight[n] = weight.get(n, 0) + 1
+    # 聊天里只写名字、不写编号的（「Engy」「Lium」），按名字反查编号
+    # 注意用**区分大小写**的整词匹配：否则 actual / claims 这类常见英文词会把无关子网带进来
+    _NAME_STOP = {"unknown", "deprecated", "none", "null", "root", "actual", "claims", "bittensor"}
+    for key, v in subs.items():
+        nm = (v.get("name") or "").strip()
+        base_nm = re.sub(r"\.(io|ai|studio|com|net|org)$", "", nm).strip()
+        if len(base_nm) < 4 or base_nm.lower() in _NAME_STOP:
+            continue
+        for cand in {base_nm, base_nm.capitalize(), base_nm.upper()}:
+            if re.search(r"(?<![A-Za-z0-9])" + re.escape(cand) + r"(?![A-Za-z0-9])", text):
+                weight[int(key)] = weight.get(int(key), 0) + 50
+                break
+    # 显式 SNxx / 名字命中的排前面，裸数字按出现次数补位，避免把无关数字塞进来
+    nums = sorted(weight, key=lambda n: -weight[n])[:limit]
+    nums.sort()
+
+    lines = []
+    for n in nums:
+        key = str(n)
+        if key in subs:
+            v = subs[key]
+            biz = v.get("zh") or v.get("desc") or "未知"
+            alias = "（旧名 %s）" % "、".join(v["aliases"]) if v.get("aliases") else ""
+            lines.append("- SN%d %s%s：%s" % (n, v.get("name") or "未知", alias, biz))
+        elif key in dead:
+            v = dead[key]
+            lines.append("- SN%d 已注销（原 %s）" % (n, v.get("name") or "未知"))
+    if not lines:
+        return ""
+    head = ["【子网对照表（本地知识库，链上身份，校对于 %s）】" % (kb.get("updated_at") or "未知"),
+            "它的用途只有两个：把聊天里的「编号 ↔ 名字」对上、知道它大致做什么业务。"
+            "**严禁把下面的业务描述当成当日新闻写进日报**；标「未知」的不许补全；"
+            "若聊天原文与这里不一致（同一编号被重新注册过），以聊天原文为准，并注明「该编号可能已换项目」。"]
+    return "\n".join(head + lines[:limit]) + "\n"
 
 
 def _minutes_between(t1, t2):

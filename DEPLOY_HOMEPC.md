@@ -28,10 +28,11 @@
 **方式 A — 直接拷贝文件夹（最简单，推荐）**
 把主力机上整个 `dtao-daily-pipeline` 文件夹拷到旧电脑（U 盘 / 局域网共享 / 微信文件传输助手都行）。
 里面已经包含：
-- `pipeline.py`、`tg_listener.py`、两个 `.bat`
+- `pipeline.py`、`tg_listener.py`、`update_subnets.py`、两个 `.bat`
 - `config.json`（**含你的所有 token，它不会上传 GitHub，放心跟着文件夹走**）
+- `subnets.json` / `subnets.md`（子网知识库，随仓库版本化，拷贝时一起带上就不用重新抓取）
 - `DiscordChatExporter.Cli.exe` 及一堆 `.dll`（**可选**，默认用不到；见下文「导出后端」）
-- `README.md`、`.gitignore`
+- `README.md`、`CHANGELOG.md`、`.gitignore`
 
 **方式 B — 从 GitHub 克隆**
 ```powershell
@@ -53,6 +54,7 @@ cd DC_liaotianjjiluzongjie
 |---|---|
 | `pipeline.py` | 主流程 |
 | `tg_listener.py` | TG 指令监听 |
+| `update_subnets.py` / `subnets.json` | 子网知识库与更新器（可选；缺 `subnets.json` 时日报照常出，只是没有编号对照表） |
 | `config.json` | 你的配置+token（方式 B 需手动放） |
 | `DiscordChatExporter.Cli.exe` | 导出程序（**可选**，仅 `dce_backend: "local"` 时需要） |
 | `DiscordChatExporter.*.dll`、`*.dll` | 导出程序依赖（同上，可选） |

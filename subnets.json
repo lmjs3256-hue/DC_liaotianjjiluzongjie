@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-11-01",
+ "updated_at": "2026-11-02",
  "source": "https://taostats.io/subnets",
  "subnets": {
   "0": {
@@ -10,7 +10,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "1": {
@@ -21,7 +21,7 @@
    "github": "https://github.com/macrocosm-os/apex",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "2": {
@@ -32,7 +32,7 @@
    "github": "https://github.com/DaniLabsAI/subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "3": {
@@ -43,7 +43,7 @@
    "github": "https://github.com/unarbos/teutonic",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "4": {
@@ -54,7 +54,7 @@
    "github": "https://github.com/manifold-inc/targon",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "5": {
@@ -65,7 +65,7 @@
    "github": "https://github.com/hone-subnet-org/hone-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "6": {
@@ -76,7 +76,7 @@
    "github": "https://github.com/numinouslabs/numinous",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "7": {
@@ -87,7 +87,7 @@
    "github": "https://github.com/entrius/allways",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "8": {
@@ -98,7 +98,7 @@
    "github": "https://github.com/taoshidev/vanta-network",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "9": {
@@ -109,7 +109,7 @@
    "github": "https://github.com/macrocosm-os/iota",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "10": {
@@ -120,7 +120,7 @@
    "github": "https://github.com/Pareton-ai/pareton",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "11": {
@@ -131,7 +131,7 @@
    "github": "https://github.com/trajectoryRL/trajectoryRL",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "12": {
@@ -142,7 +142,7 @@
    "github": "https://github.com/backend-developers-ltd/ComputeHorde/",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "13": {
@@ -153,7 +153,7 @@
    "github": "https://github.com/macrocosm-os/data-universe",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "14": {
@@ -164,7 +164,7 @@
    "github": "https://github.com/latent-to/cacheon",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "15": {
@@ -175,7 +175,7 @@
    "github": "https://github.com/ORO-AI/oro",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "16": {
@@ -186,7 +186,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "17": {
@@ -197,7 +197,7 @@
    "github": "https://github.com/404-Repo/404-gen-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "18": {
@@ -208,7 +208,7 @@
    "github": "https://github.com/Orpheus-AI/Zeus",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "19": {
@@ -219,7 +219,7 @@
    "github": "https://github.com/taostat/blockmachine/",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "20": {
@@ -230,7 +230,7 @@
    "github": "https://github.com/witnessvision/witness_subnet/",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "21": {
@@ -241,7 +241,7 @@
    "github": "https://github.com/ippcteam/SN21-adtao",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "22": {
@@ -252,7 +252,7 @@
    "github": "https://github.com/datura-ai/desearch",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "23": {
@@ -263,7 +263,7 @@
    "github": "https://github.com/TrishoolAI/trishool-phase2",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "24": {
@@ -274,7 +274,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "25": {
@@ -285,7 +285,7 @@
    "github": "https://github.com/urfoundation/sn",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "26": {
@@ -296,7 +296,7 @@
    "github": "https://github.com/0xsigurd/Perturb",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "27": {
@@ -307,7 +307,7 @@
    "github": "https://github.com/Komms-protocol/komms-docs",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "28": {
@@ -318,7 +318,7 @@
    "github": "https://github.com/taostat/gm-miner",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "29": {
@@ -329,7 +329,7 @@
    "github": "https://github.com/coldint/hotfloat",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "30": {
@@ -340,7 +340,7 @@
    "github": "https://github.com/Endure-Network/endure-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "31": {
@@ -351,7 +351,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "32": {
@@ -362,7 +362,7 @@
    "github": "https://github.com/It-s-AI/llm-detection",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "33": {
@@ -373,7 +373,7 @@
    "github": "https://github.com/afterpartyai/bittensor-conversation-genome-project",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "34": {
@@ -384,7 +384,7 @@
    "github": "https://github.com/BitMind-AI/yugos",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "35": {
@@ -395,7 +395,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "36": {
@@ -406,7 +406,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "37": {
@@ -417,7 +417,7 @@
    "github": "https://github.com/Aurelius-Protocol/Aurelius-Protocol",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "38": {
@@ -428,7 +428,7 @@
    "github": "https://github.com/chronollm/sn38",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "39": {
@@ -439,7 +439,7 @@
    "github": "https://github.com/deprecated/deprecated",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "40": {
@@ -450,7 +450,7 @@
    "github": "https://github.com/RalphLabsAI/ralph",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "41": {
@@ -461,7 +461,7 @@
    "github": "https://github.com/corvxai/almanac",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "42": {
@@ -472,7 +472,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "43": {
@@ -483,7 +483,7 @@
    "github": "https://github.com/GraphiteAI/Graphite-Subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "44": {
@@ -494,7 +494,7 @@
    "github": "https://github.com/score-technologies/turbovision",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "45": {
@@ -505,7 +505,7 @@
    "github": "https://github.com/Team-Rizzo/alpharidge-ai",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "46": {
@@ -516,7 +516,7 @@
    "github": "https://github.com/Subnet46/sn46-validator",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "47": {
@@ -527,7 +527,7 @@
    "github": "https://github.com/forgenet47/gpuforge",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "48": {
@@ -538,7 +538,7 @@
    "github": "https://github.com/qbittensor-labs/quantum-compute",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "49": {
@@ -549,7 +549,7 @@
    "github": "https://github.com/nepher-ai/nepher-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "50": {
@@ -560,7 +560,7 @@
    "github": "https://github.com/mode-network/synth-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "51": {
@@ -571,7 +571,7 @@
    "github": "https://github.com/Datura-ai/lium-io",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "52": {
@@ -582,7 +582,7 @@
    "github": "https://github.com/tensorplex-labs/dojo",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "53": {
@@ -593,7 +593,7 @@
    "github": "https://github.com/hanlinai/engy",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "54": {
@@ -604,7 +604,7 @@
    "github": "https://github.com/yanez-compliance/MIID-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "55": {
@@ -615,7 +615,7 @@
    "github": "https://github.com/genomesio/subnet-niome",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "56": {
@@ -626,7 +626,7 @@
    "github": "https://github.com/gradients-ai/G.O.D",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "57": {
@@ -637,7 +637,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "58": {
@@ -648,7 +648,7 @@
    "github": "https://github.com/robotensor/attune-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "59": {
@@ -659,7 +659,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "60": {
@@ -670,7 +670,7 @@
    "github": "https://github.com/Bitsec-AI/sandbox",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "61": {
@@ -681,7 +681,7 @@
    "github": "https://github.com/RedTeamSubnet/RedTeam",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "62": {
@@ -692,7 +692,7 @@
    "github": "https://github.com/ridgesai/ridges",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "63": {
@@ -703,7 +703,7 @@
    "github": "https://github.com/qbittensor-labs/enigma",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "64": {
@@ -714,7 +714,7 @@
    "github": "https://github.com/chutesai/chutes",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "65": {
@@ -725,7 +725,7 @@
    "github": "https://github.com/taofu-labs/true-performance-network",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "66": {
@@ -736,7 +736,7 @@
    "github": "https://github.com/conjectures-io/conjectures-validator",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "67": {
@@ -747,7 +747,7 @@
    "github": "https://github.com/harnyx/harnyx",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "68": {
@@ -758,7 +758,7 @@
    "github": "https://github.com/metanova-labs/nova/",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "69": {
@@ -769,7 +769,7 @@
    "github": "https://github.com/HeraldMedia/herald",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "70": {
@@ -780,7 +780,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "71": {
@@ -791,7 +791,7 @@
    "github": "https://github.com/leadpoet/leadpoet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "72": {
@@ -802,7 +802,7 @@
    "github": "https://github.com/natixnetwork/streetvision-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "73": {
@@ -813,7 +813,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "74": {
@@ -824,7 +824,7 @@
    "github": "https://github.com/entrius/gittensor/tree/main",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "75": {
@@ -835,7 +835,7 @@
    "github": "https://github.com/thenervelab/thebrain",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "76": {
@@ -846,7 +846,7 @@
    "github": "https://github.com/heroncovelabs/ormas-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "77": {
@@ -857,7 +857,7 @@
    "github": "https://github.com/creativebuilds/sn77",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "78": {
@@ -868,7 +868,7 @@
    "github": "https://github.com/Umi-BitSign/umi",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "79": {
@@ -879,7 +879,7 @@
    "github": "https://github.com/taos-im/sn-79",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "80": {
@@ -890,7 +890,7 @@
    "github": "https://github.com/openroboto-ai/openroboto-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "81": {
@@ -901,7 +901,7 @@
    "github": "https://github.com/reliquadotai/reliquary",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "82": {
@@ -912,7 +912,7 @@
    "github": "https://github.com/Vora-Inc/NOAH",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "83": {
@@ -923,7 +923,7 @@
    "github": "https://github.com/toptensor/CliqueAI",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "84": {
@@ -934,7 +934,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "85": {
@@ -945,7 +945,7 @@
    "github": "https://github.com/vidaio-subnet/vidaio-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "86": {
@@ -956,7 +956,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "87": {
@@ -967,7 +967,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "88": {
@@ -978,7 +978,7 @@
    "github": "https://github.com/mobiusfund/investing",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "89": {
@@ -989,7 +989,7 @@
    "github": "https://github.com/DeltaCompute24/InfiniteQuant-Subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "90": {
@@ -1000,7 +1000,7 @@
    "github": "https://github.com/KubeTEE-AI/kubetee-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "91": {
@@ -1011,7 +1011,7 @@
    "github": "https://github.com/TensorLink-AI/cascade",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "92": {
@@ -1022,7 +1022,7 @@
    "github": "https://github.com/reaxlabs/reax-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "93": {
@@ -1033,7 +1033,7 @@
    "github": "https://github.com/bitcast-network/bitcast",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "94": {
@@ -1044,7 +1044,7 @@
    "github": "https://github.com/cathedralai/cathedral-sandbox",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "95": {
@@ -1055,7 +1055,7 @@
    "github": "https://github.com/actual-computer/actual-subnet-95",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "96": {
@@ -1066,7 +1066,7 @@
    "github": "https://github.com/verathos-ai/verathos",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "97": {
@@ -1077,7 +1077,7 @@
    "github": "https://github.com/DendriteLabs/ingot",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "98": {
@@ -1088,7 +1088,7 @@
    "github": "https://github.com/neverplayalone/neverplayalone_subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "99": {
@@ -1099,7 +1099,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "100": {
@@ -1110,7 +1110,7 @@
    "github": "https://github.com/CortexLM/cortex",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "101": {
@@ -1121,7 +1121,7 @@
    "github": "https://github.com/tag101-ai/tag101",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "102": {
@@ -1132,7 +1132,7 @@
    "github": "https://github.com/Connito-AI/Connito",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "103": {
@@ -1143,7 +1143,7 @@
    "github": "https://github.com/terza-labs/terza-miner",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "104": {
@@ -1154,7 +1154,7 @@
    "github": "https://github.com/taostatus/taostatus-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "105": {
@@ -1165,7 +1165,7 @@
    "github": "https://github.com/orgs/Beam-Network/repositories",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "106": {
@@ -1176,7 +1176,7 @@
    "github": "https://github.com/nodexo-ai/nodexo",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "107": {
@@ -1187,7 +1187,7 @@
    "github": "https://github.com/minos-protocol/minos_subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "108": {
@@ -1198,7 +1198,7 @@
    "github": "https://github.com/TatsuProject/ChipForge_SN108",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "109": {
@@ -1209,7 +1209,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "110": {
@@ -1220,7 +1220,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "111": {
@@ -1231,7 +1231,7 @@
    "github": "https://github.com/DeSciClaims/Claims",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "112": {
@@ -1242,7 +1242,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "113": {
@@ -1253,7 +1253,7 @@
    "github": "",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "114": {
@@ -1264,7 +1264,7 @@
    "github": "https://github.com/DendriteHQ/SOMA",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "115": {
@@ -1275,7 +1275,7 @@
    "github": "https://github.com/moirai115/MoirAI",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "116": {
@@ -1286,7 +1286,7 @@
    "github": "https://github.com/carbonphysicsai/Carbon",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "117": {
@@ -1297,7 +1297,7 @@
    "github": "https://github.com/everyframe-studios/everyframe-miner",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "118": {
@@ -1308,7 +1308,7 @@
    "github": "https://github.com/orgs/ditto-assistant/repositories",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "119": {
@@ -1319,7 +1319,7 @@
    "github": "https://github.com/capabilityforge-next/capabilityforge",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "120": {
@@ -1330,7 +1330,7 @@
    "github": "https://github.com/AffineFoundation/affine",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "121": {
@@ -1341,7 +1341,7 @@
    "github": "https://github.com/sundae-bar/bittensor-subnet",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "122": {
@@ -1352,7 +1352,7 @@
    "github": "https://github.com/CookingTao",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "123": {
@@ -1363,7 +1363,7 @@
    "github": "https://github.com/Barbariandev/MANTIS",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "124": {
@@ -1374,7 +1374,7 @@
    "github": "https://github.com/swarm-subnet/swarm",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "125": {
@@ -1385,7 +1385,7 @@
    "github": "https://github.com/Barbariandev/refinery",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "126": {
@@ -1396,7 +1396,7 @@
    "github": "https://github.com/attelierai/attelierai_subnet/",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "127": {
@@ -1407,7 +1407,7 @@
    "github": "https://github.com/astridintelligence/sn-127",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   },
   "128": {
@@ -1418,7 +1418,7 @@
    "github": "https://github.com/byteleapai/byteleap-Miner",
    "status": "active",
    "first_seen": "2026-11-01",
-   "last_seen": "2026-11-01",
+   "last_seen": "2026-11-02",
    "aliases": []
   }
  },

@@ -1,6 +1,6 @@
 # Bittensor 子网对照表（自动生成，勿手改）
 
-> 来源：https://taostats.io/subnets 的链上子网身份（SubnetIdentitiesV2），最后更新：2026-11-01
+> 来源：https://taostats.io/subnets 的链上子网身份（SubnetIdentitiesV2），最后更新：2026-11-02
 > 只记录**当前**业务；描述缺失一律写「未知」。被注销的编号单独列在文末。
 
 | SN | 子网名 | 业务 |

@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -208,8 +208,11 @@ _TOKEN_INFO = {"index": None, "total": None}
 
 def pick_discord_token(cfg):
     """返回本次导出用的 token。
-    - 配置了 discord_tokens（数组，且至少一个非空）-> 每次随机抽一个，把请求摊到多个账号，
+    - 配置了 discord_tokens（数组，且至少一个非空）-> 随机抽一个，把请求摊到多个账号，
       降低单个 user token 被风控命中的概率（同一天也可命中不同号）。
+    - **防连用**：本次随机时排除「上一次真实导出」用过的那个令牌（记录在
+      exports/_digest_state.json 的 _meta.last_token_idx），池里只有 1 个时除外。
+      纯随机有 1/n 概率连着几天抽中同一个号，风控上不好看，所以硬排除。
     - 否则回退到单个 discord_token（向后兼容）。
     注意：随机模式下，每个 token 对应的账号都必须是该服务器成员且能访问目标频道。
     """
@@ -220,8 +223,19 @@ def pick_discord_token(cfg):
         log("discord_tokens 共 %d 项，已忽略 %d 个空/无效项，实际可用 %d 个"
             % (len(raw), len(raw) - len(pool), len(pool)))
     if pool:
-        idx = random.randrange(len(pool))
-        log("使用 discord_tokens 池中第 %d 个（共 %d 个，随机）" % (idx + 1, len(pool)))
+        cands = list(range(len(pool)))
+        # 防连用：排除上一次真实导出用过的令牌（编号为 1 起始）
+        last_idx = None
+        try:
+            meta = _load_digest_state(cfg).get("_meta") or {}
+            last_idx = int(meta.get("last_token_idx") or 0)
+        except Exception:
+            last_idx = 0
+        if last_idx and 1 <= last_idx <= len(pool) and len(pool) > 1:
+            cands.remove(last_idx - 1)
+            log("令牌防连用：上次真实导出用的是第 %d 个，本次从其余 %d 个里随机" % (last_idx, len(cands)))
+        idx = random.choice(cands)
+        log("使用 discord_tokens 池中第 %d 个（共 %d 个，随机且不与上次重复）" % (idx + 1, len(pool)))
         _TOKEN_INFO["index"] = idx + 1
         _TOKEN_INFO["total"] = len(pool)
         return pool[idx]
@@ -1532,6 +1546,12 @@ def _record_export(cfg, day_str, json_path, count):
         "json": json_path,
         "count": count,
     })
+    # 记下本次真实导出用的令牌编号（1 起始），供下次随机时排除（防连续两天用同一个号）
+    if _TOKEN_INFO.get("index"):
+        state["_meta"] = {
+            "last_token_idx": _TOKEN_INFO["index"],
+            "last_export_ts": day["exports"][-1]["ts"],
+        }
     _save_digest_state(cfg, state)
 
 def _day_exports(cfg, day_str):

@@ -5,7 +5,7 @@
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
 **当前版本：v1.3.1** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
-**当前模型：Kimi K3（Engy / Bittensor SN53）** ｜ 换模型只改 `config.json` 三个字段，见 [常见问题](#九常见问题排错)
+**当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
 
@@ -24,6 +24,7 @@
 - 🗣 **大白话 + 中文优先**：只有 SN 编号、子网名、人名、代币名保留英文；emission/buyback/staking 等一律译成「排放/回购/质押」，残留英文术语由代码兜底替换
 - 🔁 **两遍成稿（校对轮）**：第一遍出初稿，第二遍带着原文专门核对「数字记错人」「人物-子网归属靠碎片推出来」「原文没有的定性」，校对失败自动回退初稿（可用 `llm_verify_pass: false` 关掉）
 - 📚 **子网知识库（每周校对）**：本地 `subnets.json` 存「SN 编号 ↔ 子网名 ↔ 当前业务」，数据来自链上子网身份（团队自己登记的那句描述），**只记最新业务、注销的单独归档、不清楚就写未知**；日报生成时只把当天提到的编号注入提示词（不整表塞），模型从此认得「Engy = SN53」「117 = everyframe.studio」
+- 🆚 **双模型对比模式（可选）**：`compare_profiles` 填 2 个以上模型档案，同一天分别生成、分别推送，标题带 `A·DeepSeek` / `B·Kimi K3` 标签，底部署名自动跟随——用来一段时间内对比哪家更准
 - 🏷 **底部署名跟随模型**：`🤖 由 Kimi K3 生成` 自动读 `deepseek_model`，换模型不用改代码
 - 📝 **说人话、不啰嗦**：少用行话，「SOTA」这类缩写写成「中文（英文缩写）」；同一件事在两个小节重复时自动去重
 - 📱 **手机端友好排版**：飞书卡片铺满屏宽，标题+日期与正文合并在**同一可复制文本块**（长按整段选中）
@@ -144,6 +145,7 @@ python pipeline.py
   "deepseek_timeout": 120,                         // 单次请求超时秒数；推理模型建议 180-300
   "deepseek_extra_params": {},                     // 额外请求体，原样合并；如 {"thinking":{"type":"disabled"}} 关思考
   "llm_verify_pass": true,                         // 两遍成稿：第二遍带原文校对（数字归属/人物-子网归属/残留英文），失败自动回退初稿
+  "compare_profiles": [],                          // 双模型对比模式：填 2 个以上模型档案，日报会分别生成、分别推送（见下方「对比模式」）
   "llm_direct": true,                              // 国内大模型 API 直连、不走代理（默认开，避免被 Clash 节点掐断）
   "no_proxy_hosts": [],                            // 追加要直连的域名，如自建的 OpenAI 兼容网关
   "proxy": "",                                     // 留空=自动用系统代理(Clash)
@@ -156,6 +158,26 @@ python pipeline.py
   "push_enabled": true
 }
 ```
+
+### 双模型对比模式（compare_profiles）
+
+想比较两个模型谁总结得更准，把 `compare_profiles` 填成 2 个以上档案：同一天的日报会用每个模型**各生成一版、分别推送**，
+标题带 `｜ A·DeepSeek V4.1` 这样的标签，底部署名也跟着变，日志按版本前缀分行记录，方便逐条对照。
+
+```jsonc
+"compare_profiles": [
+  { "label": "A·DeepSeek V4.1", "base_url": "https://api.engy.ai/v1", "model": "deepseek-v4.1-flash" },
+  { "label": "B·Kimi K3", "base_url": "https://api.engy.ai/v1", "model": "kimi-k3",
+    "extra_params": { "thinking": { "type": "disabled" } } }
+]
+```
+
+- 档案字段：`label`（展示名）、`base_url`、`model`、`api_key`（留空则复用主配置的 key）、
+  `extra_params`、`temperature`、`max_tokens`、`timeout`——没写的都继承主配置。
+- 对比只变**模型**这一个变量：同一份聊天记录、同一套提示词、同样开校对轮。
+- 花费约为单模型的 2 倍（每个模型都跑初稿 + 校对两遍）；某一版生成失败只少一条推送，不影响另一版。
+- 想停掉对比：把数组清空成 `[]` 即恢复单模型。`/retry`、`/weekly` 仍只跑主配置那一个模型。
+- 落盘：`exports/dtao_<日期>.digest.A.txt`、`.B.txt`（第一版同时写标准名 `dtao_<日期>.digest.txt`，供 `/repush` 用）。
 
 ### 如何拿 Discord user token（⚠️ 仅自用，风险自担）
 
@@ -416,6 +438,14 @@ A：三步排查：① 打开 `subnets.md` 搜一下这个编号在不在表里�
 **Q：`subnets.json` 里会不会有敏感信息？能一起传 GitHub 吗？**
 A：里面只有公开的链上子网身份（名称、描述、官网/GitHub 链接）和代码生成的中文标签，
 不含任何 token、密钥、频道 ID，所以随仓库一起版本化，换机器直接可用。
+
+**Q：开了对比模式，`/retry` 和 `/weekly` 会用哪个模型？**
+A：只用 `config.json` 里的**主配置**（`deepseek_base_url` / `deepseek_model`），也就是第一个档案，
+   因为重总结/周报是纠错和补充，不适合一次刷两版。想对照某次 `/retry` 的效果，把想比的模型设成主配置再触发。
+
+**Q：对比模式会不会让导出变多、更容易被风控？**
+A：不会。两个模型**共用同一次导出结果**，只是把同一份聊天记录分别喂给两家模型，Discord 侧配额和令牌轮换完全不变；
+   多出来的只是大模型调用费用（约为单模型的 2 倍）。
 
 **Q：总结用的是哪个模型？可以换吗？**
 A：当前默认接 **Engy（Bittensor SN53）上的 `kimi-k3`**，并关闭了思考模式。日报底部那行 `🤖 由 xxx 生成` 会自动跟着 `deepseek_model` 变，看到什么名字就是什么模型在跑。

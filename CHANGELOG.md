@@ -8,9 +8,37 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.3.2** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.4.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.4.0 — 2026-11-02
+
+**新增「双模型对比模式」：同一天的日报，两个模型各生成一版、各推一次，用一段时间对比谁更准。**
+
+### 新增
+- `config.json` 新增 `compare_profiles` 数组（≥2 个档案即启用）：
+  `label` / `base_url` / `model` / `api_key` / `extra_params` / `temperature` / `max_tokens` / `timeout`，
+  未填的字段继承主配置，因此同一家渠道的不同模型共用一把 key 即可。
+- `compare_profiles()`：把每个档案包成一份 cfg 副本（只覆盖模型相关字段），其余配置原样继承。
+- `generate_digest()`：把「生成 → 结构清洗 → 校对轮 → 归属兜底」抽成一个函数，
+  对比模式下每个模型各跑一遍，**提示词、输入、校对力度完全一致，唯一变量是模型**。
+- 推送：每条标题追加 `｜ A·DeepSeek V4.1` 这样的版本标签，Feishu 卡片头与 TG 首行都能看到；
+  底部署名由各自档案的 `deepseek_model` 决定，不会串。
+- 落盘：`exports/dtao_<日期>.digest.A.txt` / `.B.txt`；第一版同时写标准名（`dtao_<日期>.digest.txt`、
+  `last_digest.txt`），保证 `/repush`、`/watch`、潜力观察等旧功能不受影响。
+- 容错：某一版生成失败只少一条推送并在日志标出，不会让整次任务失败。
+- `_MODEL_LABELS` 补 `deepseek-v4.1-flash` → 「DeepSeek V4.1」等映射，底部署名不再显示生硬的 model id。
+
+### 说明
+- 对比只影响 `daily`（以及触发日报的 `/digest`）：`/retry` 与 `/weekly` 仍走主配置那一个模型。
+- Discord 侧没有额外消耗：两个模型共用同一次导出，令牌轮换与每日配额不变；费用约为单模型的 2 倍。
+- 想停止对比把 `compare_profiles` 清空成 `[]` 即可，无需改代码。
+
+### 保留
+- 单模型流程完全兼容：未配置该项时行为与 v1.3.2 一致。
 
 ---
 

@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1299,6 +1299,9 @@ _MODEL_LABELS = {
     "kimi-k2-turbo-preview": "Kimi K2",
     "deepseek-chat": "DeepSeek V3",
     "deepseek-reasoner": "DeepSeek R1",
+    "deepseek-v4.1-flash": "DeepSeek V4.1",
+    "deepseek-v4.1-flash-1017": "DeepSeek V4.1",
+    "deepseek-v4-flash-0731": "DeepSeek V4",
     "gpt-4o": "GPT-4o",
     "gpt-4o-mini": "GPT-4o mini",
     "claude-sonnet-4-5": "Claude Sonnet 4.5",
@@ -1311,6 +1314,56 @@ def model_label(cfg):
     """返回用于底部署名的模型名（读 config.deepseek_model，未知型号原样显示）。"""
     raw = str((cfg or {}).get("deepseek_model") or "deepseek-chat").strip()
     return _MODEL_LABELS.get(raw.lower(), raw)
+
+
+def compare_profiles(cfg):
+    """对比模式：config.json 里 `compare_profiles` 配了 ≥2 个模型档案时，
+    同一天的日报会**分别用每个模型生成、分别推送**，方便一段时间内对比效果。
+
+    每个档案支持的字段（都可选，缺省继承主配置）：
+        label        展示名，如 "DeepSeek V4.1"（日报标题与底部署名用）
+        base_url     渠道地址（OpenAI 兼容 /v1）
+        model        模型名
+        api_key      该渠道的 key（留空则复用 deepseek_api_key）
+        extra_params 额外请求体（如 {"thinking":{"type":"disabled"}}）
+        temperature / max_tokens / timeout
+
+    返回 [(label, 覆盖后的 cfg 副本), ...]；未配置或不足 2 个时返回 []（走原来的单模型流程）。
+    """
+    profs = [p for p in (cfg.get("compare_profiles") or []) if isinstance(p, dict)]
+    out = []
+    for i, p in enumerate(profs):
+        label = str(p.get("label") or p.get("model") or ("档案%d" % (i + 1))).strip()
+        c = dict(cfg)
+        if p.get("base_url"):
+            c["deepseek_base_url"] = p["base_url"]
+        if p.get("model"):
+            c["deepseek_model"] = p["model"]
+        if p.get("api_key"):
+            c["deepseek_api_key"] = p["api_key"]
+        if "extra_params" in p:
+            c["deepseek_extra_params"] = p["extra_params"]
+        for src, dst in (("temperature", "deepseek_temperature"),
+                         ("max_tokens", "deepseek_max_tokens"),
+                         ("timeout", "deepseek_timeout")):
+            if src in p:
+                c[dst] = p[src]
+        out.append((label, c))
+    return out if len(out) >= 2 else []
+
+
+def generate_digest(cfg_i, text_block, system_prompt, items, tag=""):
+    """一次完整成稿：生成 -> 结构清洗 -> 校对轮 -> 归属兜底清洗。对比模式下每个模型各跑一遍。"""
+    digest = call_deepseek(cfg_i, text_block, system_prompt=system_prompt)
+    digest = sanitize_digest(digest)
+    digest = polish_digest(cfg_i, text_block, digest)
+    digest, _ = scrub_unsupported_links(digest, items)
+    n = len(re.sub(r"\s", "", digest or ""))
+    if n > 1700:
+        log("%s⚠️ 篇幅偏长：%d 字（目标 1100-1400）" % (tag, n))
+    else:
+        log("%s篇幅：%d 字（目标 1100-1400）" % (tag, n))
+    return digest
 
 
 def push_feishu(cfg, title, digest):
@@ -1615,7 +1668,7 @@ def merge_substantive(json_paths):
     all_items.sort(key=lambda x: x[1])
     return all_items
 
-def _audit_names(digest, items):
+def _audit_names(digest, items, tag=""):
     """人名保真核对：把日报「人物观点」里出现的名字与当日真实发言者名单比对。
     不在名单里的只写日志提示（不阻断推送、不改内容），便于人工复核是否被模型改写或编造。"""
     authors = {a for _r, _t, a, _c in items if a}
@@ -1645,10 +1698,10 @@ def _audit_names(digest, items):
             continue
         unknown.append(n)
     if unknown:
-        log("⚠️ 人名核对：以下名字不在当日发言者名单中，请人工确认是否被改写/编造：%s"
-            % "、".join(sorted(set(unknown))))
+        log("%s⚠️ 人名核对：以下名字不在当日发言者名单中，请人工确认是否被改写/编造：%s"
+            % (tag, "、".join(sorted(set(unknown)))))
     else:
-        log("✅ 人名核对通过：日报中的人物均可对应到当日真实发言者")
+        log("%s✅ 人名核对通过：日报中的人物均可对应到当日真实发言者" % tag)
 
 
 def run_one_day(cfg, after_dt, before_dt):
@@ -1687,24 +1740,35 @@ def run_one_day(cfg, after_dt, before_dt):
         items = merge_substantive(sources)
         log("过滤后保留实质消息 %d 条（%s，%s）" % (len(items), day_str, mode_label))
 
-    # 2) 总结
+    # 2) 总结（对比模式下：每个模型各出一版，后面分别推送）
     text_block = ""
+    sys_p = SYSTEM_PROMPT
+    if action in ("resummarize", "merge"):
+        sys_p = SYSTEM_PROMPT + DEEPEN_HINT
+
+    profiles = compare_profiles(cfg) if items else []
+    results = []      # [{"label": 展示名, "digest": 文本, "cfg": 该模型的配置副本}]
     if not items:
-        digest = "📭 %s 频道 %s 当日无与 Bittensor 子网/重要成员相关的实质讨论。" % (channel_name, day_str)
+        results.append({
+            "label": "",
+            "digest": "📭 %s 频道 %s 当日无与 Bittensor 子网/重要成员相关的实质讨论。" % (channel_name, day_str),
+            "cfg": cfg,
+        })
+    elif profiles:
+        log("对比模式：%d 个模型分别生成（%s），生成完分别推送"
+            % (len(profiles), "、".join(l for l, _ in profiles)))
+        text_block = build_text_block(channel_name, day_str, items)
+        for label, pc in profiles:
+            try:
+                d = generate_digest(pc, text_block, sys_p, items, tag="【%s】" % label)
+                results.append({"label": label, "digest": d, "cfg": pc})
+            except Exception as e:
+                log("【%s】生成失败，跳过这一版：%s" % (label, e))
+        if not results:
+            raise RuntimeError("对比模式下所有模型都生成失败，请检查 compare_profiles 配置")
     else:
         text_block = build_text_block(channel_name, day_str, items)
-        sys_p = SYSTEM_PROMPT
-        if action in ("resummarize", "merge"):
-            sys_p = SYSTEM_PROMPT + DEEPEN_HINT
-        digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
-    digest = sanitize_digest(digest)
-    digest = polish_digest(cfg, text_block, digest)
-    digest, _ = scrub_unsupported_links(digest, items)
-    _len = len(re.sub(r"\s", "", digest or ""))
-    if _len > 1700:
-        log("⚠️ 篇幅偏长：%d 字（目标 1100-1400），如嫌冗长可在 TG 用 /retry 加一句「更精炼」" % _len)
-    else:
-        log("篇幅：%d 字（目标 1100-1400）" % _len)
+        results.append({"label": "", "digest": generate_digest(cfg, text_block, sys_p, items), "cfg": cfg})
 
     # 末尾标注：本次使用的 token 编号（第几个/共几个）+ 当日导出次数（已用/每日上限）
     # 令牌 n/m：本次随机抽中的是第 n 个，池中共 m 个；复用未导出时显示为「-」
@@ -1717,56 +1781,74 @@ def run_one_day(cfg, after_dt, before_dt):
     footer = "\n\n---\n令牌：%s/%d · 次数：%d/%d" % (idx_str, t_total, used, max_per_day)
     if not action.startswith("export"):
         footer += "（本次复用已有记录，未重新导出）"
-    digest = (digest or "") + footer
     log("日报标注：令牌 %s/%d，当日导出次数 %d/%d%s"
         % (idx_str, t_total, used, max_per_day,
            "" if action.startswith("export") else "（复用，未重新导出）"))
 
+    for r in results:
+        r["digest"] = (r["digest"] or "") + footer
+
     # 人名保真核对（仅写日志提示，不阻断推送）
-    try:
-        _audit_names(digest, items)
-    except Exception as e:
-        log("人名核对异常（忽略）：%s" % e)
+    for r in results:
+        try:
+            _audit_names(r["digest"], items, tag=("【%s】" % r["label"]) if r["label"] else "")
+        except Exception as e:
+            log("人名核对异常（忽略）：%s" % e)
 
     # 归属核验（仅写日志，噪声较大，供人工复核）
-    try:
-        _bad = audit_attribution(digest, items)
-        if _bad:
-            log("⚠️ 归属核验：%d 处「人物-子网」关联在原文未直接共现，建议 /retry 复核：%s"
-                % (len(_bad), "、".join("%s→SN%d" % (n, s) for n, s, _ in _bad[:6])))
-        else:
-            log("✅ 归属核验通过（人物与子网编号均有原文依据）")
-    except Exception as e:
-        log("归属核验异常（忽略）：%s" % e)
+    for r in results:
+        tag = ("【%s】" % r["label"]) if r["label"] else ""
+        try:
+            _bad = audit_attribution(r["digest"], items)
+            if _bad:
+                log("%s⚠️ 归属核验：%d 处「人物-子网」关联在原文未直接共现，建议 /retry 复核：%s"
+                    % (tag, len(_bad), "、".join("%s→SN%d" % (n, s) for n, s, _ in _bad[:6])))
+            else:
+                log("%s✅ 归属核验通过（人物与子网编号均有原文依据）" % tag)
+        except Exception as e:
+            log("%s归属核验异常（忽略）：%s" % (tag, e))
 
-    title = "🤖 DTAO price-talk 日报 · %s" % day_str
+    base_title = "🤖 DTAO price-talk 日报 · %s" % day_str
 
-    # 3) 推送
+    # 3) 推送（对比模式：每个模型各推一条，标题带版本标签，方便对照）
     if cfg.get("push_enabled", True):
+        keys = "ABCDEFGH"
+        for i, r in enumerate(results):
+            rcfg = r["cfg"]
+            title = base_title + ((" ｜ %s" % r["label"]) if r["label"] else "")
+            try:
+                push_feishu(rcfg, title, r["digest"])
+            except Exception as e:
+                log("%s飞书推送异常：%s" % (("【%s】" % r["label"]) if r["label"] else "", e))
+            try:
+                push_telegram(rcfg, title, r["digest"])
+            except Exception as e:
+                log("%sTelegram 推送异常：%s" % (("【%s】" % r["label"]) if r["label"] else "", e))
+            # 落盘：对比模式按 A/B/C 分开存，第一版同时写「标准文件名」供 /repush 与预览使用
+            try:
+                if r["label"]:
+                    with open(os.path.join(out_dir, "dtao_%s.digest.%s.txt" % (day_str, keys[i])), "w",
+                              encoding="utf-8") as f:
+                        f.write(r["digest"])
+                    with open(os.path.join(out_dir, "_last_digest_%s.txt" % keys[i]), "w", encoding="utf-8") as f:
+                        f.write(r["digest"])
+                if i == 0:
+                    with open(os.path.join(out_dir, "dtao_%s.digest.txt" % day_str), "w", encoding="utf-8") as f:
+                        f.write(r["digest"])
+                    with open(os.path.join(out_dir, "last_digest.txt"), "w", encoding="utf-8") as f:
+                        f.write(r["digest"])
+            except Exception:
+                pass
+        # 潜力观察单独生成并落盘，只在 /watch 时推送，不随日报一起发（对比模式只跑一次，用第一版配置）
         try:
-            push_feishu(cfg, title, digest)
-        except Exception as e:
-            log("飞书推送异常：%s" % e)
-        try:
-            push_telegram(cfg, title, digest)
-        except Exception as e:
-            log("Telegram 推送异常：%s" % e)
-        # 落盘：当天 digest（供 repush 补推）+ 最新 digest（供预览）
-        try:
-            with open(os.path.join(out_dir, "dtao_%s.digest.txt" % day_str), "w", encoding="utf-8") as f:
-                f.write(digest)
-            with open(os.path.join(out_dir, "last_digest.txt"), "w", encoding="utf-8") as f:
-                f.write(digest)
-        except Exception:
-            pass
-        # 潜力观察单独生成并落盘，只在 /watch 时推送，不随日报一起发
-        try:
-            generate_potential(cfg, day_str, items)
+            generate_potential(results[0]["cfg"], day_str, items)
         except Exception as e:
             log("潜力观察流程异常（忽略）：%s" % e)
     else:
-        log("push_enabled=false，仅打印不推送：\n" + title + "\n" + digest)
-    return digest
+        for r in results:
+            title = base_title + ((" ｜ %s" % r["label"]) if r["label"] else "")
+            log("push_enabled=false，仅打印不推送：\n" + title + "\n" + r["digest"])
+    return results[0]["digest"]
 
 
 def resummarize_with_feedback(cfg, day_str, feedback, targets=None):

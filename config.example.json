@@ -32,5 +32,6 @@
   "push_enabled": true,
   "max_exports_per_day": 2,
   "min_export_interval_hours": 12,
-  "compare_profiles": []
+  "compare_profiles": [],
+  "context_days": 2
 }

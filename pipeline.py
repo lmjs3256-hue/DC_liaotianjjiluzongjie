@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.4.2"
+__version__ = "1.5.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -302,13 +302,19 @@ def export_via_api(cfg, token, channel, after_date, before_date, out_json):
     """内置 API 后端：不用 DiscordChatExporter，直接调 Discord REST API 拉指定日期的消息。
     好处：不走 .NET 的代理解析逻辑（DCE 常在此卡死），代理完全由 config.proxy / 系统代理控制。
     产出 JSON 与 DCE 兼容：messages[] 含 author.name / content / timestamp / reactions[].count
-    日期语义与 DCE 一致：按 UTC 解释，[after 00:00, before 00:00) 左闭右开。
+    日期语义：[after, before) 左闭右开。参数两种格式都认：
+      YYYY-MM-DD            -> 按 UTC 当日 00:00（兼容旧调用）
+      YYYY-MM-DDTHH:MM:SS   -> 按 UTC 该时刻（run_export 会把北京时区日边界换算成 UTC 再传入）
     """
     import datetime as _dt
-    start_ms = int(_dt.datetime.strptime(after_date, "%Y-%m-%d")
-                   .replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
-    end_ms = int(_dt.datetime.strptime(before_date, "%Y-%m-%d")
-                 .replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    def _to_utc_ms(s):
+        if "T" in s:
+            d = _dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
+        else:
+            d = _dt.datetime.strptime(s, "%Y-%m-%d")
+        return int(d.replace(tzinfo=_dt.timezone.utc).timestamp() * 1000)
+    start_ms = _to_utc_ms(after_date)
+    end_ms = _to_utc_ms(before_date)
 
     base = "https://discord.com/api/v9/channels/%s/messages" % channel
     url = "%s?limit=100&before=%d" % (base, _ms_to_snow(end_ms))
@@ -366,12 +372,21 @@ def run_export(cfg, after_dt, before_dt, out_json):
     token = pick_discord_token(cfg)
     channel = str(cfg["channel_id"])
     backend = cfg.get("dce_backend", "docker").lower()
-    after = after_dt.strftime("%Y-%m-%d")
-    before = before_dt.strftime("%Y-%m-%d")
+    # after_dt/before_dt 是「北京时区」的自然日边界（00:00 -> 次日 00:00）。
+    # Discord 按 UTC 计时，这里精确换算成 UTC 时刻再传给导出后端，
+    # 保证导出范围就是北京时间自然日（v1.5.0 前 date 字符串被按 UTC 解释，实际范围是北京 08:00 -> 次日 08:00）。
+    utc = datetime.timezone.utc
+    after_utc = after_dt.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%S")
+    before_utc = before_dt.astimezone(utc).strftime("%Y-%m-%dT%H:%M:%S")
+    # DCE/docker 后端按本机时区（北京）解释不带时区的日期时间，直接传北京本地时刻
+    after_local = after_dt.strftime("%Y-%m-%dT%H:%M:%S")
+    before_local = before_dt.strftime("%Y-%m-%dT%H:%M:%S")
+    log("导出范围（北京时间）：%s 00:00 -> %s 00:00"
+        % (after_dt.strftime("%Y-%m-%d"), before_dt.strftime("%Y-%m-%d")))
 
     # 内置 API 后端：完全绕开 DiscordChatExporter（.NET），代理可控、速度秒级
     if backend == "api":
-        export_via_api(cfg, token, channel, after, before, out_json)
+        export_via_api(cfg, token, channel, after_utc, before_utc, out_json)
         return
 
     if backend == "docker":
@@ -383,7 +398,7 @@ def run_export(cfg, after_dt, before_dt, out_json):
             "tyrrrz/discordchatexporter:stable", "export",
             "-t", token, "-c", channel, "-f", "Json",
             "-o", "/out/%s" % out_name,
-            "--after", after, "--before", before,
+            "--after", after_local, "--before", before_local,
         ]
     else:
         exe = cfg.get("dce_exe")
@@ -391,7 +406,7 @@ def run_export(cfg, after_dt, before_dt, out_json):
             raise RuntimeError("dce_backend=local 但找不到 dce_exe：%s" % exe)
         os.makedirs(os.path.dirname(out_json), exist_ok=True)
         cmd = [exe, "export", "-t", token, "-c", channel, "-f", "Json",
-               "-o", out_json, "--after", after, "--before", before]
+               "-o", out_json, "--after", after_local, "--before", before_local]
 
     display = " ".join(cmd).replace(token, "***")
     log("导出命令：" + display)
@@ -433,7 +448,7 @@ def run_export(cfg, after_dt, before_dt, out_json):
     if failed:
         if fallback:
             log("⚠ %s —— 自动回退到内置 API 后端导出" % failed)
-            export_via_api(cfg, token, channel, after, before, out_json)
+            export_via_api(cfg, token, channel, after_utc, before_utc, out_json)
             return
         raise RuntimeError(failed + "\n（如需自动改用内置 API 后端，请在 config.json 设置 \"api_fallback\": true）")
 
@@ -523,7 +538,13 @@ def extract_substantive(json_path, ctx=2):
         if not c or NOISE.match(c):
             continue
         author = (m.get("author") or {}).get("nickname") or (m.get("author") or {}).get("name") or "?"
-        t = (m.get("timestamp") or "")[11:16]
+        ts = m.get("timestamp") or ""
+        t = ts[11:16]
+        try:  # Discord 时间戳是 UTC，转成北京时间显示（导出范围本来就是北京自然日）
+            t = (datetime.datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+                 + datetime.timedelta(hours=8)).strftime("%H:%M")
+        except Exception:
+            pass
         react = sum(r.get("count", 0) for r in m.get("reactions", []))
         out.append((react, t, author, c))
     # 按时间升序输出：模型需要顺着对话流理解指代与因果，按热度排序会把上下文打散
@@ -644,6 +665,11 @@ SYSTEM_PROMPT = (
     "23. **相邻两句不等于因果**：同一个人连着发的两条消息（例如「我看好 117」+「英伟达刚投了 higgsfield」），"
     "除非原文出现 because / so / 因为 / 所以 / 这就是 这类连接词，否则只能**并列陈述**，"
     "严禁写成「理由是…」「因为…所以看好」「受…带动」。想体现关联就写「同一时段他还提到…」，让读者自己判断。\n"
+    "24. **背景资料只用来理解，不用来总结**：输入里可能附有【背景资料：前天/大前天】小节，"
+    "它们的作用是帮你接上跨天话题（比如当天说的「那个子网」其实前天就开始讨论、某人的表态有前文）。"
+    "**背景日发生的事一律不得写成总结日（当天）的新闻**；如果当天消息明确延续背景日的话题，"
+    "可以写「延续前几日的话题」，但每件事实必须归属其真实发生的日期，不得把日期混写、"
+    "也不得把背景日的内容单独扩成一条。总结对象永远只有【当日消息】。\n"
     "\n"
     "【稳定性要求】相同输入应给出相同结论：优先复述原文事实，不做发散联想；"
     "对同一事件的定性只有一种写法，不要在不同表述之间摇摆。\n"
@@ -740,6 +766,8 @@ VERIFY_PROMPT = (
     "5. **拼出来的因果**：初稿出现「理由是」「因为…所以」「受…带动」「得益于」时，回原文确认有没有 "
     "because/so/因为/所以 这类连接词。若只是同一人相邻两句话、或两件互不相干的事被并到一句，"
     "改成并列陈述「同一时段他还提到…」，或直接删掉因果。\n"
+    "6. **日期归属**：输入里若附有【背景资料：前天/大前天】小节，逐条确认初稿里的事实都发生在"
+    "**总结日当天**；背景日的事件被写成当天新闻的，删掉或改写为「延续前几日话题」并标明真实日期。\n"
     "\n【输出要求】只输出修正后的四个小节：🔥 必读重点 / 👥 重要人物观点 / 📎 其他细节 / 💡 一句话总结；"
     "篇幅 1100-1400 字，**不得比初稿更长**——纠错只能「改写或删除」，不许新增句子、不许补细节、不许加总结段；"
     "不要输出核对说明、不要写「已修改」之类的话；**不确定的内容宁可删除，也不要保留猜测**。"
@@ -1124,8 +1152,9 @@ def call_llm(cfg, text_block, system_prompt=None, tries=3):
 def call_deepseek(cfg, text_block, system_prompt=None, tries=3):
     return call_llm(cfg, text_block, system_prompt=system_prompt, tries=tries)
 
-def build_text_block(channel_name, day, items):
+def build_text_block(channel_name, day, items, extra_hint_items=None):
     # 发言者名单：给模型一份白名单，防止人名被音译、缩写或凭空编造
+    # （只含**总结日**当天的发言者；背景资料里的人不能作为当日发言者出现）
     authors, _seen = [], set()
     for _r, _t, _a, _c in items:
         if _a and _a not in _seen:
@@ -1137,7 +1166,7 @@ def build_text_block(channel_name, day, items):
              "当日发言者名单（共 %d 人；引用人名时必须原样照抄，不得音译/缩写/改写大小写，"
              "名单外的名字不得作为发言者出现）：%s"
              % (len(authors), "、".join(authors))]
-    _hint = subnet_hint_block(items)
+    _hint = subnet_hint_block(items + list(extra_hint_items or []))
     if _hint:
         lines.append(_hint)
     prev_t = None
@@ -1675,6 +1704,60 @@ def merge_substantive(json_paths):
     all_items.sort(key=lambda x: x[1])
     return all_items
 
+
+def _day_json_files(cfg, day_str):
+    """列出某天已有的全部导出 json（dtao_<日>.1.json / .2.json …，兼容旧命名 dtao_<日>.json）。"""
+    out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
+    files = []
+    for seq in (1, 2, 3, 4, 5):
+        p = os.path.join(out_dir, "dtao_%s.%d.json" % (day_str, seq))
+        if os.path.exists(p):
+            files.append(p)
+    legacy = os.path.join(out_dir, "dtao_%s.json" % day_str)
+    if os.path.exists(legacy):
+        files.append(legacy)
+    return files
+
+
+def build_context_block(cfg, focus_day_str, max_per_day=160):
+    """构建「背景资料」文本块：总结日之前的 N 天（默认 2 天，config.context_days）的导出记录。
+    作用：跨天话题（今天聊的「那个子网」其实前天就开始讨论）需要上下文才能接上。
+    背景日的内容**不是总结对象**，块内已写明；焦点日当天消息由 build_text_block 单独给出。
+    返回 (背景文本块, 背景日 items 列表)。"""
+    n_days = int(cfg.get("context_days", 2) or 0)
+    if n_days <= 0:
+        return "", []
+    try:
+        d0 = datetime.datetime.strptime(focus_day_str, "%Y-%m-%d").date()
+    except Exception:
+        return "", []
+    labels = {1: "前天", 2: "大前天", 3: "3天前", 4: "4天前"}
+    blocks, ctx_items, counts = [], [], []
+    for k in range(n_days, 0, -1):          # 从更早的日子开始，按时间顺序排列
+        d = d0 - datetime.timedelta(days=k)
+        ds = d.strftime("%Y-%m-%d")
+        files = _day_json_files(cfg, ds)
+        items = merge_substantive(files) if files else []
+        label = labels.get(k, "%d天前" % k)
+        if not items:
+            blocks.append("【背景资料：%s（%s）】该日无导出记录，忽略。" % (label, ds))
+            continue
+        if len(items) > max_per_day:
+            items = items[-max_per_day:]     # 保时间线末端（离总结日最近的部分）
+        counts.append("%s %d条" % (ds, len(items)))
+        ctx_items.extend(items)
+        lines = []
+        for _r, t, a, c in items:
+            c1 = c.replace("\n", " ").strip()
+            if len(c1) > 300:
+                c1 = c1[:300] + "…"
+            lines.append("- [%s] <%s> %s" % (t, a, c1))
+        blocks.append("【背景资料：%s（%s）】共 %d 条——**仅供理解话题来龙去脉，不是总结对象**：\n%s"
+                      % (label, ds, len(items), "\n".join(lines)))
+    log("背景资料：附加总结日前 %d 天记录（%s），共 %d 条"
+        % (n_days, "、".join(counts) if counts else "全部无记录", len(ctx_items)))
+    return "\n\n".join(b for b in blocks if b), ctx_items
+
 def _audit_names(digest, items, tag=""):
     """人名保真核对：把日报「人物观点」里出现的名字与当日真实发言者名单比对。
     不在名单里的只写日志提示（不阻断推送、不改内容），便于人工复核是否被模型改写或编造。"""
@@ -1749,6 +1832,14 @@ def run_one_day(cfg, after_dt, before_dt):
 
     # 2) 总结（对比模式下：每个模型各出一版，后面分别推送）
     text_block = ""
+    ctx_block, ctx_items = "", []
+    if items:
+        # 背景资料：总结日之前 N 天（config.context_days，默认 2）的导出记录，
+        # 帮模型接上跨天话题；只作理解用，不算总结对象
+        ctx_block, ctx_items = build_context_block(cfg, day_str)
+        text_block = build_text_block(channel_name, day_str, items, extra_hint_items=ctx_items)
+        if ctx_block:
+            text_block += "\n\n" + ctx_block
     sys_p = SYSTEM_PROMPT
     if action in ("resummarize", "merge"):
         sys_p = SYSTEM_PROMPT + DEEPEN_HINT
@@ -1764,7 +1855,6 @@ def run_one_day(cfg, after_dt, before_dt):
     elif profiles:
         log("对比模式：%d 个模型分别生成（%s），生成完分别推送"
             % (len(profiles), "、".join(l for l, _ in profiles)))
-        text_block = build_text_block(channel_name, day_str, items)
         for label, pc in profiles:
             try:
                 d = generate_digest(pc, text_block, sys_p, items, tag="【%s】" % label)
@@ -1774,7 +1864,6 @@ def run_one_day(cfg, after_dt, before_dt):
         if not results:
             raise RuntimeError("对比模式下所有模型都生成失败，请检查 compare_profiles 配置")
     else:
-        text_block = build_text_block(channel_name, day_str, items)
         results.append({"label": "", "digest": generate_digest(cfg, text_block, sys_p, items), "cfg": cfg})
 
     # 末尾标注：本次使用的 token 编号（第几个/共几个）+ 当日导出次数（已用/每日上限）
@@ -1874,7 +1963,10 @@ def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
         raise RuntimeError("%s 的导出记录里没有实质消息" % day_str)
 
     channel_name = cfg.get("channel_name", "price-talk")
-    text_block = build_text_block(channel_name, day_str, items)
+    ctx_block, ctx_items = build_context_block(cfg, day_str)
+    text_block = build_text_block(channel_name, day_str, items, extra_hint_items=ctx_items)
+    if ctx_block:
+        text_block += "\n\n" + ctx_block
     sys_p = SYSTEM_PROMPT + (FEEDBACK_HINT % feedback)
     log("按用户反馈重总结（%s，%d 条消息）：%s" % (day_str, len(items), feedback[:80]))
     digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
@@ -1914,15 +2006,18 @@ def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
     return digest
 
 
-# 中文 / 英文「昨天 / 最新」等别名，统一解析成具体日期，方便 TG 按钮与手输
+# 中文 / 英文「昨天 / 最新 / 今天」等别名，统一解析成具体日期，方便 TG 按钮与手输
 YESTERDAY_ALIASES = {"昨日", "昨天", "yesterday", "latest", "最新", "y"}
+TODAY_ALIASES = {"今日", "今天", "today", "t"}
 
 
 def _resolve_day_alias(ds, tz):
-    """把「昨日 / 最新 / yesterday」等别名解析成 YYYY-MM-DD；不是别名则原样返回。"""
+    """把「昨日 / 今日 / 最新」等别名解析成 YYYY-MM-DD；不是别名则原样返回。"""
     if ds in YESTERDAY_ALIASES:
         yesterday = (datetime.datetime.now(tz) - datetime.timedelta(days=1)).date()
         return yesterday.strftime("%Y-%m-%d")
+    if ds in TODAY_ALIASES:
+        return datetime.datetime.now(tz).date().strftime("%Y-%m-%d")
     return ds
 
 

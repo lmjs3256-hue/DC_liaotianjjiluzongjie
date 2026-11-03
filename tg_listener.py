@@ -55,6 +55,7 @@ HELP = (
     "/digest 导出前一天并双推\n"
     "/digest 2026-10-23 导出指定日\n"
     "/digest 2026-10-22 2026-10-23 多日\n"
+    "/today 导出并总结今天的聊天记录（北京时间今天 00:00 到现在）\n"
     "/weekly 周报\n"
     "/watch 查看潜力观察(默认最新; /watch 7 近7天热点; /watch all 全部)\n"
     "/repush 补推最近一次日报(无需日期)\n"
@@ -276,6 +277,10 @@ def handle(text, chat_id):
         send(chat_id, HELP)
     elif cmd == "digest":
         run_pipeline(["daily"] + parts[1:], chat_id)
+    elif cmd in ("today", "jinri"):
+        # 总结今天的聊天记录（北京时间今天 00:00 -> 现在）
+        send(chat_id, "☀️ 收到，正在导出并总结今天的聊天记录，稍等…")
+        run_pipeline(["daily", "今日"], chat_id)
     elif cmd == "weekly":
         run_pipeline(["weekly"], chat_id)
     elif cmd == "watch":

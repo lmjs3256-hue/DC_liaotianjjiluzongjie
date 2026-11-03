@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -706,10 +706,26 @@ POTENTIAL_PROMPT = (
 )
 
 WEEKLY_SYSTEM_PROMPT = (
-    "你是一名 Bittensor 生态的资深研究员，负责把 Discord 频道「DTAO - price-talk」过去 7 天的聊天记录，"
-    "整理成中文周报，侧重「一周趋势、跨日升温信号、以及更确定的布局机会」。\n"
+    "你是一名 Bittensor 生态的资深研究员，负责把 Discord 频道「DTAO - price-talk」最近若干天"
+    "（天数以输入里的「日期范围」为准，可能是 7 天，也可能只有 2-3 天）的聊天记录，"
+    "整理成中文周报，侧重「跨日趋势、升温信号、以及更确定的布局机会」。\n"
     "\n"
     "【内容边界】同日报：只关注子网、代币机制、核心成员动态、催化事件；忽略水聊与无关内容。\n"
+    "\n"
+    "【日期纪律】输入按日期分段，每条消息都带发生日期。写事实时以所在分段的日期为准：\n"
+    "1. 关键事件尽量标注发生日期（如「11-01」），方便判断是「新发生」还是「延续讨论」；\n"
+    "2. 严禁把不同日期的事拼成同一天的因果，严禁把单日的一次表态写成「整周持续」；\n"
+    "3. 「多次提及/持续升温」必须真的在多个分段出现过，只在一天出现就写「某日」而不写「本周一直」。\n"
+    "\n"
+    "【溯源纪律（违反即作废）】\n"
+    "1. **共现≠关联**：某个公司/事件与某个子网在同一天被提到，不等于它们有股权、投资、合作或因果关系。"
+    "原文没有一句话直接说明两者关系的，只能并列陈述（「同段他还提到……」），严禁写成「X 加持 SNxx」「因 X 而涨」。\n"
+    "2. **代词必须落到原文**：原文用 he/they/某人指代时，只有前后文明确指名才能写出具体人名；"
+    "否则写「有人」「一名成员」，不许替模型自己指定主体。\n"
+    "3. **因果必须有连接词**：出现 because/so/因为/所以/导致 才可写因果，同一人相邻两句话不算。\n"
+    "4. 排名、最高级、金额、编号一律照抄原文；原文没给数字就不写数字。\n"
+    "5. **「承认/自认/证实」必须有其本人原话**：反讽、玩笑、俏皮回应（「我无罪，虽然我确实享受犯罪」）"
+    "不算承认，只能写「被多人指责…，他本人以玩笑回应」；别人的指控必须写明是谁指控的。\n"
     "\n"
     "【输出结构（严格按顺序；小节标题用 **加粗**）】\n"
     "**🔥 本周核心趋势**（4-6 条一周主线，趋势与子网变化合并写在这里；标注哪些是「多次提及/持续升温」的，"
@@ -726,6 +742,30 @@ WEEKLY_SYSTEM_PROMPT = (
     "每条 50-70 字，一条只说一件事，禁写填充词与重复内容。\n"
     "【事实核查规则】同日报【事实核查与验证规则】：重大定性以最新官方澄清为准；"
     "排名/最高级必须落到具体 SN 编号与数据，原文未指明就标「（原文未指明）」或舍弃；数字/代号照抄，严禁脑补。"
+)
+
+WEEKLY_VERIFY_PROMPT = (
+    "你是周报校对员，不是作者。用户消息里包含【原始聊天记录（按日期分段）】和一份【周报初稿】。"
+    "你的任务：逐条对照原文核对初稿，只做纠错与压缩，不改章节结构，输出修正后的完整周报。\n"
+    "\n【必须核对的六类错误】\n"
+    "1. **数字与人名**：每个数字（金额、TAO 数、百分比、时间）都要回原文确认，并确认**说话人正确**；"
+    "原文对不上就删掉或改成正确归属（金额已写成「万/亿」的保留这种写法，只核对换算）。\n"
+    "2. **人物—子网归属**：写「某人的子网是 SNxx」时必须有紧邻原文直接支持；靠相隔很久的碎片推出来的一律删掉归属。\n"
+    "3. **日期归属**：初稿里的事件，日期必须与原文分段一致。把 A 日的事写成 B 日、"
+    "把单日表态写成「整周持续」、或把两天的两件事并成一条因果的，改写或删除。\n"
+    "4. **无依据的定性**：原文没明说的手段、动机、因果（「为了砸盘」「团队授意」「正在预热」）删掉或改回原文表述；"
+    "单来源的重大利空/利好标「（单一消息源，待确认）」。\n"
+    "5. **拼出来的因果**：出现「理由是」「因为…所以」「受…带动」时，回原文确认有没有 because/so/因为/所以；"
+    "只是同一人相邻两句话、或两件互不相干的事，改成并列陈述或删掉因果。\n"
+    "6. **语言**：除 SN 编号、子网名、人名、代币名（TAO、dTAO、Alpha）外，不得残留英文单词。\n"
+    "7. **共现拼关联**：初稿把「某公司/某事件」和「某子网」绑成投资、加持、合作、因果的，"
+    "回原文找是否有一句话直接说明；没有就改成并列陈述或删掉关联词。\n"
+    "8. **代词与主体**：初稿把原文的 he/they/有人说成具体人名的，核对前后文是否明确指名；"
+    "不明确的改成「有人」或删掉人名。\n"
+    "9. **「承认/自认/证实」**：必须有其本人原话；反讽、玩笑、俏皮回应不算承认，改写成「被指控…，本人以玩笑回应」。\n"
+    "\n【输出要求】只输出修正后的五个小节：🔥 本周核心趋势 / 👥 重要人物观点 / ⚠️ 风险汇总 / "
+    "📎 其他细节 / 💡 一句话总结；篇幅 1300-1600 字，**不得比初稿更长**——纠错只能「改写或删除」，"
+    "不许新增句子、不许补细节、不许加总结段；不要输出核对说明；**不确定的内容宁可删除，也不要保留猜测**。"
 )
 
 DEEPEN_HINT = (
@@ -768,6 +808,8 @@ VERIFY_PROMPT = (
     "改成并列陈述「同一时段他还提到…」，或直接删掉因果。\n"
     "6. **日期归属**：输入里若附有【背景资料：前天/大前天】小节，逐条确认初稿里的事实都发生在"
     "**总结日当天**；背景日的事件被写成当天新闻的，删掉或改写为「延续前几日话题」并标明真实日期。\n"
+    "7. **共现拼关联**：初稿把「某公司/某事件」和「某子网」绑成投资、加持、合作、因果的，"
+    "回原文确认有没有一句话直接说明；只是同一天被提到，就改成并列陈述或删掉关联词。\n"
     "\n【输出要求】只输出修正后的四个小节：🔥 必读重点 / 👥 重要人物观点 / 📎 其他细节 / 💡 一句话总结；"
     "篇幅 1100-1400 字，**不得比初稿更长**——纠错只能「改写或删除」，不许新增句子、不许补细节、不许加总结段；"
     "不要输出核对说明、不要写「已修改」之类的话；**不确定的内容宁可删除，也不要保留猜测**。"
@@ -784,14 +826,16 @@ _SECTION_WORDS = ("必读重点", "重点子网动向", "重要人物观点", "�
 _FORBIDDEN_SECTIONS = ("重点子网动向", "潜力观察", "可布局")
 
 
-def polish_digest(cfg, text_block, draft):
+def polish_digest(cfg, text_block, draft, verify_prompt=None):
     """第二遍校对（可关：config.llm_verify_pass=false）：
     让模型带着原文再读一遍初稿，专门纠「数字记错人」「人物-子网归属靠碎片推出来」
-    「原文没有的定性」「残留英文」四类错。校对失败一律保留初稿，不影响推送。"""
+    「原文没有的定性」「残留英文」四类错。校对失败一律保留初稿，不影响推送。
+    verify_prompt 默认用日报版；周报传自己的版本（板块结构与字数配额不同）。"""
     if not draft or not cfg.get("llm_verify_pass", True):
         return draft
     try:
-        fixed = call_llm(cfg, text_block + "\n\n【日报初稿】\n" + draft, system_prompt=VERIFY_PROMPT)
+        fixed = call_llm(cfg, text_block + "\n\n【日报初稿】\n" + draft,
+                         system_prompt=verify_prompt or VERIFY_PROMPT)
         fixed = sanitize_digest(fixed or "")
         n = len(re.sub(r"\s", "", fixed))
         base = len(re.sub(r"\s", "", draft))
@@ -806,6 +850,58 @@ def polish_digest(cfg, text_block, draft):
     except Exception as e:
         log("校对失败（保留初稿继续推送）：%s" % e)
         return draft
+
+
+COMPRESS_PROMPT = (
+    "你是日报/周报的定稿编辑，本轮任务只有一件事：**删减字数**，绝对不许新增内容。\n"
+    "\n【删什么（按优先级，从高到低）】\n"
+    "1. 重复信息：同一事件在不同小节重复出现的，只留信息最全的一处；\n"
+    "2. 空话与连接词：铺垫句、评价性套话、「值得注意的是」这类填充语；\n"
+    "3. 次要细节：不带数字、不带 SN 编号、不影响判断的转述与调侃；\n"
+    "4. 弱信号：只有一个人随口一句、没有后续讨论的碎信息。\n"
+    "\n【必须保留】\n"
+    "- 所有 SN 编号、金额/比例数字、人名与说话人归属；\n"
+    "- 原有的全部小节标题，顺序不变，一个小节都不许删；\n"
+    "- 事实性结论和风险提示，宁可压缩表述，不许整条砍掉。\n"
+    "\n【输出要求】只输出压缩后的完整稿件：不写说明、不写「已压缩」、不加新句子、"
+    "不改写事实、不调整章节顺序。每条压到 40-60 字，一条只说一件事。"
+)
+
+
+def compress_digest(cfg, digest, lo, hi):
+    """字数硬闸门：超过 hi 就再来一轮纯删减（只删不增），压到 lo-hi 之间。
+    模型对「字数配额」经常不听话（Kimi K3 写周报能给到 2800 字），所以必须有代码层兜底；
+    单轮只能删掉 2% 的情况也见过，因此允许最多两轮。"""
+    if not digest:
+        return digest
+    cur = digest
+    for _attempt in range(2):
+        n = len(re.sub(r"\s", "", cur))
+        if n <= int(hi * 1.06):
+            return cur
+        try:
+            fixed = call_llm(
+                cfg,
+                "【待压缩稿件，当前 %d 字】\n%s\n\n【硬性目标】压缩到 %d-%d 字，至少删掉 %d 字。"
+                "只删不增：先砍最次要的整条要点（优先 📎 其他细节 → ⚠️ 风险汇总 → 👥 人物观点），"
+                "再把保留的每条压到 40 字以内；🔥 核心趋势、全部小节标题、所有 SN 编号/数字/人名必须保留。"
+                % (n, cur, lo, hi, max(n - hi, int(n * 0.15))),
+                system_prompt=COMPRESS_PROMPT,
+            )
+            fixed = sanitize_digest(fixed or "")
+            n2 = len(re.sub(r"\s", "", fixed))
+            if n2 < lo * 0.8:
+                log("压缩稿只剩 %d 字（低于下限 %d），保留原稿" % (n2, int(lo * 0.8)))
+                return cur
+            if n2 >= n:
+                log("压缩稿未变短（%d → %d 字），保留原稿" % (n, n2))
+                return cur
+            log("篇幅超限（%d 字 > %d），已压缩到 %d 字" % (n, int(hi * 1.06), n2))
+            cur = fixed
+        except Exception as e:
+            log("压缩失败（保留原稿）：%s" % e)
+            return cur
+    return cur
 
 
 def _section_title(line):
@@ -1187,6 +1283,70 @@ def build_text_block(channel_name, day, items, extra_hint_items=None):
     return "\n".join(lines)
 
 
+_WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+
+def _weekday_cn(day_str):
+    try:
+        return _WEEKDAY_CN[datetime.datetime.strptime(day_str, "%Y-%m-%d").date().weekday()]
+    except Exception:
+        return ""
+
+
+def build_weekly_text_block(channel_name, days):
+    """周报输入：按日期分段，每条消息前缀带「月-日 时:分」。
+    为什么必须带日期：七天记录混在一起、只留 HH:MM 时，模型分不清「周三说过」
+    和「今天说过」，最典型的事故就是把不同日期的事拼成同一天、或拼出因果。
+    days = [(day_str, items4), ...]，已按时间正序。"""
+    authors, _seen, flat = [], set(), []
+    for _ds, items in days:
+        flat += items
+        for _r, _t, _a, _c in items:
+            if _a and _a not in _seen:
+                _seen.add(_a)
+                authors.append(_a)
+    lines = [
+        "频道：%s    日期范围：%s ~ %s（共 %d 天、%d 条实质消息；按日期分段，段内按时间顺序；"
+        "🔥n 表示该条被表情回应 n 次，热度参考）"
+        % (channel_name, days[0][0], days[-1][0], len(days), len(flat)),
+        "每条消息前面的方括号是它的**发生日期与北京时间**。任何事实都必须以它所在分段的日期为准："
+        "不得把不同日期的事写成同一天，不得因为某一层出现过就把某事件说成「本周持续发酵」。",
+        "发言者名单（共 %d 人；引用人名必须原样照抄，不得音译/缩写/改写大小写，"
+        "名单外的名字不得作为发言者出现）：%s" % (len(authors), "、".join(authors)),
+    ]
+    _hint = subnet_hint_block(flat)
+    if _hint:
+        lines.append(_hint)
+    for ds, items in days:
+        md = ds[5:]
+        lines.append("")
+        lines.append("===== %s（%s）%d 条 =====" % (ds, _weekday_cn(ds), len(items)))
+        prev_t = None
+        for i, (react, t, author, c) in enumerate(items, 1):
+            c1 = (c or "").replace("\n", " ").strip()
+            if len(c1) > 600:
+                c1 = c1[:600] + "…"
+            hot = " 🔥%d" % react if react >= 2 else ""
+            if i > 1:
+                _gap = _minutes_between(prev_t, t)
+                if _gap is not None and _gap >= 60:
+                    lines.append("    ~~~~ 时间跳转：上一条与本条相隔约 %d 小时 %d 分，"
+                                 "两者无上下文关系，不得拼接 ~~~~" % (_gap // 60, _gap % 60))
+            lines.append("%d. [%s %s] <%s>%s %s" % (i, md, t, author, hot, c1))
+            prev_t = t
+    return "\n".join(lines)
+
+
+def _cap_day_items(items, cap):
+    """单日条数超预算时按热度留前 cap 条，然后**按时间还原顺序**。
+    不能按热度排序交给模型：时间线被打散后，指代和因果全部失锚。"""
+    if cap <= 0 or len(items) <= cap:
+        return items
+    keep = sorted(items, key=lambda x: -x[0])[:cap]
+    keep.sort(key=lambda x: x[1])
+    return keep
+
+
 _SUBNET_KB = None
 
 
@@ -1393,6 +1553,7 @@ def generate_digest(cfg_i, text_block, system_prompt, items, tag=""):
     digest = call_deepseek(cfg_i, text_block, system_prompt=system_prompt)
     digest = sanitize_digest(digest)
     digest = polish_digest(cfg_i, text_block, digest)
+    digest = compress_digest(cfg_i, digest, 1100, 1400)
     digest, _ = scrub_unsupported_links(digest, items)
     n = len(re.sub(r"\s", "", digest or ""))
     if n > 1700:
@@ -1409,8 +1570,13 @@ def push_feishu(cfg, title, digest):
         return
     secret = cfg.get("feishu_secret", "")
     # 手机端：wide_screen_mode 铺满屏宽；板块标题加粗，重点更突出
-    m = re.search(r"(\d{4}-\d{2}-\d{2})", title)
-    day = m.group(1) if m else ""
+    mr = re.search(r"(\d{4}-\d{2}-\d{2})\s*[~～]\s*(\d{4}-\d{2}-\d{2})", title)
+    if mr:  # 周报：日期行显示整段范围
+        day = "%s~%s" % (mr.group(1), mr.group(2))
+    else:
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", title)
+        day = m.group(1) if m else ""
+    kind = "周报" if "周报" in title else "日报"
     body = prettify_headers(digest)
     # 正文顶部放「加粗标题 + 日期行」，与正文合并进同一个文本块（不加分隔线），
     # 这样在飞书手机端长按复制时，标题+日期+正文会被一并选中，日报才有完整意义
@@ -1422,7 +1588,7 @@ def push_feishu(cfg, title, digest):
     elements = [
         {"tag": "div", "text": {"tag": "lark_md", "content": combined}},
         {"tag": "hr"},
-        {"tag": "note", "content": "DTAO price-talk 日报 · 由 %s 生成" % label},
+        {"tag": "note", "content": "DTAO price-talk %s · 由 %s 生成" % (kind, label)},
     ]
     card = {
         "msg_type": "interactive",
@@ -1457,8 +1623,9 @@ def push_telegram(cfg, title, digest):
     body = _tg_md(prettify_headers(digest))
     sep = "────────────"
     t = _tg_md(title)
-    full = "*%s*\n%s\n\n%s\n\n%s\n🤖 由 %s 生成 · DTAO price-talk 日报" % (
-        t, sep, body, sep, model_label(cfg))
+    kind = "周报" if "周报" in title else "日报"
+    full = "*%s*\n%s\n\n%s\n\n%s\n🤖 由 %s 生成 · DTAO price-talk %s" % (
+        t, sep, body, sep, model_label(cfg), kind)
     for i, part in enumerate(chunk_text(full, 3900), 1):
         payload = {"chat_id": chat_id, "text": part,
                    "parse_mode": "Markdown", "disable_web_page_preview": True}
@@ -2086,36 +2253,62 @@ def run_repush(cfg, day_str, targets):
             log("Telegram 补推异常：%s" % e)
 
 # ----------------------------------------------------------------------------
-# 周报模式：汇总 exports/ 下最近 7 天的日报原始文件，重新总结后推送
+# 周报模式：只汇总 exports/ 下已有的导出记录（不重新导出），最近 N 天，不足 N 天有多少算多少
 # ----------------------------------------------------------------------------
 def run_weekly(cfg):
     global _CFG
     _CFG = cfg
     log("===== DTAO 周报流水线启动 =====")
+    log("周报只读取本地已有导出记录，不重新导出聊天记录（不消耗 Discord 导出配额）")
     tz = datetime.timezone(datetime.timedelta(hours=8))
     today = datetime.datetime.now(tz).date()
-    out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
-    files = []
-    for d in range(1, 8):
-        day = today - datetime.timedelta(days=d)
-        p = os.path.join(out_dir, "dtao_%s.json" % day.strftime("%Y-%m-%d"))
-        if os.path.exists(p):
-            files.append(p)
-    if not files:
-        raise RuntimeError("exports/ 下没有可汇总的日报文件，请先跑几天 daily 再生成周报")
-    log("汇总 %d 天的日报原始文件用于周报" % len(files))
-    all_items = []
-    for p in files:
-        all_items += extract_substantive(p)
-    all_items.sort(key=lambda x: -x[0])
-    if len(all_items) > 400:
-        all_items = all_items[:400]
-    day_first = files[-1].split("dtao_")[1].split(".")[0]
-    day_last = files[0].split("dtao_")[1].split(".")[0]
-    text_block = build_text_block("price-talk(周报)", "%s~%s" % (day_first, day_last), all_items)
-    digest = call_deepseek(cfg, text_block, WEEKLY_SYSTEM_PROMPT) if all_items else "本周无与 Bittensor 子网/重要成员相关的实质讨论。"
-    digest = sanitize_digest(digest)
-    title = "🤖 DTAO price-talk 周报 · %s~%s" % (day_first, day_last)
+    window = int(cfg.get("weekly_days", 7) or 7)          # 最近 N 天（含今天）
+    budget = int(cfg.get("weekly_max_items", 500) or 500)  # 送给模型的实质消息总预算
+    day_files = []
+    for d in range(window - 1, -1, -1):                   # 从最早一天开始，保证时间正序
+        ds = (today - datetime.timedelta(days=d)).strftime("%Y-%m-%d")
+        files = _day_json_files(cfg, ds)                  # 兼容 dtao_<日>.1.json / .2.json / 旧命名
+        if files:
+            day_files.append((ds, files))
+    if not day_files:
+        raise RuntimeError("exports/ 里最近 %d 天没有任何导出记录（dtao_<日期>.N.json），"
+                           "先跑几天 daily 再生成周报" % window)
+    per_day = max(30, budget // len(day_files))
+    days, empty_days = [], []
+    for ds, files in day_files:
+        items = merge_substantive(files)   # 同一天导出过多次时按「作者+内容」去重
+        if not items:
+            empty_days.append(ds)
+            continue
+        days.append((ds, _cap_day_items(items, per_day)))
+    if not days:
+        raise RuntimeError("最近 %d 天的导出记录里没有可汇总的实质消息（%s）"
+                           % (window, "、".join(empty_days)))
+    all_items = [it for _ds, its in days for it in its]
+    log("周报覆盖 %d 天（%s ~ %s），实质消息 %d 条，单日上限 %d 条"
+        % (len(days), days[0][0], days[-1][0], len(all_items), per_day))
+    if empty_days:
+        log("以下日期有导出文件但无实质消息，已跳过：%s" % "、".join(empty_days))
+    if len(days) < window:
+        log("提示：可用天数不足 %d 天，本次按已有 %d 天汇总" % (window, len(days)))
+    text_block = build_weekly_text_block(cfg.get("channel_name", "price-talk"), days)
+    if all_items:
+        digest = call_deepseek(cfg, text_block, system_prompt=WEEKLY_SYSTEM_PROMPT)
+        digest = sanitize_digest(digest)
+        digest = polish_digest(cfg, text_block, digest, verify_prompt=WEEKLY_VERIFY_PROMPT)
+        digest = compress_digest(cfg, digest, 1300, 1600)
+        digest, _n = scrub_unsupported_links(digest, all_items)
+    else:
+        digest = "本期无与 Bittensor 子网/重要成员相关的实质讨论。"
+    log("周报篇幅：%d 字" % len(re.sub(r"\s", "", digest or "")))
+    title = "🤖 DTAO price-talk 周报 · %s~%s" % (days[0][0], days[-1][0])
+    try:  # 落盘留档，方便事后核对与 /repush
+        with open(os.path.join(HERE, cfg.get("output_dir", "exports"),
+                              "dtao_week_%s_%s.digest.txt" % (days[0][0], days[-1][0])),
+                  "w", encoding="utf-8") as f:
+            f.write("%s\n\n%s\n" % (title, digest))
+    except Exception as e:
+        log("周报落盘失败（忽略）：%s" % e)
     if cfg.get("push_enabled", True):
         try:
             push_feishu(cfg, title, digest)
@@ -2127,7 +2320,7 @@ def run_weekly(cfg):
             log("Telegram 推送异常：%s" % e)
         # 潜力观察单独生成（不随周报推送，只落盘供 /watch 读取）
         try:
-            generate_potential(cfg, "week_%s~%s" % (day_first, day_last), all_items)
+            generate_potential(cfg, "week_%s~%s" % (days[0][0], days[-1][0]), all_items)
         except Exception as e:
             log("潜力观察流程异常（忽略）：%s" % e)
     else:

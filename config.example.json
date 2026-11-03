@@ -33,5 +33,7 @@
   "max_exports_per_day": 2,
   "min_export_interval_hours": 12,
   "compare_profiles": [],
-  "context_days": 2
+  "context_days": 2,
+  "weekly_days": 7,
+  "weekly_max_items": 500
 }

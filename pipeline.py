@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -208,23 +208,22 @@ _TOKEN_INFO = {"index": None, "total": None}
 
 def pick_discord_token(cfg):
     """返回本次导出用的 token。
-    - 配置了 discord_tokens（数组，且至少一个非空）-> 随机抽一个，把请求摊到多个账号，
-      降低单个 user token 被风控命中的概率（同一天也可命中不同号）。
-    - **防连用**：本次随机时排除「上一次真实导出」用过的那个令牌（记录在
-      exports/_digest_state.json 的 _meta.last_token_idx），池里只有 1 个时除外。
-      纯随机有 1/n 概率连着几天抽中同一个号，风控上不好看，所以硬排除。
+    - 配置了 discord_tokens（数组，且至少一个非空）-> 顺序轮换：1 -> 2 -> 3 -> 1 …
+      把请求均匀摊到多个账号，降低单个 user token 被风控命中的概率。
+    - **顺序轮换（v1.4.2 起）**：上次用的编号记录在 exports/_digest_state.json 的
+      _meta.last_token_idx，本次固定用它的下一个（环形）；首次/状态缺失时随机起点。
+      （v1.3.2 曾用「排除上次后纯随机」，3 个号时某个号仍可能隔天又被抽中，
+       用户要求分布均匀，故改为确定性轮换；只有 1 个号时永远用它。）
     - 否则回退到单个 discord_token（向后兼容）。
-    注意：随机模式下，每个 token 对应的账号都必须是该服务器成员且能访问目标频道。
+    注意：轮换模式下，每个 token 对应的账号都必须是该服务器成员且能访问目标频道。
     """
     raw = cfg.get("discord_tokens") or []
     pool = [t for t in raw if t]
-    # 防御：discord_tokens 数组中若混入空串/空值，一律忽略，绝不会随机抽到空 token 导致导出失败
+    # 防御：discord_tokens 数组中若混入空串/空值，一律忽略，绝不会抽到空 token 导致导出失败
     if len(raw) != len(pool):
         log("discord_tokens 共 %d 项，已忽略 %d 个空/无效项，实际可用 %d 个"
             % (len(raw), len(raw) - len(pool), len(pool)))
     if pool:
-        cands = list(range(len(pool)))
-        # 防连用：排除上一次真实导出用过的令牌（编号为 1 起始）
         last_idx = None
         try:
             meta = _load_digest_state(cfg).get("_meta") or {}
@@ -232,10 +231,12 @@ def pick_discord_token(cfg):
         except Exception:
             last_idx = 0
         if last_idx and 1 <= last_idx <= len(pool) and len(pool) > 1:
-            cands.remove(last_idx - 1)
-            log("令牌防连用：上次真实导出用的是第 %d 个，本次从其余 %d 个里随机" % (last_idx, len(cands)))
-        idx = random.choice(cands)
-        log("使用 discord_tokens 池中第 %d 个（共 %d 个，随机且不与上次重复）" % (idx + 1, len(pool)))
+            idx = last_idx % len(pool)          # 上次第 N 个 -> 本次第 N+1 个（环形）
+            log("令牌轮换：上次真实导出用的是第 %d 个，本次按顺序用第 %d 个（共 %d 个）"
+                % (last_idx, idx + 1, len(pool)))
+        else:
+            idx = random.randrange(len(pool))   # 首次或状态缺失：随机起点，之后进入固定轮换
+            log("令牌轮换：无上次记录，随机起点用第 %d 个（共 %d 个）" % (idx + 1, len(pool)))
         _TOKEN_INFO["index"] = idx + 1
         _TOKEN_INFO["total"] = len(pool)
         return pool[idx]

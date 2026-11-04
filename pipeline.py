@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -381,8 +381,8 @@ def run_export(cfg, after_dt, before_dt, out_json):
     # DCE/docker 后端按本机时区（北京）解释不带时区的日期时间，直接传北京本地时刻
     after_local = after_dt.strftime("%Y-%m-%dT%H:%M:%S")
     before_local = before_dt.strftime("%Y-%m-%dT%H:%M:%S")
-    log("导出范围（北京时间）：%s 00:00 -> %s 00:00"
-        % (after_dt.strftime("%Y-%m-%d"), before_dt.strftime("%Y-%m-%d")))
+    log("导出范围（北京时间）：%s -> %s"
+        % (after_dt.strftime("%Y-%m-%d %H:%M"), before_dt.strftime("%Y-%m-%d %H:%M")))
 
     # 内置 API 后端：完全绕开 DiscordChatExporter（.NET），代理可控、速度秒级
     if backend == "api":
@@ -497,14 +497,22 @@ def is_substantive(content):
         return False
     return bool(BARE_SN.search(content))
 
-def extract_substantive(json_path, ctx=2):
+def extract_substantive(json_path, ctx=2, day_str=None):
     """抽出实质消息，并**带上前后各 ctx 条上下文**。
     为什么需要上下文：群聊里大量指代（「2t daily buyback 不值一提」）要结合上一句
-    （「61 是不是出事了」）才能判断 2t 指哪个子网；只挑关键词句会把指代关系切断。"""
+    （「61 是不是出事了」）才能判断 2t 指哪个子网；只挑关键词句会把指代关系切断。
+    day_str：该文件对应的「总结日」。导出范围可能跨到下一天（昨日 00:00 -> 现在的新规则），
+    下一天的消息在时间前缀上加「次日 」，防止模型把今晨的事写成昨天的事。"""
     with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
     msgs = data.get("messages", [])
     n = len(msgs)
+    day_date = None
+    if day_str:
+        try:
+            day_date = datetime.datetime.strptime(day_str, "%Y-%m-%d").date()
+        except Exception:
+            day_date = None
 
     def clean(m):
         return (m.get("content") or "").strip()
@@ -541,8 +549,13 @@ def extract_substantive(json_path, ctx=2):
         ts = m.get("timestamp") or ""
         t = ts[11:16]
         try:  # Discord 时间戳是 UTC，转成北京时间显示（导出范围本来就是北京自然日）
-            t = (datetime.datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
-                 + datetime.timedelta(hours=8)).strftime("%H:%M")
+            bj = (datetime.datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+                  + datetime.timedelta(hours=8))
+            t = bj.strftime("%H:%M")
+            if day_date and bj.date() != day_date:
+                # 跨日补录：下一天标「次日」，更远的标「跨日月-日」（正常不会出现）
+                gap = (bj.date() - day_date).days
+                t = ("次日 %s" % t) if gap == 1 else ("跨日%s %s" % (bj.strftime("%m-%d"), t))
         except Exception:
             pass
         react = sum(r.get("count", 0) for r in m.get("reactions", []))
@@ -670,6 +683,10 @@ SYSTEM_PROMPT = (
     "**背景日发生的事一律不得写成总结日（当天）的新闻**；如果当天消息明确延续背景日的话题，"
     "可以写「延续前几日的话题」，但每件事实必须归属其真实发生的日期，不得把日期混写、"
     "也不得把背景日的内容单独扩成一条。总结对象永远只有【当日消息】。\n"
+    "25. **「次日」消息是今晨补录**：总结「昨天」时，导出范围延伸到当下，"
+    "时间带「次日」前缀的消息发生在**总结日的下一天（今天凌晨到现在）**。"
+    "这些消息可以写进日报，但必须标注「今晨」，不得当成总结日当天的事件，"
+    "也不得与总结日的事件拼接因果（例：昨日 23:00 的表态和今晨 08:00 的砸盘是两件事）。\n"
     "\n"
     "【稳定性要求】相同输入应给出相同结论：优先复述原文事实，不做发散联想；"
     "对同一事件的定性只有一种写法，不要在不同表述之间摇摆。\n"
@@ -807,7 +824,8 @@ VERIFY_PROMPT = (
     "because/so/因为/所以 这类连接词。若只是同一人相邻两句话、或两件互不相干的事被并到一句，"
     "改成并列陈述「同一时段他还提到…」，或直接删掉因果。\n"
     "6. **日期归属**：输入里若附有【背景资料：前天/大前天】小节，逐条确认初稿里的事实都发生在"
-    "**总结日当天**；背景日的事件被写成当天新闻的，删掉或改写为「延续前几日话题」并标明真实日期。\n"
+    "**总结日当天**；背景日的事件被写成当天新闻的，删掉或改写为「延续前几日话题」并标明真实日期。"
+    "时间带「次日」前缀的消息属于**下一天（今晨）**，被写成总结日事件的，改标「今晨」或删除。\n"
     "7. **共现拼关联**：初稿把「某公司/某事件」和「某子网」绑成投资、加持、合作、因果的，"
     "回原文确认有没有一句话直接说明；只是同一天被提到，就改成并列陈述或删掉关联词。\n"
     "\n【输出要求】只输出修正后的四个小节：🔥 必读重点 / 👥 重要人物观点 / 📎 其他细节 / 💡 一句话总结；"
@@ -1256,9 +1274,10 @@ def build_text_block(channel_name, day, items, extra_hint_items=None):
         if _a and _a not in _seen:
             _seen.add(_a)
             authors.append(_a)
+    has_next_day = any(str(_t).startswith("次日") for _r, _t, _a, _c in items)
     lines = ["频道：%s    日期：%s    当日消息 %d 条（**按时间顺序**，含少量上下文消息；"
              "🔥n 表示该条被表情回应 n 次，热度参考）"
-             % (channel_name, day, len(items)),
+             % (channel_name, day + ("（含次日今晨补录段）" if has_next_day else ""), len(items)),
              "当日发言者名单（共 %d 人；引用人名时必须原样照抄，不得音译/缩写/改写大小写，"
              "名单外的名字不得作为发言者出现）：%s"
              % (len(authors), "、".join(authors))]
@@ -1271,6 +1290,10 @@ def build_text_block(channel_name, day, items, extra_hint_items=None):
         if len(c1) > 600:
             c1 = c1[:600] + "…"
         hot = " 🔥%d" % react if react >= 2 else ""
+        # 日期跳转标记：昨日报含今晨补录段，防止把跨零点的两件事拼成因果
+        if i > 1 and str(t).startswith("次日") and not str(prev_t).startswith("次日"):
+            lines.append("    ~~~~ 日期跳转：以下消息发生在**总结日的下一天（今晨至今）**，"
+                         "必须标「今晨」，不得当成总结日当天的事件，不得与上文拼接因果 ~~~~")
         # 时间断层标记：防止模型把相隔数小时的两条无关消息拼成因果关系
         if i > 1:
             _gap = _minutes_between(prev_t, t)
@@ -1576,7 +1599,7 @@ def push_feishu(cfg, title, digest):
     else:
         m = re.search(r"(\d{4}-\d{2}-\d{2})", title)
         day = m.group(1) if m else ""
-    kind = "周报" if "周报" in title else "日报"
+    kind = "周报" if "周报" in title else ("专题" if "专题" in title else "日报")
     body = prettify_headers(digest)
     # 正文顶部放「加粗标题 + 日期行」，与正文合并进同一个文本块（不加分隔线），
     # 这样在飞书手机端长按复制时，标题+日期+正文会被一并选中，日报才有完整意义
@@ -1623,7 +1646,7 @@ def push_telegram(cfg, title, digest):
     body = _tg_md(prettify_headers(digest))
     sep = "────────────"
     t = _tg_md(title)
-    kind = "周报" if "周报" in title else "日报"
+    kind = "周报" if "周报" in title else ("专题" if "专题" in title else "日报")
     full = "*%s*\n%s\n\n%s\n\n%s\n🤖 由 %s 生成 · DTAO price-talk %s" % (
         t, sep, body, sep, model_label(cfg), kind)
     for i, part in enumerate(chunk_text(full, 3900), 1):
@@ -1855,6 +1878,44 @@ def _parse_ts(s, tz):
         except Exception:
             return datetime.datetime.now(tz)
 
+def _day_str_of(path):
+    """从导出文件名里解析总结日（dtao_<日期>.N.json / 旧命名 dtao_<日期>.json）。"""
+    m = re.search(r"dtao_(\d{4}-\d{2}-\d{2})", os.path.basename(path or ""))
+    return m.group(1) if m else None
+
+
+def _dedupe_items(items):
+    """按（作者, 内容）去重，保持原顺序。"""
+    seen, out = set(), []
+    for it in items:
+        k = (it[2], it[3])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(it)
+    return out
+
+
+def _split_next_day(days):
+    """把各天分段里带「次日」前缀的消息挪回真实日期的分段（同段去重、段内按时间排序）。
+    days: [(ds, items), ...] -> 返回按日期排序后的 [(ds, items), ...]。"""
+    buckets = {}
+    for ds, items in days:
+        for it in items:
+            if str(it[1]).startswith("次日"):
+                nd = (datetime.datetime.strptime(ds, "%Y-%m-%d").date()
+                      + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                buckets.setdefault(nd, []).append((it[0], it[1][3:].strip(), it[2], it[3]))
+            else:
+                buckets.setdefault(ds, []).append(it)
+    out = []
+    for ds in sorted(buckets):
+        items = _dedupe_items(buckets[ds])
+        items.sort(key=lambda x: x[1])
+        out.append((ds, items))
+    return out
+
+
 def merge_substantive(json_paths):
     """合并多个导出 json 的实质消息，按 (作者, 内容) 去重，**按时间升序**。
     （不再按热度排序：打乱时间线会让模型失去指代上下文）"""
@@ -1862,7 +1923,7 @@ def merge_substantive(json_paths):
     for jp in json_paths:
         if not os.path.exists(jp):
             continue
-        for it in extract_substantive(jp):
+        for it in extract_substantive(jp, day_str=_day_str_of(jp)):
             key = (it[2], it[3])
             if key in seen:
                 continue
@@ -1990,7 +2051,7 @@ def run_one_day(cfg, after_dt, before_dt):
         seq = len(_day_exports(cfg, day_str)) + 1
         out_json = _export_json_path(cfg, day_str, seq)
         retry(3, run_export, cfg, after_dt, before_dt, out_json)
-        items = extract_substantive(out_json)
+        items = extract_substantive(out_json, day_str=day_str)
         _record_export(cfg, day_str, out_json, len(items))
         log("过滤后保留实质消息 %d 条（%s，导出#%d）" % (len(items), day_str, seq))
     else:
@@ -2114,13 +2175,114 @@ def run_one_day(cfg, after_dt, before_dt):
     return results[0]["digest"]
 
 
+TOPIC_SYSTEM_PROMPT = (
+    "你是一名 Bittensor 生态的资深研究员。用户会给你一个「专题」指令，"
+    "你要从按日期分段的聊天记录里，把与该专题相关的讨论整理成一份专题总结，"
+    "核心要求是**还原原文人物观点**。\n"
+    "\n【还原纪律】\n"
+    "1. 人名照抄发言者名单，不得音译/缩写/改写大小写；每个观点必须落到具体的人；\n"
+    "2. 尽量引用原话（英文原话保留原文并附中文转述），转述不得加戏、不得替他提高调门；\n"
+    "3. 每个观点标注发生日期与时间（用消息前缀里的日期时间），不同日期的事不得拼成因果；\n"
+    "4. 共现≠关联：某公司/事件与某子网同日出现不代表有关系；「承认/自认/证实」必须有本人原话，"
+    "反讽、玩笑、俏皮回应不算承认；别人的指控必须写明是谁指控的；\n"
+    "5. 原文没有的数字、编号、定性一律不写；不确定标「（原文未指明）」或舍弃。\n"
+    "\n【输出结构（小节标题加粗，严格按顺序）】\n"
+    "**🧭 专题脉络**（该专题的时间线：何时出现、何时升级，4-8 条，每条带日期）\n"
+    "**👥 各方观点还原**（按人物逐条：**人物**（日期时间）：观点/原话；同一人多条可合并但保留日期）\n"
+    "**⚠️ 争议与未证实说法**（指控、传闻单独列出，注明是单人指控还是多人附和）\n"
+    "**📎 其他相关信息**（与专题相关的边角信息，不遗漏）\n"
+    "**💡 一句话总结**\n"
+    "\n【篇幅】1200-2000 字；宁多引用、少概括；与专题无关的水聊忽略。"
+)
+
+TOPIC_VERIFY_PROMPT = (
+    "你是专题总结的校对员，不是作者。用户消息包含【原始聊天记录】和【专题总结初稿】。"
+    "逐条对照原文核对：人名是否原样照抄、每个观点是否真的属于所标人物、日期时间是否与消息前缀一致、"
+    "「承认/因果/关联」是否有原文直接支持（共现≠关联、玩笑不算承认）、有无编造数字与定性。"
+    "只纠错与压缩，不改章节结构、不新增内容、**不得比初稿更长**；"
+    "只输出修正后的完整专题总结，不要输出核对说明。"
+)
+
+
+def run_topic_summary(cfg, day_str, feedback, targets=None):
+    """专题总结（/retry 里反馈带「专题」时自动进入）：
+    复用已有导出记录（目标日 + 前 context_days 天 + 今天，有几份算几份），不重新导出、不消耗配额；
+    按日期分段喂给模型，按反馈还原某专题的原文人物观点，生成后双推。"""
+    global _CFG
+    _CFG = cfg
+    log("===== 专题总结启动（%s）=====" % day_str)
+    log("专题指令：%s" % feedback[:120])
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    d0 = datetime.datetime.strptime(day_str, "%Y-%m-%d").date()
+    n_ctx = max(0, int(cfg.get("context_days", 2) or 0))
+    want = [(d0 - datetime.timedelta(days=k)).strftime("%Y-%m-%d") for k in range(n_ctx, 0, -1)]
+    want.append(day_str)
+    today = datetime.datetime.now(tz).date().strftime("%Y-%m-%d")
+    if today not in want:
+        want.append(today)
+    days = []
+    for ds in want:
+        files = _day_json_files(cfg, ds)
+        if not files:
+            log("专题素材：%s 无导出记录，跳过" % ds)
+            continue
+        items = merge_substantive(files)
+        if items:
+            days.append((ds, items))
+    if not days:
+        raise RuntimeError("没有可用的导出记录，无法做专题总结（请先跑 /digest）")
+    days = _split_next_day(days)  # 「次日」消息挪回真实日期分段
+    cap = int(cfg.get("topic_max_items_per_day", 250) or 250)
+    days = [(ds, _cap_day_items(its, cap)) for ds, its in days]
+    all_items = [it for _ds, its in days for it in its]
+    log("专题素材：%d 天（%s ~ %s），实质消息 %d 条，单日上限 %d 条"
+        % (len(days), days[0][0], days[-1][0], len(all_items), cap))
+    text_block = build_weekly_text_block(cfg.get("channel_name", "price-talk"), days)
+    text_block += ("\n\n【专题指令】%s\n"
+                   "按上面【输出结构】立即输出该专题的完整总结正文，不要向用户追问、"
+                   "不要输出确认或计划；专题对象以上面这条指令为准（可能是某个 SN 编号/子网/事件/人物）。"
+                   % feedback)
+    digest = call_deepseek(cfg, text_block, system_prompt=TOPIC_SYSTEM_PROMPT)
+    digest = sanitize_digest(digest)
+    digest = polish_digest(cfg, text_block, digest, verify_prompt=TOPIC_VERIFY_PROMPT)
+    digest = compress_digest(cfg, digest, 1200, 2000)
+    digest, _n = scrub_unsupported_links(digest, all_items)
+    log("专题篇幅：%d 字" % len(re.sub(r"\s", "", digest or "")))
+    title = "🔍 DTAO price-talk 专题总结 · %s" % day_str
+    out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
+    try:
+        with open(os.path.join(out_dir, "dtao_topic_%s.digest.txt" % day_str), "w", encoding="utf-8") as f:
+            f.write("%s\n\n%s\n" % (title, digest))
+    except Exception as e:
+        log("专题落盘失败（忽略）：%s" % e)
+    want_t = [x.lower() for x in (targets or ["feishu", "tg"])]
+    if cfg.get("push_enabled", True):
+        if "feishu" in want_t:
+            try:
+                push_feishu(cfg, title, digest)
+            except Exception as e:
+                log("飞书推送异常：%s" % e)
+        if "tg" in want_t:
+            try:
+                push_telegram(cfg, title, digest)
+            except Exception as e:
+                log("Telegram 推送异常：%s" % e)
+    else:
+        log("push_enabled=false，仅打印：\n" + title + "\n" + digest)
+    log("===== 专题总结结束 =====")
+    return digest
+
+
 def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
     """按用户反馈重新总结某天日报（复用已有导出，不重新导出、不消耗 Discord 配额）。
+    反馈里带「专题」二字时，改走专题总结流程（按专题还原原文人物观点并推送）。
     targets: None=双推；列表可含 "tg"/"feishu" 只推指定渠道。
     返回新 digest 文本。"""
     feedback = (feedback or "").strip()
     if not feedback:
         raise RuntimeError("反馈内容为空")
+    if "专题" in feedback:
+        return run_topic_summary(cfg, day_str, feedback, targets=targets)
     out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
     sources = [e["json"] for e in _day_exports(cfg, day_str)]
     if not sources:
@@ -2200,12 +2362,22 @@ def _latest_digest_date(cfg):
     return max(dates) if dates else None
 
 
+def _daily_before_dt(day, now, tz):
+    """日报导出的结束边界（v1.5.2 起按用户规则调整）：
+    - 总结「昨天」（含默认无参跑法）：昨天 00:00 -> **现在**（跨零点补录今晨消息）；
+    - 更早的历史日期：仍为该自然日 00:00–24:00（往更早的日期里塞进后续几天的消息没有意义）。"""
+    if day == now.date() - datetime.timedelta(days=1):
+        return now
+    return datetime.datetime(day.year, day.month, day.day, tzinfo=tz) + datetime.timedelta(days=1)
+
+
 def main(args):
     log("===== DTAO 流水线启动 v%s（半自动 / 手动触发）=====" % __version__)
     cfg = load_config()
     global _CFG
     _CFG = cfg
     tz = datetime.timezone(datetime.timedelta(hours=8))  # 默认东八区
+    now = datetime.datetime.now(tz)
     if args.extra:
         # 指定日期（可多个，逐日导出并推送）
         for ds in args.extra:
@@ -2216,14 +2388,13 @@ def main(args):
                 log("❌ 无法解析日期：%s（应为 YYYY-MM-DD 或 昨日/最新）" % ds)
                 continue
             after_dt = datetime.datetime(d.year, d.month, d.day, tzinfo=tz)
-            before_dt = after_dt + datetime.timedelta(days=1)
+            before_dt = _daily_before_dt(d, now, tz)
             run_one_day(cfg, after_dt, before_dt)
     else:
         # 默认：前一天
-        now = datetime.datetime.now(tz)
         yesterday = (now - datetime.timedelta(days=1))
         after_dt = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
-        before_dt = after_dt + datetime.timedelta(days=1)
+        before_dt = _daily_before_dt(after_dt.date(), now, tz)
         run_one_day(cfg, after_dt, before_dt)
     log("===== DTAO 流水线结束 =====")
 
@@ -2280,10 +2451,14 @@ def run_weekly(cfg):
         if not items:
             empty_days.append(ds)
             continue
-        days.append((ds, _cap_day_items(items, per_day)))
+        days.append((ds, items))
     if not days:
         raise RuntimeError("最近 %d 天的导出记录里没有可汇总的实质消息（%s）"
                            % (window, "、".join(empty_days)))
+    # 「次日」消息（昨日导出延伸到今天的部分）挪回真实日期的分段，避免与今天自己的导出重复
+    days = _split_next_day(days)
+    empty_days = [ds for ds in empty_days if ds not in {d for d, _ in days}]
+    days = [(ds, _cap_day_items(its, per_day)) for ds, its in days]
     all_items = [it for _ds, its in days for it in its]
     log("周报覆盖 %d 天（%s ~ %s），实质消息 %d 条，单日上限 %d 条"
         % (len(days), days[0][0], days[-1][0], len(all_items), per_day))

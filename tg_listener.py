@@ -68,7 +68,7 @@ HELP = (
     "   反馈带「专题」二字 = 专题总结模式：不修正日报，而是从最近几天已有记录里\n"
     "   还原该专题的原文人物观点并推送。例：/retry 总结SN127专题并推送，还原原文人物观点\n"
     "/help 显示本帮助\n"
-    "💡 也可直接点下方按钮栏操作"
+    "/keyboard 重新显示底部按钮栏（回复后会自动收起）\n"
 )
 
 
@@ -81,7 +81,8 @@ def tg_api(token, method, params=None, timeout=40):
         return json.loads(resp.read().decode("utf-8"))
 
 
-# 常驻按钮栏：每条 bot 回复都带这个键盘，点按钮即发对应指令（无需打字/输日期）
+# 底部按钮栏：默认不再常驻（v1.5.3 起，每次 bot 回复自动收起键盘）。
+# 需要 时发 /keyboard 可重新唤出。
 _KEYBOARD = {
     "keyboard": [
         ["/digest 昨日", "/repush 最新"],
@@ -89,13 +90,15 @@ _KEYBOARD = {
     ],
     "resize_keyboard": True
 }
+_REMOVE_KB = {"remove_keyboard": True}
 
 
-def send(chat_id, text):
-    # 纯文本发送，避免日志里的特殊字符破坏 Markdown 解析
+def send(chat_id, text, markup=None):
+    # 纯文本发送，避免日志里的特殊字符破坏 Markdown 解析；
+    # 默认随回复附 remove_keyboard —— bot 每次回复后底部按钮栏自动收起
     tg_api(P._CFG["telegram_bot_token"], "sendMessage",
            {"chat_id": chat_id, "text": text, "disable_web_page_preview": True,
-            "reply_markup": json.dumps(_KEYBOARD)})
+            "reply_markup": json.dumps(markup or _REMOVE_KB)})
 
 
 def _tg_bold(s):
@@ -277,6 +280,10 @@ def handle(text, chat_id):
     cmd = parts[0].lstrip("/").lower().split("@")[0]
     if cmd in ("help", "start"):
         send(chat_id, HELP)
+    elif cmd in ("keyboard", "按钮"):
+        # 重新唤出底部按钮栏（平时随回复自动收起）
+        send(chat_id, "⌨️ 按钮栏已恢复（bot 回复后会自动收起；发 /keyboard 可再次唤出）",
+             markup=_KEYBOARD)
     elif cmd == "digest":
         run_pipeline(["daily"] + parts[1:], chat_id)
     elif cmd in ("today", "jinri"):

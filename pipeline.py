@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1605,7 +1605,13 @@ def push_feishu(cfg, title, digest):
     # 这样在飞书手机端长按复制时，标题+日期+正文会被一并选中，日报才有完整意义
     title_line = "**%s**" % title
     label = model_label(cfg)
-    date_line = ("📅 %s　·　📱 手机端优化　·　🤖 %s 生成" % (day, label)) if day else ("📱 手机端优化　·　🤖 %s 生成" % label)
+    if kind == "日报":
+        # 日报顶部显示真实覆盖范围（到分钟，省空间），如「11-05 00:00 → 11-06 07:10」
+        rng = _day_range_text(cfg, title)
+        date_line = "📅 %s · 🤖 %s 生成" % (rng or day, label)
+    else:
+        # 周报/专题：标题本身已是范围或多日汇总，维持日期显示
+        date_line = ("📅 %s · 🤖 %s 生成" % (day, label)) if day else ("🤖 %s 生成" % label)
     # 标题、日期、正文合为一个 lark_md 块（以空行分隔，不用 hr），保证整段可复制
     combined = "%s\n%s\n\n%s" % (title_line, date_line, body)
     elements = [
@@ -1647,8 +1653,13 @@ def push_telegram(cfg, title, digest):
     sep = "────────────"
     t = _tg_md(title)
     kind = "周报" if "周报" in title else ("专题" if "专题" in title else "日报")
-    full = "*%s*\n%s\n\n%s\n\n%s\n🤖 由 %s 生成 · DTAO price-talk %s" % (
-        t, sep, body, sep, model_label(cfg), kind)
+    hdr = "*%s*" % t
+    if kind == "日报":
+        rng = _day_range_text(cfg, title)
+        if rng:
+            hdr += "\n📅 " + rng
+    full = "%s\n%s\n\n%s\n\n%s\n🤖 由 %s 生成 · DTAO price-talk %s" % (
+        hdr, sep, body, sep, model_label(cfg), kind)
     for i, part in enumerate(chunk_text(full, 3900), 1):
         payload = {"chat_id": chat_id, "text": part,
                    "parse_mode": "Markdown", "disable_web_page_preview": True}
@@ -1835,6 +1846,43 @@ def _record_export(cfg, day_str, json_path, count):
 
 def _day_exports(cfg, day_str):
     return _load_digest_state(cfg).get(day_str, {}).get("exports", [])
+
+
+def _fmt_range(after_dt, before_dt):
+    """把导出边界压成省空间的范围文本：同日「11-05 00:00 → 23:59」，跨日「11-05 00:00 → 11-06 07:10」。"""
+    if before_dt.time() == datetime.time() and before_dt.date() != after_dt.date():
+        before_dt = before_dt - datetime.timedelta(minutes=1)  # 完整自然日显示到 23:59
+    return "%s → %s" % (after_dt.strftime("%m-%d %H:%M"), before_dt.strftime("%m-%d %H:%M"))
+
+
+def _record_range(cfg, day_str, after_dt, before_dt):
+    """记录某日日报的实际覆盖时间范围（v1.5.3），供推送头部与 /repush 显示。"""
+    try:
+        state = _load_digest_state(cfg)
+        state.setdefault(day_str, {})["range"] = _fmt_range(after_dt, before_dt)
+        _save_digest_state(cfg, state)
+    except Exception as e:
+        log("时间范围记录失败（忽略）：%s" % e)
+
+
+def _day_range_text(cfg, title):
+    """按标题里的日期查该日日报的实际时间范围；旧记录用该日最后一次导出完成时间兜底；查不到返回 None。"""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", title)
+    if not m:
+        return None
+    day_str = m.group(1)
+    state = _load_digest_state(cfg).get(day_str) or {}
+    if state.get("range"):
+        return state["range"]
+    exps = state.get("exports") or []
+    if exps:
+        try:
+            ts = datetime.datetime.fromisoformat(exps[-1]["ts"]).strftime("%m-%d %H:%M")
+            start = datetime.datetime.strptime(day_str, "%Y-%m-%d").strftime("%m-%d")
+            return "%s 00:00 → %s" % (start, ts)
+        except Exception:
+            pass
+    return None
 
 def _export_json_path(cfg, day_str, seq):
     return os.path.join(HERE, cfg.get("output_dir", "exports"), "dtao_%s.%d.json" % (day_str, seq))
@@ -2030,6 +2078,7 @@ def run_one_day(cfg, after_dt, before_dt):
     未达间隔或已达上限时，复用 / 合并已有导出记录重总结后推送，避免频繁调用 Discord user token。
     供 main() 在『前一天 / 指定单日 / 指定多日』三种情形复用。"""
     day_str = after_dt.strftime("%Y-%m-%d")
+    _record_range(cfg, day_str, after_dt, before_dt)  # 记下真实范围，推送头部显示用
     out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
     os.makedirs(out_dir, exist_ok=True)
     channel_name = cfg.get("channel_name", "price-talk")

@@ -4,7 +4,7 @@
 > 用 AI 总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.5.3** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.5.4** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 **当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
@@ -32,6 +32,7 @@
 - 🎲 **多账号顺序轮换**：配置 `discord_tokens` 多个号，按 1 → 2 → 3 → 1 … 固定顺序轮流使用，每个号负载完全均匀、绝不连续两次用同一个（v1.4.2 起从「排除上次后随机」升级为确定性轮换，避免某号隔天又被抽中）；数组里若有空串会被自动忽略，绝不抽到空 token
 - 💬 **Telegram 指令触发**：`/digest` `/weekly` `/repush` `/watch` `/retry` `/keyboard` `/help`，按钮栏按需唤出
 - 🔓 **开放触发（可选白名单）**：默认任意用户可触发；填 `allowed_user_ids` 即切换为仅白名单
+- 💬 **水聊侧记（可单独触发）**：`/水聊`（或 `pipeline.py chat`）只挑**被日报过滤掉的闲聊**——段子、梗、互怼、跑题话题——单独整理成一份 500-900 字的轻量侧记并双推。同样只读本地已有导出、不重新导出；政治/脏话/歧视内容在抽取阶段就过滤掉，引语会逐条回原文核对发言者（错挂人名会被定点纠正）
 - 📆 **周报只汇总本地记录，绝不重新导出**：`/weekly` 不碰 Discord、不消耗导出配额，直接读 `exports/` 里最近 **7 天（含今天）**的导出 JSON；本地不足 7 天就**有几天算几天**。输入按日期分段、每条消息带「月-日 时:分」，模型无法再把不同日期的事拼成同一天；结尾有字数硬闸门（超 1600 字自动「只删不增」压缩，最多两轮），避免 Kimi K3 这类模型把周报写成 2800 字
 - 🕘 **总结带前两天背景**：生成日报时会一并读取**前 2 天**（`context_days` 可调）的导出记录当作背景资料，跨天话题（今天聊的「那个子网」前天就开始讨论）不再被切断；背景只用于理解，**重点仍然只总结当天**，背景日事件不允许写成当天新闻（提示词规则 24 + 校对第 6 项双重约束）
 - 🌏 **日报时间范围 = 北京时间自然日**：v1.5.0 前导出按 UTC 日界（北京 08:00 → 次日 08:00），现在精确对齐北京时间 00:00–24:00，日报里的时间也都换算成北京时间显示
@@ -153,6 +154,7 @@ python pipeline.py
   "weekly_days": 7,                                // 周报覆盖最近 N 天（含今天）；本地不足 N 天就有几天算几天
   "weekly_max_items": 500,                         // 周报送给模型的实质消息总预算，按天均分（每天最少 30 条）
   "topic_max_items_per_day": 250,                  // /retry 专题总结：单日最多喂给模型的实质消息条数
+  "chat_max_items": 500,                           // /水聊 侧记：最多喂给模型的闲聊消息条数（按天均分，每天最少 60 条）
   "llm_verify_pass": true,                         // 两遍成稿：第二遍带原文校对（数字归属/人物-子网归属/残留英文），失败自动回退初稿
   "compare_profiles": [],                          // 双模型对比模式：填 2 个以上模型档案，日报会分别生成、分别推送（见下方「对比模式」）
   "llm_direct": true,                              // 国内大模型 API 直连、不走代理（默认开，避免被 Clash 节点掐断）
@@ -230,6 +232,7 @@ python pipeline.py
    digest - 导出前一天并双推（可跟日期）
    today - 导出并总结今天的聊天记录
    weekly - 生成本周周报
+   water - 水聊侧记（只挑闲聊，可跟日期/天数）
    watch - 查看潜力观察/跨日热点(可跟天数, 如 /watch 7)
    repush - 补推已生成的日报(可跟日期与 tg/feishu)
    retry - 按你的反馈重总结（/retry 反馈内容）
@@ -251,12 +254,15 @@ python pipeline.py                        # 导出「昨天」并双推飞书+TG
 python pipeline.py daily 2026-10-23       # 导出指定某一天（⚠️ 日期前必须写 daily）
 python pipeline.py daily 昨日              # 「昨日/昨天/最新」等中文别名也认
 python pipeline.py weekly                 # 生成本周周报
+python pipeline.py chat                   # 水聊侧记（默认最近一次导出的日期，不重新导出）
+python pipeline.py chat 2026-11-06        # 指定日期的水聊侧记
+python pipeline.py chat 昨日 3            # 连续 3 天的水聊侧记
 python pipeline.py repush 2026-10-23      # 只把已生成的日报重推一遍(不重导)
 python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 python pipeline.py resummarize 2026-10-23 "orange 说的第一涨幅是 SN27"  # 按反馈重总结(不重导)
 python pipeline.py --version              # 查看当前版本号
 
-# ⚠️ 注意：第一个参数只能是 daily / weekly / repush / resummarize 之一。
+# ⚠️ 注意：第一个参数只能是 daily / weekly / repush / resummarize / chat 之一。
 # 直接写 python pipeline.py 2026-10-23 会报 argument mode: invalid choice。
 ```
 
@@ -269,6 +275,8 @@ python pipeline.py --version              # 查看当前版本号
 | `/digest 2026-10-23` | 导出指定日 |
 | `/today` | **导出并总结今天的聊天记录**（北京时间今天 00:00 → 现在；占用当日导出配额） |
 | `/weekly` | 周报 |
+| `/水聊`（`/water`） | **水聊侧记**：只挑被日报过滤掉的闲聊（段子/梗/互怼/跑题），单独生成一条轻量总结并双推；只读已有导出，不重新导出 |
+| `/水聊 昨日` | 指定日期；`/水聊 昨日 3` = 连续 3 天（均不重新导出） |
 | `/repush` | **补推最近一次日报（不用输日期）** |
 | `/repush 2026-10-23` | 补推指定日 |
 | `/repush 2026-10-23 tg` | 只补推 TG |

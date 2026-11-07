@@ -9,6 +9,8 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /digest 2026-10-23           导出指定日
   /digest 2026-10-22 2026-10-23 一次导出多天（逐日推送）
   /weekly                       周报
+  /水聊（/water）                水聊侧记：只挑被日报过滤掉的闲聊，单独成一条
+  /水聊 昨日 3                   指定日期 / 连续天数（只读已有导出，不重新导出）
   /watch                       查看潜力观察（默认最新一天，可跟天数 /watch 7 或 /watch all；同步推飞书）
   /repush 2026-10-23           补推（飞书+TG）
   /repush 2026-10-23 tg        仅补推 TG
@@ -56,6 +58,8 @@ HELP = (
     "/digest 2026-10-23 导出指定日\n"
     "/digest 2026-10-22 2026-10-23 多日\n"
     "/today 导出并总结今天的聊天记录（北京时间今天 00:00 到现在）\n"
+    "/water 或 /水聊 水聊侧记（群里闲聊/梗/跑题，单独一条，不写投研）\n"
+    "   /水聊 昨日 指定日期；/水聊 昨日 3 连续 3 天（只读已有导出，不重新导出）\n"
     "/weekly 周报\n"
     "/watch 查看潜力观察(默认最新; /watch 7 近7天热点; /watch all 全部)\n"
     "/repush 补推最近一次日报(无需日期)\n"
@@ -175,6 +179,10 @@ def _run_pipeline_sync(args, chat_id):
     out = out or ""
     if rc == 0:
         # 成功：日报已由 pipeline 自行推送到飞书+TG，这里只回简洁确认，不回传大段日志
+        if args and args[0] == "chat":
+            send(chat_id, "✅ 水聊侧记已生成并推送（飞书 + TG）\n"
+                          "只取被日报过滤掉的闲聊，不写投研；全程未重新导出聊天记录。")
+            return
         stat = ""
         m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
         if m:
@@ -244,7 +252,7 @@ YESTERDAY_ALIASES = {"昨日", "昨天", "yesterday", "latest", "最新", "y"}
 def _resolve_day(ds):
     """把「昨日/最新」等别名解析成 YYYY-MM-DD。"""
     tz = datetime.timezone(datetime.timedelta(hours=8))
-    return P._resolve_day(ds, tz)
+    return P._resolve_day_alias(ds, tz)
 
 
 def _feedback_worker(day, feedback, chat_id):
@@ -292,6 +300,25 @@ def handle(text, chat_id):
         run_pipeline(["daily", "今日"], chat_id)
     elif cmd == "weekly":
         run_pipeline(["weekly"], chat_id)
+    elif cmd in ("chat", "shuichat", "water", "水聊", "闲聊", "水贴"):
+        # /水聊                  -> 最近一份导出记录的水聊侧记
+        # /水聊 昨日              -> 指定日期（可跟天数：/水聊 昨日 3）
+        # 只读本地已有导出，不重新导出、不消耗配额
+        rest = parts[1:]
+        day = None
+        if rest and re.match(r"^\d{4}-\d{2}-\d{2}$", rest[0]):
+            day = rest[0]
+            rest = rest[1:]
+        elif rest and rest[0] in YESTERDAY_ALIASES | {"今日", "今天", "today", "t"}:
+            day = _resolve_day(rest[0])
+            rest = rest[1:]
+        days_back = 1
+        if rest and rest[0].isdigit():
+            days_back = max(1, min(14, int(rest[0])))
+        args = ["chat"] + ([day] if day else []) + [str(days_back)]
+        send(chat_id, "💬 收到，正在整理%s的水聊侧记（只读已有导出记录，不重新导出）…"
+             % (day or "最近一次导出"))
+        run_pipeline(args, chat_id)
     elif cmd == "watch":
         n = None
         if len(parts) > 1:

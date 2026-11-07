@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.5.3"
+__version__ = "1.5.4"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -497,6 +497,23 @@ def is_substantive(content):
         return False
     return bool(BARE_SN.search(content))
 
+def _msg_time(m, day_date=None):
+    """Discord 时间戳是 UTC，转成北京时间显示；跨日补录的消息加「次日」前缀。
+    抽出来共用，避免实质消息与水聊两条链路各写一遍、越改越不一致。"""
+    ts = m.get("timestamp") or ""
+    t = ts[11:16]
+    try:
+        bj = (datetime.datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+              + datetime.timedelta(hours=8))
+        t = bj.strftime("%H:%M")
+        if day_date and bj.date() != day_date:
+            gap = (bj.date() - day_date).days
+            t = ("次日 %s" % t) if gap == 1 else ("跨日%s %s" % (bj.strftime("%m-%d"), t))
+    except Exception:
+        pass
+    return t
+
+
 def extract_substantive(json_path, ctx=2, day_str=None):
     """抽出实质消息，并**带上前后各 ctx 条上下文**。
     为什么需要上下文：群聊里大量指代（「2t daily buyback 不值一提」）要结合上一句
@@ -546,23 +563,191 @@ def extract_substantive(json_path, ctx=2, day_str=None):
         if not c or NOISE.match(c):
             continue
         author = (m.get("author") or {}).get("nickname") or (m.get("author") or {}).get("name") or "?"
-        ts = m.get("timestamp") or ""
-        t = ts[11:16]
-        try:  # Discord 时间戳是 UTC，转成北京时间显示（导出范围本来就是北京自然日）
-            bj = (datetime.datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
-                  + datetime.timedelta(hours=8))
-            t = bj.strftime("%H:%M")
-            if day_date and bj.date() != day_date:
-                # 跨日补录：下一天标「次日」，更远的标「跨日月-日」（正常不会出现）
-                gap = (bj.date() - day_date).days
-                t = ("次日 %s" % t) if gap == 1 else ("跨日%s %s" % (bj.strftime("%m-%d"), t))
-        except Exception:
-            pass
+        t = _msg_time(m, day_date)
         react = sum(r.get("count", 0) for r in m.get("reactions", []))
         out.append((react, t, author, c))
     # 按时间升序输出：模型需要顺着对话流理解指代与因果，按热度排序会把上下文打散
     out.sort(key=lambda x: x[1])
     return out
+
+
+# ----------------------------------------------------------------------------
+# 2b) 水聊抽取：日报里被过滤掉的闲聊（段子/梗/互怼/跑题），单独成一条链路
+# ----------------------------------------------------------------------------
+# 单独剔除的「无内容消息」：纯 @、纯表情、纯语气词。
+# 水聊允许大量英文与梗，但完全不构成一句话的不值得送给模型。
+_CHAT_DROP = re.compile(
+    r"^(\s*(https?://\S+\s*)|(\:\w+:\s*)|(@\S+\s*)|(lol+|lmao+|xd+|ha+ha*|嗯+|哦+|啊+|好+|对+|1+)\s*)+$",
+    re.I)
+
+# 水聊侧记不碰的内容：政治站队、选举评论、脏话与歧视性辱骂。
+# 提示词里写「不许复述」模型仍会漏（实测两次），所以直接在抽取阶段过滤，确定性更高。
+_CHAT_SENSITIVE = re.compile(
+    r"(?i)(trump|biden|harris|obama|democrat\w*|\bdems?\b|republican\w*|\bgop\b|election\w*|senate|"
+    r"congress|president\w*|politic\w*|nazi|hitler|rape\w*|nigg\w*|retard\w*|faggot\w*|"
+    r"cunt|bitch\w*|asshole|fuck\w*|shit\w*|porn\w*|kanker)"
+    r"|选举|特朗普|拜登|民主党|共和党|纳粹")
+
+
+def extract_chitchat(json_path, day_str=None, min_len=6, max_len=320):
+    """抽出**水聊**消息：非空、能读成一句话、且不含任何实质信息（is_substantive 为 False）。
+    这些正是日报里被丢掉的部分——群友的段子、梗、互怼、情绪、生活琐事与跑题讨论。
+    min_len=6：太短的口水话（"vision"、"+1"、"same"）脱离上下文没有信息量，
+    除非它被多人回应过（react>=2），否则丢掉。day_str 同上：跨零点的消息标「次日」。"""
+    with open(json_path, encoding="utf-8") as f:
+        data = json.load(f)
+    msgs = data.get("messages", [])
+    day_date = None
+    if day_str:
+        try:
+            day_date = datetime.datetime.strptime(day_str, "%Y-%m-%d").date()
+        except Exception:
+            day_date = None
+    out = []
+    dropped_sensitive = 0
+    for m in msgs:
+        c = (m.get("content") or "").strip()
+        if not c or NOISE.match(c) or _CHAT_DROP.match(c):
+            continue
+        if is_substantive(c):
+            continue
+        if _CHAT_SENSITIVE.search(c):     # 政治/脏话/歧视：侧记里不出现，也不给模型看
+            dropped_sensitive += 1
+            continue
+        react = sum(r.get("count", 0) for r in m.get("reactions", []))
+        if len(c) < min_len and react < 2:
+            continue
+        author = (m.get("author") or {}).get("nickname") or (m.get("author") or {}).get("name") or "?"
+        out.append((react, _msg_time(m, day_date), author, c[:max_len]))
+    if dropped_sensitive:
+        log("水聊过滤：跳过 %d 条涉政/脏话/歧视消息" % dropped_sensitive)
+    out.sort(key=lambda x: x[1])
+    return out
+
+
+def merge_chitchat(json_paths, day_str=None):
+    """合并同一天多次导出的水聊消息，按 (作者, 内容) 去重，按时间升序。"""
+    all_items, seen = [], set()
+    for jp in json_paths:
+        if not os.path.exists(jp):
+            continue
+        for it in extract_chitchat(jp, day_str=day_str):
+            key = (it[2], it[3])
+            if key in seen:
+                continue
+            seen.add(key)
+            all_items.append(it)
+    all_items.sort(key=lambda x: x[1])
+    return all_items
+
+
+def _chat_stats(items):
+    """给模型一段客观统计：谁说得最多、哪几条被回应最多。帮它抓重点，也避免它瞎猜热度。"""
+    from collections import Counter
+    cnt = Counter(a for _r, _t, a, _c in items)
+    top = "、".join("%s %d 条" % (a, n) for a, n in cnt.most_common(8) if a and a != "?")
+    hot = [it for it in sorted(items, key=lambda x: -x[0]) if it[0] >= 2][:5]
+    lines = []
+    if top:
+        lines.append("发言最多：%s" % top)
+    if hot:
+        lines.append("被回应最多：" + "；".join(
+            "%s「%s」🔥%d" % (a, (c or "").replace("\n", " ")[:24], r) for r, _t, a, c in hot))
+    return lines
+
+
+def build_chat_text_block(channel_name, days):
+    """水聊输入：按日期分段，每条带「月-日 时:分」。
+    days = [(day_str, items), ...]，已按时间正序。"""
+    flat = [it for _ds, items in days for it in items]
+    authors, _seen = [], set()
+    for _r, _t, a, _c in flat:
+        if a and a not in _seen:
+            _seen.add(a)
+            authors.append(a)
+    span = days[0][0] if len(days) == 1 else "%s ~ %s" % (days[0][0], days[-1][0])
+    lines = [
+        "频道：%s    日期：%s    水聊消息 %d 条（按时间顺序；🔥n 表示被表情回应 n 次）"
+        % (channel_name, span, len(flat)),
+        "说明：这些是当天**被日报过滤掉的闲聊消息**，不含子网/行情实质讨论，"
+        "整理目标是「群聊侧记」，不是投研。",
+        "发言者名单（共 %d 人；引用人名必须原样照抄，名单外的名字不得作为发言者出现）：%s"
+        % (len(authors), "、".join(authors)),
+    ]
+    for ln in _chat_stats(flat):
+        lines.append(ln)
+    multi = len(days) > 1
+    for ds, items in days:
+        if multi:
+            lines.append("")
+            lines.append("===== %s（%s）%d 条 =====" % (ds, _weekday_cn(ds), len(items)))
+        for i, (react, t, author, c) in enumerate(items, 1):
+            c1 = (c or "").replace("\n", " ").strip()
+            hot = " 🔥%d" % react if react >= 2 else ""
+            stamp = ("%s %s" % (ds[5:], t)) if multi else t
+            lines.append("%d. [%s] <%s>%s %s" % (i, stamp, author, hot, c1))
+    return "\n".join(lines)
+
+
+_QUOTE_RE = re.compile(r"[「“\"]([^」”\"]{4,80})[」”\"]")
+
+
+def _norm_text(s):
+    """比较引语用：去掉空白/标点/加粗符号并转小写，避免格式差异导致匹配不上。"""
+    return re.sub(r"[\s\*_`，。、；：！？,.!?;:'\"“”‘’「」（）()\-–—~…]", "", (s or "")).lower()
+
+
+def quote_author_audit(digest, items):
+    """确定性核对「引语 → 发言者」：引号里的话如果能在原文找到，就必须由该行点名的人说出。
+    实测校对轮会漏（把 Nexras 的「France is dead」安到 Kakashi 头上），所以再加这道代码闸门。
+    返回 (mismatches, not_found)：
+      mismatches = [(行文本, 引语, 真实发言者列表, 行内点名的人)]，可直接用于让模型定点改；
+      not_found  = 原文里找不到的引语（可能是翻译，也可能是编的，只记日志不自动改）。"""
+    users = set(a for _r, _t, a, _c in items if a and a != "?")
+    normed = [(_norm_text(c), a) for _r, _t, a, c in items]
+    mismatches, not_found = [], []
+    for line in digest.split("\n"):
+        quotes = _QUOTE_RE.findall(line)
+        if not quotes:
+            continue
+        mentioned = [n for n in users if n and n in line]
+        for q in quotes:
+            nq = _norm_text(q)
+            if len(nq) < 6:
+                continue
+            authors = {a for nc, a in normed if a and nq in nc}
+            if not authors:
+                not_found.append((line.strip()[:60], q))
+                continue
+            if mentioned and not (authors & set(mentioned)):
+                mismatches.append((line.strip()[:80], q, sorted(authors), mentioned))
+    return mismatches, not_found
+
+
+def fix_quote_authors(cfg, text_block, digest, mismatches):
+    """把引语归属错误交给模型定点修正（只改这些句子的归属，其余一字不动），然后复检。"""
+    if not mismatches:
+        return digest
+    hint = "\n".join("- 引语「%s」实际是 %s 说的，但初稿写成 %s"
+                     % (q, "、".join(a), "、".join(m)) for _l, q, a, m in mismatches)
+    try:
+        fixed = call_llm(
+            cfg,
+            text_block + "\n\n【侧记初稿】\n" + digest
+            + "\n\n【已核实的引语归属错误（只改这些，别的一字不动）】\n" + hint
+            + "\n\n请修正这些引语对应的人名：改成实际发言者；若整句因此读不通，就删掉这半句。"
+              "不要新增内容、不要改其他句子、不要改字数结构。",
+            system_prompt=CHAT_VERIFY_PROMPT,
+        )
+        fixed = sanitize_chat(fixed or "")
+        n = len(re.sub(r"\s", "", fixed))
+        if n and n >= len(re.sub(r"\s", "", digest)) * 0.6:
+            log("引语归属修正：%d 处" % len(mismatches))
+            return fixed
+    except Exception as e:
+        log("引语归属修正失败（保留原稿）：%s" % e)
+    return digest
+
 
 # ----------------------------------------------------------------------------
 # 3) 调用 DeepSeek 生成中文结构化日报
@@ -839,22 +1024,26 @@ VERIFY_PROMPT = (
 #  重复板块被写回，这里做最后一道硬性过滤）
 # ----------------------------------------------------------------------------
 _SECTION_WORDS = ("必读重点", "重点子网动向", "重要人物观点", "潜力观察",
-                  "可布局", "其他细节", "一句话总结", "本周核心趋势", "风险汇总")
+                  "可布局", "其他细节", "一句话总结", "本周核心趋势", "风险汇总",
+                  # 水聊侧记的小节
+                  "今日氛围", "谁在聊什么", "全场最佳梗", "跑题现场", "其他碎屑", "一句话吐槽")
 # 日报 / 周报里禁止出现的板块
 _FORBIDDEN_SECTIONS = ("重点子网动向", "潜力观察", "可布局")
 
 
-def polish_digest(cfg, text_block, draft, verify_prompt=None):
+def polish_digest(cfg, text_block, draft, verify_prompt=None, sanitize_fn=None):
     """第二遍校对（可关：config.llm_verify_pass=false）：
     让模型带着原文再读一遍初稿，专门纠「数字记错人」「人物-子网归属靠碎片推出来」
     「原文没有的定性」「残留英文」四类错。校对失败一律保留初稿，不影响推送。
-    verify_prompt 默认用日报版；周报传自己的版本（板块结构与字数配额不同）。"""
+    verify_prompt 默认用日报版；周报/水聊传自己的版本（板块结构与字数配额不同）。
+    sanitize_fn：清洗函数，默认日报版；水聊传 sanitize_chat（不做英文替换，梗要留原话）。"""
     if not draft or not cfg.get("llm_verify_pass", True):
         return draft
+    clean = sanitize_fn or sanitize_digest
     try:
         fixed = call_llm(cfg, text_block + "\n\n【日报初稿】\n" + draft,
                          system_prompt=verify_prompt or VERIFY_PROMPT)
-        fixed = sanitize_digest(fixed or "")
+        fixed = clean(fixed or "")
         n = len(re.sub(r"\s", "", fixed))
         base = len(re.sub(r"\s", "", draft))
         if n < 500:
@@ -886,12 +1075,17 @@ COMPRESS_PROMPT = (
 )
 
 
-def compress_digest(cfg, digest, lo, hi):
+def compress_digest(cfg, digest, lo, hi, system_prompt=None, sanitize_fn=None, cut_hint=None):
     """字数硬闸门：超过 hi 就再来一轮纯删减（只删不增），压到 lo-hi 之间。
     模型对「字数配额」经常不听话（Kimi K3 写周报能给到 2800 字），所以必须有代码层兜底；
-    单轮只能删掉 2% 的情况也见过，因此允许最多两轮。"""
+    单轮只能删掉 2% 的情况也见过，因此允许最多两轮。
+    水聊侧记传自己的提示词/清洗函数/删除顺序（它的板块跟日报不一样）。"""
     if not digest:
         return digest
+    clean = sanitize_fn or sanitize_digest
+    cut = cut_hint or ("先砍最次要的整条要点（优先 📎 其他细节 → ⚠️ 风险汇总 → 👥 人物观点），"
+                       "再把保留的每条压到 40 字以内；🔥 核心趋势、全部小节标题、"
+                       "所有 SN 编号/数字/人名必须保留。")
     cur = digest
     for _attempt in range(2):
         n = len(re.sub(r"\s", "", cur))
@@ -901,12 +1095,11 @@ def compress_digest(cfg, digest, lo, hi):
             fixed = call_llm(
                 cfg,
                 "【待压缩稿件，当前 %d 字】\n%s\n\n【硬性目标】压缩到 %d-%d 字，至少删掉 %d 字。"
-                "只删不增：先砍最次要的整条要点（优先 📎 其他细节 → ⚠️ 风险汇总 → 👥 人物观点），"
-                "再把保留的每条压到 40 字以内；🔥 核心趋势、全部小节标题、所有 SN 编号/数字/人名必须保留。"
-                % (n, cur, lo, hi, max(n - hi, int(n * 0.15))),
-                system_prompt=COMPRESS_PROMPT,
+                "只删不增：%s"
+                % (n, cur, lo, hi, max(n - hi, int(n * 0.15)), cut),
+                system_prompt=system_prompt or COMPRESS_PROMPT,
             )
-            fixed = sanitize_digest(fixed or "")
+            fixed = clean(fixed or "")
             n2 = len(re.sub(r"\s", "", fixed))
             if n2 < lo * 0.8:
                 log("压缩稿只剩 %d 字（低于下限 %d），保留原稿" % (n2, int(lo * 0.8)))
@@ -1192,6 +1385,28 @@ def sanitize_digest(text):
     if dropped:
         log("结构清洗：已剔除多余板块 %s" % "、".join(dropped))
     return txt
+
+
+def sanitize_chat(text):
+    """水聊侧记的清洗：只做结构与排版整理，**不做英文替换**。
+    梗、双关、原话片段一旦被翻译就失去味道，且容易改错意思；
+    人名的准确性交给校对轮把关。"""
+    if not text:
+        return text
+    out, skipping = [], False
+    for line in text.split("\n"):
+        title = _section_title(line)
+        if title is not None:
+            skipping = any(w in title for w in _FORBIDDEN_SECTIONS)
+            if skipping:
+                continue
+        if skipping:
+            continue
+        out.append(line)
+    txt = re.sub(r"\n[ \t]+\n", "\n\n", "\n".join(out))
+    txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    txt = dedupe_bullets(txt)
+    return _tidy_layout(txt)
 
 def call_llm(cfg, text_block, system_prompt=None, tries=3):
     """调用任意 OpenAI 兼容的 /chat/completions 接口。
@@ -1486,7 +1701,8 @@ def feishu_sign(secret):
 # ---------------------------------------------------------------------------
 # 排版增强：识别「EMOJI 标题行」并加粗（飞书 lark_md / TG Markdown 通用）
 # ---------------------------------------------------------------------------
-_SECTION_EMOJI = ("🔥", "🔢", "👥", "📊", "📎", "💡", "📌", "⚠️", "✅", "❌", "📝", "📈", "🧭")
+_SECTION_EMOJI = ("🔥", "🔢", "👥", "📊", "📎", "💡", "📌", "⚠️", "✅", "❌", "📝", "📈", "🧭",
+                  "😄", "🗣", "🎲", "🥴", "💬")
 
 
 def prettify_headers(text):
@@ -1599,7 +1815,8 @@ def push_feishu(cfg, title, digest):
     else:
         m = re.search(r"(\d{4}-\d{2}-\d{2})", title)
         day = m.group(1) if m else ""
-    kind = "周报" if "周报" in title else ("专题" if "专题" in title else "日报")
+    kind = ("周报" if "周报" in title else ("专题" if "专题" in title
+            else ("水聊" if "水聊" in title else "日报")))
     body = prettify_headers(digest)
     # 正文顶部放「加粗标题 + 日期行」，与正文合并进同一个文本块（不加分隔线），
     # 这样在飞书手机端长按复制时，标题+日期+正文会被一并选中，日报才有完整意义
@@ -1652,7 +1869,8 @@ def push_telegram(cfg, title, digest):
     body = _tg_md(prettify_headers(digest))
     sep = "────────────"
     t = _tg_md(title)
-    kind = "周报" if "周报" in title else ("专题" if "专题" in title else "日报")
+    kind = ("周报" if "周报" in title else ("专题" if "专题" in title
+            else ("水聊" if "水聊" in title else "日报")))
     hdr = "*%s*" % t
     if kind == "日报":
         rng = _day_range_text(cfg, title)
@@ -2224,6 +2442,66 @@ def run_one_day(cfg, after_dt, before_dt):
     return results[0]["digest"]
 
 
+CHAT_SYSTEM_PROMPT = (
+    "你是 Discord 频道「DTAO - price-talk」的社区氛围记录员。这次不看行情、不写投研，"
+    "只把当天**被日报过滤掉的水聊（闲聊）**整理成一份轻松的「群聊侧记」。\n"
+    "\n【内容边界】\n"
+    "- 只写输入里真实出现的闲聊：段子、梗、互怼、情绪、日常生活、跑题话题、表情式的反应；\n"
+    "- 不写任何投资结论、买卖建议、子网分析；水聊里提到的涨跌只当闲聊提一句，不做解读；\n"
+    "- 群里开玩笑说的「内幕 / 跑路 / 诈骗 / 官方要拉盘」等，一律按玩笑转述，不得写成事实或指控。\n"
+    "\n【输出结构（严格按顺序；没内容的小节直接省略；标题用 **加粗**）】\n"
+    "**😄 今日氛围**（2-3 句：整体情绪基调、最热的话题、跟行情有没有关系）\n"
+    "**🗣 谁在聊什么**（4-6 条，每条一个 **人名** 加一句他今天最有趣的发言或态度；"
+    "人名照抄，尽量带原话片段）\n"
+    "**🔥 全场最佳梗**（2-3 条：被多人接话或表情回应最多的笑点，写清谁先说的、谁接的）\n"
+    "**🎲 跑题现场**（与 Bittensor 完全无关的话题，1-3 条；没有就省略）\n"
+    "**💡 一句话总结**（用群友口气收尾，别写成研究结论）\n"
+    "\n【溯源纪律（最重要）】\n"
+    "1. 只写输入里有的内容；没出现过的梗、没说过的话、没出现的人，一个字都不许编；\n"
+    "2. 人名照抄发言者名单，不得音译/缩写/改大小写；不确定是谁说的就不点名，写「有人」；\n"
+    "3. 英文梗可以保留原句并附一句中文解释；不得为了「好玩」改写原话的意思；\n"
+    "4. 语气可以轻松，事实必须准确：调侃归调侃，玩笑不能说成事件，不能替谁加戏；\n"
+    "5. 水聊里的传言、猜测、反讽，转述时要带「有人说」「开玩笑称」这类限定词；\n"
+    "6. **涉敏内容只概括、不复述**：脏话、人身攻击、种族/性别歧视、政治站队与选举评论，"
+    "一律不引用原话、任何小节都不点名到人（不要写「某某聊政治」）；"
+    "最多在「今日氛围」写一句「有人聊到政治话题，气氛一度跑偏」；\n"
+    "7. **引语纪律**：引用原话必须与原文一致；不得给原话添加上原文没有的解读"
+    "（例如把一句玩笑说成「总结了市场情绪」）；\n"
+    "\n【排版】同日报：**加粗**人名与梗名；- 列表；不用 # 标题、不用 > 引用；手机端友好。"
+    "全文 500-900 字，每条 30-60 字，一条只说一件事，不写重复内容。\n"
+)
+
+CHAT_VERIFY_PROMPT = (
+    "你是社区侧记的校对编辑。输入是【原始水聊记录】+【侧记初稿】。"
+    "你只按原文核对，**不做润色、不许扩写、不许新增句子**。\n"
+    "\n【逐项检查】\n"
+    "1. **人名**：初稿里每个人名都必须以同一写法出现在原文里，否则改成「有人」或删掉；\n"
+    "2. **原话**：引号或「」里的内容必须能在原文找到对应片段，找不到就改成转述或删除；\n"
+    "3. **玩笑**：反讽、假设句（如果…/imagine/假如/要是）、玩梗式发言，不得写成真实发生的事；\n"
+    "4. **无中生有**：初稿里原文完全没有的梗、事件、数字、外号，一律删掉；\n"
+    "5. **越界**：删掉一切投资结论、买卖建议、子网分析与风险提示；\n"
+    "6. **涉敏**：脏话、人身攻击、歧视性/政治性言论必须删除，不得复述；"
+    "「谁在聊什么」里若有这类内容，整条删掉，最多在「今日氛围」保留一句中性概括；\n"
+    "7. **引语**：原话不得添加原文没有的解读或定性；宁可删掉解读，只留原句；\n"
+    "8. **结构**：保留全部小节标题与顺序；输出总字数不得超过初稿。\n"
+    "\n只输出校对后的完整侧记正文，不要任何说明。\n"
+)
+
+CHAT_COMPRESS_PROMPT = (
+    "你是社区侧记的定稿编辑，本轮只做一件事：**删字数**，绝对不许新增内容。\n"
+    "\n【删什么（从高到低）】\n"
+    "1. 重复的梗：同一个笑点被多人复述的，只留最先说、最完整的一处；\n"
+    "2. 无信息量的附和（「哈哈哈」「+1」「确实」「笑死」）；\n"
+    "3. 只有一个人说、没人接的碎碎念；\n"
+    "4. 与群聊无关的链接、广告、机器人推送。\n"
+    "\n【必须保留】\n"
+    "- 全部小节标题与顺序；\n"
+    "- 人名、被点名的梗、原话片段（英文原话保留）；\n"
+    "- 全场最佳梗与跑题现场的核心笑点。\n"
+    "\n【输出要求】只输出压缩后的完整侧记，不写说明、不加新句子、不改事实。\n"
+)
+
+
 TOPIC_SYSTEM_PROMPT = (
     "你是一名 Bittensor 生态的资深研究员。用户会给你一个「专题」指令，"
     "你要从按日期分段的聊天记录里，把与该专题相关的讨论整理成一份专题总结，"
@@ -2319,6 +2597,110 @@ def run_topic_summary(cfg, day_str, feedback, targets=None):
     else:
         log("push_enabled=false，仅打印：\n" + title + "\n" + digest)
     log("===== 专题总结结束 =====")
+    return digest
+
+
+def _latest_export_day(cfg):
+    """最近一份导出记录对应的日期（水聊默认取这一天，全程不重新导出）。"""
+    out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
+    days = []
+    for p in glob.glob(os.path.join(out_dir, "dtao_*.json")):
+        m = re.search(r"dtao_(\d{4}-\d{2}-\d{2})(?:\.\d+)?\.json$", os.path.basename(p))
+        if m:
+            days.append(m.group(1))
+    return max(days) if days else None
+
+
+def run_chat_summary(cfg, day_str, days_back=1, targets=None):
+    """水聊总结（/水聊 或 pipeline.py chat 触发）：
+    只读本地已有导出记录，**不重新导出、不消耗 Discord 配额**，
+    把当天被日报过滤掉的闲聊单独整理成一份轻量侧记并推送。
+    days_back>1 时向前多取几天（一天一条分段），不足的天数自动跳过。"""
+    global _CFG
+    _CFG = cfg
+    days_back = max(1, min(14, int(days_back or 1)))
+    log("===== 水聊总结启动（截至 %s，共 %d 天）=====" % (day_str, days_back))
+    log("水聊只读本地已有导出记录，不重新导出聊天记录（不消耗 Discord 导出配额）")
+    d0 = datetime.datetime.strptime(day_str, "%Y-%m-%d").date()
+    want = [(d0 - datetime.timedelta(days=k)).strftime("%Y-%m-%d")
+            for k in range(days_back - 1, -1, -1)]
+    days, empty = [], []
+    for ds in want:
+        files = _day_json_files(cfg, ds)
+        if not files:
+            empty.append(ds)
+            continue
+        items = merge_chitchat(files, day_str=ds)
+        if items:
+            days.append((ds, items))
+        else:
+            empty.append(ds)
+    if not days:
+        raise RuntimeError("最近 %d 天没有可用的导出记录（或全是实质讨论、没有水聊）：%s"
+                           % (days_back, "、".join(empty)))
+    days = _split_next_day(days)          # 昨日导出延伸出的「次日」消息挪回真实日期
+    days = [(ds, its) for ds, its in days if its]
+    cap = int(cfg.get("chat_max_items", 500) or 500)
+    per_day = max(60, cap // max(1, len(days)))
+    days = [(ds, _cap_day_items(its, per_day)) for ds, its in days]
+    all_items = [it for _ds, its in days for it in its]
+    total = len(all_items)
+    log("水聊素材：%d 天分段（%s），%d 条，单日上限 %d 条"
+        % (len(days), "、".join(ds for ds, _ in days), total, per_day))
+    if empty:
+        log("以下日期没有可用导出记录，已跳过：%s" % "、".join(empty))
+    text_block = build_chat_text_block(cfg.get("channel_name", "price-talk"), days)
+    digest = call_deepseek(cfg, text_block, system_prompt=CHAT_SYSTEM_PROMPT)
+    digest = sanitize_chat(digest)
+    digest = polish_digest(cfg, text_block, digest, verify_prompt=CHAT_VERIFY_PROMPT,
+                           sanitize_fn=sanitize_chat)
+    # 引语归属硬核对（放在压缩之前：修正可能加字，最后再统一压到配额内）
+    mm, nf = quote_author_audit(digest, all_items)
+    if mm:
+        digest = fix_quote_authors(cfg, text_block, digest, mm)
+        mm2, _ = quote_author_audit(digest, all_items)
+        if mm2:
+            log("⚠️ 仍有 %d 处引语归属对不上原文：%s"
+                % (len(mm2), "；".join("「%s」应为 %s" % (q, "/".join(a)) for _l, q, a, _m in mm2[:3])))
+    if nf:
+        log("提示：%d 处引语未在原文逐字找到（多为翻译转述，已记录）：%s"
+            % (len(nf), "；".join(q for _l, q in nf[:3])))
+    digest = compress_digest(cfg, digest, 500, 900, system_prompt=CHAT_COMPRESS_PROMPT,
+                             sanitize_fn=sanitize_chat,
+                             cut_hint="每条要点压到 30 字以内，一条只说一件事；"
+                                      "🗣 谁在聊什么最多留 4 条、🔥 最佳梗最多 2 条、🎲 跑题现场最多 2 条；"
+                                      "删掉解释性从句与形容词，只留「人名 + 原话 + 结果」；"
+                                      "全部小节标题与英文原话必须保留。")
+    log("水聊篇幅：%d 字" % len(re.sub(r"\s", "", digest or "")))
+    # 标题按「用户要的那几天」写；跨零点补录的次日消息单独注明，不把标题撑成两天
+    span = want[0] if days_back == 1 else "%s~%s" % (want[0], want[-1])
+    spill = [ds for ds, _ in days if ds not in want]
+    if spill:
+        span += "（含 %s 凌晨）" % "、".join(ds[5:] for ds in spill)
+    title = "💬 DTAO price-talk 水聊 · %s" % span
+    out_dir = os.path.join(HERE, cfg.get("output_dir", "exports"))
+    fname = (("dtao_chat_%s.digest.txt" % want[0]) if days_back == 1
+             else ("dtao_chat_%s_%s.digest.txt" % (want[0], want[-1])))
+    try:  # 单独落盘，绝不覆盖当日日报
+        with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
+            f.write("%s\n\n%s\n" % (title, digest))
+    except Exception as e:
+        log("水聊落盘失败（忽略）：%s" % e)
+    want_t = [x.lower() for x in (targets or ["feishu", "tg"])]
+    if cfg.get("push_enabled", True):
+        if "feishu" in want_t:
+            try:
+                push_feishu(cfg, title, digest)
+            except Exception as e:
+                log("飞书推送异常：%s" % e)
+        if "tg" in want_t:
+            try:
+                push_telegram(cfg, title, digest)
+            except Exception as e:
+                log("Telegram 推送异常：%s" % e)
+    else:
+        log("push_enabled=false，仅打印：\n" + title + "\n" + digest)
+    log("===== 水聊总结结束 =====")
     return digest
 
 
@@ -2556,13 +2938,15 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="DTAO price-talk 半自动流水线")
     ap.add_argument("-V", "--version", action="version",
                     version="DTAO price-talk pipeline v%s" % __version__)
-    ap.add_argument("mode", nargs="?", default="daily", choices=["daily", "weekly", "repush", "resummarize"],
+    ap.add_argument("mode", nargs="?", default="daily",
+                    choices=["daily", "weekly", "repush", "resummarize", "chat"],
                     help="daily=导出并推送（可跟日期，省略则前一天）；weekly=周报；"
                          "repush=仅补推已生成的日报（不重导/不重算）；"
-                         "resummarize=按反馈重总结（日期 反馈内容 [tg|feishu]）")
+                         "resummarize=按反馈重总结（日期 反馈内容 [tg|feishu]）；"
+                         "chat=水聊总结（[日期] [天数]，只读已有导出、不重新导出）")
     ap.add_argument("extra", nargs="*",
                     help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）；"
-                         "resummarize: 日期 反馈内容 [tg|feishu]")
+                         "resummarize: 日期 反馈内容 [tg|feishu]；chat: [日期] [天数] [tg|feishu]")
     args = ap.parse_args()
     try:
         if args.mode == "weekly":
@@ -2591,6 +2975,25 @@ if __name__ == "__main__":
             if not feedback:
                 raise RuntimeError("反馈内容为空")
             resummarize_with_feedback(load_config(), day, feedback, targets or None)
+        elif args.mode == "chat":
+            cfg = load_config()
+            tz = datetime.timezone(datetime.timedelta(hours=8))
+            rest = list(args.extra)
+            targets = []
+            while rest and rest[-1].lower() in ("feishu", "tg"):
+                targets.insert(0, rest.pop().lower())
+            days_back = 1
+            if rest and rest[-1].isdigit():
+                days_back = max(1, min(14, int(rest.pop())))
+            if rest:
+                day = _resolve_day_alias(rest[0], tz)
+                try:
+                    datetime.datetime.strptime(day, "%Y-%m-%d")
+                except Exception:
+                    raise RuntimeError("水聊日期无法解析：%s（应为 YYYY-MM-DD / 昨日 / 今日）" % rest[0])
+            else:
+                day = _latest_export_day(cfg) or _resolve_day_alias("昨日", tz)
+            run_chat_summary(cfg, day, days_back, targets or None)
         else:
             main(args)
     except BaseException as e:

@@ -36,5 +36,6 @@
   "context_days": 2,
   "weekly_days": 7,
   "weekly_max_items": 500,
-  "topic_max_items_per_day": 250
+  "topic_max_items_per_day": 250,
+  "chat_max_items": 500
 }

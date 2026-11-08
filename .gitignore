@@ -11,6 +11,9 @@ tg_listener.log
 # ===== 导出的聊天记录与生成的日报（含内容，勿传）=====
 exports/
 
+# ===== 子网档案（从聊天记录抽出来的原文内容，同样含内容，勿传）=====
+subnet_archive/
+
 # ===== DiscordChatExporter 程序文件（自己下载，别传二进制）=====
 DiscordChatExporter.Cli.exe
 DiscordChatExporter.*

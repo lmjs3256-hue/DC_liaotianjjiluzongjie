@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.5.5"
+__version__ = "1.6.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -2439,6 +2439,23 @@ def run_one_day(cfg, after_dt, before_dt):
         for r in results:
             title = base_title + ((" ｜ %s" % r["label"]) if r["label"] else "")
             log("push_enabled=false，仅打印不推送：\n" + title + "\n" + r["digest"])
+
+    # 3) 子网建档（自动，增量）：把本日导出里提到的子网写进各自档案。
+    #    已建档的子网只做增量补充，新提到的子网自动建档 —— 无需任何 TG 指令。
+    #    这里只对「今天这份导出涉及的文件」扫描，成本很低；失败绝不影响日报已推送的结果。
+    if items and cfg.get("archive_auto", True):
+        try:
+            import subnet_archive as SA
+            todo = _day_json_files(cfg, day_str) if action.startswith("export") else list(sources)
+            if todo:
+                r = SA.archive_files(cfg, todo, log=log, translate=False)
+                if r.get("subnets"):
+                    log("子网建档（自动）：涉及 %d 个子网，新增 %d 条，累计 %d 条"
+                        % (r["subnets"], r["new"], sum(v["strong"] for v in r["index"]["subnets"].values())))
+                else:
+                    log("子网建档（自动）：本批导出未提到任何子网")
+        except Exception as e:
+            log("子网建档（自动）异常（忽略，不影响日报）：%s" % e)
     return results[0]["digest"]
 
 
@@ -2973,14 +2990,17 @@ if __name__ == "__main__":
     ap.add_argument("-V", "--version", action="version",
                     version="DTAO price-talk pipeline v%s" % __version__)
     ap.add_argument("mode", nargs="?", default="daily",
-                    choices=["daily", "weekly", "repush", "resummarize", "chat"],
+                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research"],
                     help="daily=导出并推送（可跟日期，省略则前一天）；weekly=周报；"
                          "repush=仅补推已生成的日报（不重导/不重算）；"
                          "resummarize=按反馈重总结（日期 反馈内容 [tg|feishu]）；"
-                         "chat=水聊总结（[日期] [天数]，只读已有导出、不重新导出）")
+                         "chat=水聊总结（[日期] [天数]，只读已有导出、不重新导出）；"
+                         "archive=子网建档（[天数|日期…]，只读已有导出，按子网单独存档）；"
+                         "research=子网投研（子网编号/名称 [天数] [tg|feishu]，读档案+全网交叉验证）")
     ap.add_argument("extra", nargs="*",
                     help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）；"
-                         "resummarize: 日期 反馈内容 [tg|feishu]；chat: [日期] [天数] [tg|feishu]")
+                         "resummarize: 日期 反馈内容 [tg|feishu]；chat: [日期] [天数] [tg|feishu]；"
+                         "archive: [天数 N 或 日期…]；research: 子网 [天数] [tg|feishu]")
     args = ap.parse_args()
     try:
         if args.mode == "weekly":
@@ -3028,6 +3048,60 @@ if __name__ == "__main__":
             else:
                 day = _latest_export_day(cfg) or _resolve_day_alias("昨日", tz)
             run_chat_summary(cfg, day, days_back, targets or None)
+        elif args.mode == "archive":
+            # 子网建档：只读本地导出、不耗 Discord 配额；增量幂等（按消息 id 去重）
+            import subnet_archive as SA
+            cfg = load_config()
+            rest = list(args.extra)
+            tz = datetime.timezone(datetime.timedelta(hours=8))
+            days = None
+            if rest:
+                if rest[0].isdigit():
+                    n = max(1, int(rest[0]))
+                    all_days = SA.list_export_days(os.path.join(HERE, cfg.get("output_dir", "exports")))
+                    days = all_days[-n:]
+                    rest = rest[1:]
+                else:
+                    days = []
+                    for a in list(rest):
+                        ds = _resolve_day_alias(a, tz)
+                        if re.match(r"^\d{4}-\d{2}-\d{2}$", ds or ""):
+                            days.append(ds)
+                            rest.remove(a)
+                    days = days or None
+            # 建档顺手补译文（只翻新条目，走缓存），便于后续投研与人工查阅
+            def _llm(body, sp=None):
+                return call_deepseek(cfg, body, system_prompt=sp)
+            _tr = bool(cfg.get("archive_translate", True))
+            if not _tr:
+                log("archive_translate=false：只建档不翻译")
+            r = SA.archive_days(cfg, days, log=log, llm=_llm if _tr else None,
+                                translate=_tr)
+            log("档案目录：%s" % r["arc_dir"])
+            for sn, info in sorted(r["index"]["subnets"].items(),
+                                   key=lambda kv: -kv[1]["strong"])[:12]:
+                log("  SN%-4s %-22s %4d 条 / %d 人 / %s~%s"
+                    % (sn, (info["name"] or "未知")[:22], info["strong"],
+                       info["people"], info["first"] or "-", info["last"] or "-"))
+        elif args.mode == "research":
+            # 子网投研：读本地档案 + 全网抓取交叉验证，生成重要事件跟踪报告
+            import subnet_research as SR
+            cfg = load_config()
+            rest = list(args.extra)
+            targets = []
+            while rest and rest[-1].lower() in ("feishu", "tg"):
+                targets.insert(0, rest.pop().lower())
+            # 关键顺序：**第一个 token 永远是子网**（"29" 本身是数字，不能当回看天数吃掉），
+            # 只有第二个及之后的纯数字才是天数。历史坑：/投研 29 被解析成"没给子网"。
+            if not rest:
+                raise RuntimeError("research 需要指定子网，例如：python pipeline.py research 29")
+            sn_arg = rest.pop(0)
+            days_n = int(cfg.get("research_days", 14) or 14)
+            if rest and rest[0].isdigit():
+                days_n = max(3, min(60, int(rest.pop(0))))
+            title, digest, path = SR.run_research(cfg, sn_arg, targets or None,
+                                                 days=days_n, log=log)
+            log("投研报告：%s" % path)
         else:
             main(args)
     except BaseException as e:

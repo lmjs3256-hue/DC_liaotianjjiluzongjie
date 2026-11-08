@@ -62,6 +62,14 @@ HELP = (
     "/water 或 /水聊 水聊侧记（群里闲聊/梗/跑题，单独一条，不写投研）\n"
     "   /水聊 昨日 指定日期；/水聊 昨日 3 连续 3 天（只读已有导出，不重新导出）\n"
     "/weekly 周报\n"
+    "━━ 子网档案 / 投研 ━━\n"
+    "（建档全自动：每次导出日报时自动把提到的子网存档，已建档的增量补充、\n"
+    "  未建档的自动新建，无需手动操作）\n"
+    "/投研 29 生成 SN29 重要事件跟踪报告：先调本地子网档案，再结合官网/推特/\n"
+    "   GitHub/新闻/全网检索交叉核验，最后出跟踪报告并双推\n"
+    "   /投研 29 30 只看最近 30 天档案；也可写名字：/投研 hotfloat\n"
+    "/档案 列出所有已建档子网；/档案 29 查看某子网档案摘要\n"
+    "━━ 其它 ━━\n"
     "/watch 查看潜力观察(默认最新; /watch 7 近7天热点; /watch all 全部)\n"
     "/repush 补推最近一次日报(无需日期)\n"
     "/repush 2026-10-23 补推指定日(飞书+TG)\n"
@@ -271,6 +279,7 @@ def tg_api(token, method, params=None, timeout=40):
 _KEYBOARD = {
     "keyboard": [
         ["/digest 昨日", "/repush 最新"],
+        ["/投研 29", "/档案"],
         ["/watch 7", "/weekly"]
     ],
     "resize_keyboard": True
@@ -306,6 +315,8 @@ def _feishu_watch(cfg, title, content):
 #   - _BUSY 锁防止并发重复导出（浪费 user token 配额）
 # ---------------------------------------------------------------------------
 PIPELINE_TIMEOUT = 900          # 单次流水线最长等待（秒）
+# 建档/投研要联网抓多个外部站 + 两轮 LLM，比日报慢得多，单独放宽
+_SLOW_CMDS = {"archive": 1800, "research": 2400}
 _BUSY = False
 _BUSY_LOCK = threading.Lock()
 
@@ -341,8 +352,9 @@ def _run_pipeline_sync(args, chat_id):
     env["PYTHONFAULTHANDLER"] = "1"   # 进程级崩溃时能留下堆栈，便于排查
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace", env=env)
+    timeout = _SLOW_CMDS.get(args[0] if args else "", PIPELINE_TIMEOUT)
     try:
-        out, _ = proc.communicate(timeout=PIPELINE_TIMEOUT)
+        out, _ = proc.communicate(timeout=timeout)
         rc = proc.returncode
     except subprocess.TimeoutExpired:
         _kill_proc_tree(proc)
@@ -350,10 +362,10 @@ def _run_pipeline_sync(args, chat_id):
             out, _ = proc.communicate(timeout=30)
         except Exception:
             out = ""
-        log("流水线超时（>%ds），已终止子进程树：%s" % (PIPELINE_TIMEOUT, " ".join(args)))
+        log("流水线超时（>%ds），已终止子进程树：%s" % (timeout, " ".join(args)))
         try:
             send(chat_id, "⏱ 执行超时（>%d 分钟），已强制终止并清理子进程，请查 run.log"
-                 % (PIPELINE_TIMEOUT // 60))
+                 % (timeout // 60))
         except Exception:
             pass
         return
@@ -364,10 +376,30 @@ def _run_pipeline_sync(args, chat_id):
             send(chat_id, "✅ 水聊侧记已生成并推送（飞书 + TG）\n"
                           "只取被日报过滤掉的闲聊，不写投研；全程未重新导出聊天记录。")
             return
+        if args and args[0] == "archive":
+            # 从日志里抓建档统计（persistent 归档了多少子网、新增多少条）
+            m = re.search(r"子网建档完成：\d+ 个子网有档案，本次新增 (\d+) 条（累计 (\d+) 条）", out)
+            detail = ("\n📊 本次新增 %s 条，档案累计 %s 条" % (m.group(1), m.group(2))) if m else ""
+            send(chat_id, "✅ 子网建档完成%s\n"
+                          "按 SN 编号逐个存放于 subnet_archive/SNxx/（archive.json + archive.md，"
+                          "含原文与中文译文、按时间排序的人物观点索引）。\n"
+                          "发 /档案 看清单，发 /投研 29 做单子网跟踪报告。" % detail)
+            return
+        if args and args[0] == "research":
+            m = re.search(r"报告已存：(.+?)（(\d+) 字）", out)
+            detail = ("\n📄 %s\n📝 %s 字" % (m.group(1), m.group(2))) if m else ""
+            send(chat_id, "✅ 子网投研报告已生成并推送（飞书 + TG）%s\n"
+                          "已归档到 subnet_archive/（下次同子网可直接复用档案）。" % detail)
+            return
         stat = ""
         m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
         if m:
             stat = "\n📊 当日实质消息 %s 条" % m.group(1)
+        # 自动建档的成果也回执一句，用户才知道子网档案在长
+        ma = re.search(r"子网建档（自动）：涉及 (\d+) 个子网，新增 (\d+) 条，累计 (\d+) 条", out)
+        if ma:
+            stat += "\n🗂 子网档案：本批涉及 %s 个子网，新增 %s 条（累计 %s 条）" % (
+                ma.group(1), ma.group(2), ma.group(3))
         mode = ""
         mm = re.search(r"节流模式：\s*\S+\s*（(.+?)）", out)
         if mm:
@@ -504,6 +536,100 @@ def handle(text, chat_id):
         send(chat_id, "💬 收到，正在整理%s的水聊侧记（只读已有导出记录，不重新导出）…"
              % (day or "最近一次导出"))
         run_pipeline(args, chat_id)
+    elif cmd in ("archive", "建档", "存档", "archive_subnets"):
+        # 建档不再作为日常指令（导出时已自动增量建档，见 pipeline.run_one_day）。
+        # 保留这个入口只做一件事：**全量重建**（换机器 / 清过档案 / 想补历史）。
+        send(chat_id, "ℹ️ 建档已自动化：每次导出日报时会自动把提到的子网写进档案"
+                      "（已建档的增量补充，未建档的自动新建），无需手动触发。\n"
+                      "如需用现有全部导出记录**全量重建**一次，请执行：\n"
+                      "python pipeline.py archive\n"
+                      "查看清单发 /档案，生成投研发 /投研 29。")
+    elif cmd in ("research", "投研", "研报", "分析"):
+        # /投研 29 [天数]        —— 子网重要事件跟踪报告
+        # 数据链：本地档案 + 链上数据站 + 官网/GitHub/新闻/搜索/X 交叉验证
+        rest = parts[1:]
+        if not rest:
+            send(chat_id, "用法：/投研 29（也认子网名，如 /投研 hotfloat）\n"
+                          "可指定回看天数：/投研 29 30\n"
+                          "本地没有档案也能出报告：会直接全网核验，出完再新建档案。")
+            return
+        sn_arg = rest[0]
+        rest = rest[1:]
+        days_n = ""
+        if rest and rest[0].isdigit():
+            days_n = rest[0]
+        send(chat_id, "🔬 收到，正在做 SN%s 的重要事件跟踪报告。\n"
+                      "流程：调取本地子网档案 → 抓取链上数据站/官网/GitHub/新闻/搜索/X "
+                      "→ 交叉核验 → 生成报告，约 1-3 分钟…" % sn_arg)
+        args = ["research", sn_arg] + ([days_n] if days_n else [])
+        run_pipeline(args, chat_id)
+    elif cmd in ("archive_list", "档案", "建档列表"):
+        # /档案        列出所有已建档子网
+        # /档案 29     查看该子网档案摘要
+        import subnet_archive as SA
+        cfg = P._CFG or P.load_config()
+        arc_dir = SA.get_arc_dir(cfg)
+        if len(parts) > 1:
+            sn = SA.resolve_sn(parts[1], cfg)
+            if sn is None:
+                send(chat_id, "❌ 无法识别子网：%s" % parts[1])
+                return
+            arc = SA.load_archive(arc_dir, sn)
+            if not arc:
+                send(chat_id, "SN%d 还没有档案。建档是自动的——跑一次 /digest 就会把它建起来；"
+                              "也可以直接发 /投研 %d 出报告，报告会自动新建档案。" % (sn, sn))
+                return
+            st = SA.stats_of(arc)
+            rep = arc.get("reports") or []
+            head = "🗂 **SN%d %s**" % (sn, arc.get("name") or "未知")
+            if arc.get("note"):
+                head += "\n_%s_" % arc["note"]
+            lines = [head,
+                     "业务：%s" % (arc.get("biz") or "未知"),
+                     "群聊条目：%d 条（疑似裸编号 %d 条）· 覆盖 %s ~ %s · %d 人"
+                     % (st["strong"], st["weak"], st["first"] or "-", st["last"] or "-", st["people"]),
+                     "投研报告：%d 份%s" % (len(rep), ("（最近 %s）" % rep[0].get("date")) if rep else ""),
+                     "档案：subnet_archive/SN%d/archive.md" % sn, "", "近期要点："]
+            recent = []
+            for day in sorted(arc.get("days") or {})[-2:]:
+                for e in (arc["days"][day] or [])[-4:]:
+                    recent.append("- %s %s **%s**：%s" % (
+                        day[5:], e.get("time"), e.get("author"),
+                        (e.get("zh") or e.get("text") or "")[:90]))
+            for r in rep[:2]:
+                recent.append("- %s 投研：%s" % (r.get("date", "")[5:], (r.get("title") or "")[:80]))
+            lines += recent or ["（暂无群聊归档，可用 /投研 出报告）"]
+            lines += ["", "发 /投研 %d 可生成跟踪报告" % sn]
+            for ch in P.chunk_text("\n".join(lines), 3800):
+                send(chat_id, _tg_bold(ch))
+            return
+        idx = SA.load_all_index(arc_dir)
+        subs = idx.get("subnets") or {}
+        if not subs:
+            send(chat_id, "还没有任何子网档案。建档是自动的——跑一次 /digest 就会建起来。")
+            return
+        # 只有「疑似提及（weak）」或「只有投研报告」的档案单独归一组：
+        # 只看条数容易误以为它在群里被认真讨论过，实际只是同名英文词擦到。
+        real = [(sn, v) for sn, v in subs.items() if v.get("strong", 0) > 0]
+        faint = [(sn, v) for sn, v in subs.items() if v.get("strong", 0) == 0]
+        real.sort(key=lambda kv: -kv[1]["strong"])
+        faint.sort(key=lambda kv: -(kv[1].get("reports") or 0))
+        lines = ["🗂 已建档子网 %d 个（有实档 %d 个 / 共 %d 条）· 更新 %s"
+                 % (len(subs), len(real), sum(v["strong"] for v in subs.values()),
+                    idx.get("updated_at") or "-"), ""]
+        for sn, v in real[:35]:
+            lines.append("SN%-4s %-20s %3d 条 / %2d 人  %s~%s"
+                         % (sn, (v["name"] or "未知")[:20], v["strong"], v["people"],
+                            (v["first"] or "-")[5:], (v["last"] or "-")[5:]))
+        if len(real) > 35:
+            lines.append("…（有实档的共 %d 个，只显示前 35）" % len(real))
+        if faint:
+            lines += ["", "── 仅有疑似提及 / 仅投研报告（%d 个）──" % len(faint),
+                      "、".join("SN%s" % sn for sn, _ in faint[:30])
+                      + ("…" if len(faint) > 30 else "")]
+        lines += ["", "查看单个：/档案 29　　生成投研：/投研 29"]
+        for ch in P.chunk_text("\n".join(lines), 3800):
+            send(chat_id, ch)
     elif cmd == "watch":
         n = None
         if len(parts) > 1:

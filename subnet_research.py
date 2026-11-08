@@ -628,6 +628,85 @@ _UNIT_NUM = re.compile(
 _SAFE_NUMS = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "30", "60", "90", "100"}
 
 
+def tidy_dates(digest, log=print):
+    """时间线里年份只保留一次（用户要求：同一年份不要反复出现 2026 年）。
+
+    提示词已经要求了，但模型经常照抄成每条都带年份；这里在代码层兜底：
+    以「首条出现年份」为准，其后同年的 `2026-10-30` 一律缩成 `10-30`；跨年保留。
+    """
+    if not digest:
+        return digest, 0
+    lines = digest.split("\n")
+    base = None
+    n = 0
+    out = []
+    for ln in lines:
+        m = re.match(r"^(\s*[-\d.、*]*\s*)(\d{4})-(\d{2}-\d{2})(.*)$", ln)
+        if m and ("·" in ln or "已验证" in ln or "未验证" in ln):
+            yr = m.group(2)
+            if base is None:
+                base = yr
+                out.append(ln)          # 首条保留完整年份
+                continue
+            if yr == base:
+                out.append("%s%s%s" % (m.group(1), m.group(3), m.group(4)))
+                n += 1
+                continue
+        out.append(ln)
+    if n:
+        log("日期缩写：%d 处重复年份已省略（只保留首条年份）" % n)
+    return "\n".join(out), n
+
+
+def tidy_layout(digest, log=print):
+    """手机端排版兜底：时间线每条一行、条间不留空行、统一 `- ` 前缀、
+    删掉「与上次相比无变化」这类占位条目（用户要的是「重要事件」，不是元评估）。
+
+    模型经常把条目写成段与段之间空一行，TG 里读起来像一屏一屏断开，很难扫。
+    """
+    if not digest:
+        return digest, 0
+    _EV = re.compile(r"^\s*(?:[-*•]\s*)?(\d{4}-\d{2}-\d{2}|\d{2}-\d{2})\s*[·•]")
+    out, fixed, dropped = [], 0, 0
+    lines = digest.split("\n")
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        s = ln.strip()
+        # 空行：仅当下一行不是列表条目时保留（保证段与段之间还有一个空行）
+        if not s:
+            look = ""
+            for j in range(i + 1, min(i + 3, len(lines))):
+                if lines[j].strip():
+                    look = lines[j].strip()
+                    break
+            if _EV.match(look):
+                i += 1
+                continue
+            out.append(ln)
+            i += 1
+            continue
+        if _EV.match(s):
+            # 占位条目：只讲「无变化/延续上次判断」且没有实际事件的，直接删
+            if re.search(r"无变化|无实质变化|延续上次判断", s) and not re.search(r"✅已验证|⚠️未验证", s[:12]):
+                dropped += 1
+                i += 1
+                continue
+            if not re.match(r"^\s*[-*•]\s", ln):
+                out.append("- " + s)
+                fixed += 1
+            else:
+                out.append(ln)
+            i += 1
+            continue
+        out.append(ln)
+        i += 1
+    txt = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    if fixed or dropped:
+        log("排版整理：%d 条补 `- ` 前缀，%d 条占位条目已删" % (fixed, dropped))
+    return txt, fixed + dropped
+
+
 def audit_numbers(digest, source_text, log=print):
     """检查报告里的带单位数字是否都在素材里。返回 (未命中列表, 命中率)。"""
     src = source_text or ""
@@ -696,6 +775,9 @@ def strip_unknown_numbers(digest, miss):
 _MARK_OF = {"[bittensor.ai]": "bittensor.ai", "[taostats]": "taostats", "[dtaoscan]": "dtaoscan",
             "[官网]": "官网", "[GitHub]": "GitHub", "[新闻]": "Google News", "[X]": "X",
             "[搜索]": "DuckDuckGo"}
+# [档案] 不在上面的映射里：它引用的是本地档案里的历史留档（群聊原话 / 此前投研），
+# 不是本次抓取的外部源，所以**永远不该被判为「抓取失败的源被当引用」**。
+_ARCHIVE_MARK = "[档案]"
 
 
 def audit_sources(digest, sources, log=print):
@@ -756,42 +838,63 @@ def rewrite_bad_sources(digest, hits, sources, llm=None, log=print):
 # ------------------------------------------------------------------ 提示词
 RESEARCH_SYSTEM_PROMPT = (
     "你是 Bittensor 子网的买方研究员。输入会分成几块：【本地群聊档案】（Discord 真实讨论，带日期时间，"
-    "**可能没有**）、【链上/数据站事实】（抓取到的页面字段）、【官方与公开信息】（官网、GitHub、新闻、搜索、X）、"
+    "**可能没有**）、【此前投研结论】（该子网档案里存的历史报告，只有做过投研才会有）、"
+    "【链上/数据站事实】（抓取到的页面字段）、【官方与公开信息】（官网、GitHub、新闻、搜索、X）、"
     "【交叉验证矩阵】（同指标多源并列及其一致性判定）。"
     "另外会额外给出一段【代码预判的硬信号】——那是程序根据链上字段判定的客观状态"
     "（owner 解仓、神经元满员、注册关闭等），**必须写入报告**，不得忽略或弱化。\n"
-    "你要产出一份**子网近期重要事件跟踪报告**。有群聊档案时，核心价值是「把群里的说法和外部证据对齐」；"
-    "**没有群聊档案时，核心价值是「把多方外部源对齐，找出互相矛盾或只有单一来源的地方」**。\n"
+    "\n【工作顺序（必须遵守）】\n"
+    "先读【本地群聊档案】与【此前投研结论】，把「档案里已经确认过的事实」当成**起点**；"
+    "再读外部源，专门找**上次报告之后的新增变化**（新公告、新解仓、新数据、群里新出现的说法），"
+    "把这些变化写进时间线。**已经在上次报告里写过、这次没有新进展的事，不要重复罗列**。\n"
+    "报告只回答三个问题：**什么时候发生了什么（时间线）· 现在什么价（当前价格）· 接下来盯什么（预期跟踪）**。"
+    "除此之外的分析、感慨、免责声明、方法论说明，一律不要。\n"
     "\n【事实纪律（违反即作废）】\n"
-    "1. 每条事实后面必须带来源标记：`[群聊 MM-DD]`、`[taostats]`、`[bittensor.ai]`、`[dtaoscan]`、"
-    "`[官网]`、`[GitHub]`、`[新闻]`、`[X]`、`[搜索]`；没标记的句子只能是分析判断，且必须以「判断：」开头。\n"
+    "1. 每条事实后面必须带来源标记：`[群聊 MM-DD]`、`[档案]`（引用档案里的历史投研结论时用）、"
+    "`[taostats]`、`[bittensor.ai]`、`[dtaoscan]`、`[官网]`、`[GitHub]`、`[新闻]`、`[X]`、`[搜索]`；"
+    "没标记的句子只能是分析判断，且必须以「判断：」开头。\n"
     "2. 数字必须来自输入原文，**禁止换算、禁止四舍五入改写、禁止补全缺失位**；抓不到就写「未获取」。\n"
     "3. 群聊里的传闻/猜测/玩笑**不得**写成事实：写成「群内有人称（MM-DD，谁）：…」。"
     "玩笑、反讽、假设句（if/imagine/假如）不算证据。\n"
     "4. 共现≠因果。某公司/人物与某子网同日出现，不得写成「某公司支持该子网」。\n"
     "5. 人名、子网名、代币名、SN 编号一律照抄，不音译、不改写大小写。\n"
-    "6. 多源冲突时**并列呈现并说明冲突点**，不要替读者选一个；无法确认就写「数据存在冲突，需人工核实」。\n"
+    "6. 多源冲突时**在事件里直接说明冲突**（如「A 站 0.0025 / B 站 0.0027，未证实」），"
+    "并标 `⚠️未验证`，不要替读者选一个，也不要为此单开一段。\n"
     "7. 输入里没有的公告、合作、融资、上所，一律不许出现。宁可报告短，不许编。\n"
     "8. **没有本地档案时**：绝对不许出现「群内有人说」「社区在传」「大家认为」这类表述，"
-    "也不得虚构社区情绪与预期差；相应小节改为「外部信息对照」与「市场信号解读」，只依据外部源。\n"
-    "\n【输出结构（小节标题加粗，严格按顺序）】\n"
-    "**🎯 一句话结论**（这段时间该子网最重要的一件事 + 证据强度：强/中/弱；3 句以内）\n"
-    "**📊 事实基线**（列表：指标 → 值 → 来源。**最多 12 条**，只挑与结论相关的；"
-    "Tempo / Epoch / Network share 这类无关指标不要列；缺失写「未获取」）\n"
-    "**🗓 重要事件时间线**（按日期升序，**最多 7 条**；每条：日期 · 事件 · 来源；"
-    "区分「官方动作」与「社区传闻」；纯闲聊不进时间线。"
-    "**GitHub 的逐条 commit 不算事件**——数据站给出的「N commits/30d」与 GitHub 的「最近提交日期」"
-    "是同一个事实的两种表述，**不得判为冲突**；开发节奏最多合并成一条概述）\n"
-    "**🔀 交叉验证矩阵**（逐条对齐，**最多 5 条**：群内说法/单一来源说法 → 外部证据 → 判定："
-    "证实/部分证实/无法证实/被否定）\n"
-    "**💬 群内预期差**（有档案时：群里在想什么、和链上/官方事实差在哪，**2-3 条**，每条 60 字内；"
-    "无档案时改为「**市场信号解读**」：价位/流动性/emission/开发节奏说明什么，仍须带来源标记）\n"
-    "**⚠️ 风险与未证实**（单一来源、冲突数据、无法核实的指控，"
-    "逐条列出并写明缺什么证据，**最多 5 条**）\n"
-    "**📌 跟踪清单**（接下来该盯的具体信号，**3-4 条**，可验证、带判断阈值）\n"
-    "\n【篇幅（硬性）】全文 **1300-1800 字**（不含标点也按字数算）。"
-    "这是手机端阅读的上限：宁可有 5 条扎实内容，不要 20 条流水账。"
-    "超字数会被截断重写，等于白写。\n"
+    "只依据外部源写时间线。\n"
+    "9. 年份只在时间线首条出现一次，后面只写 `月-日`；价格只写当前价，不写历史价对比、不写涨跌幅。\n"
+    "\n【输出结构（只有这三段，严格按顺序，不要加别的段）】\n"
+    "\n**🗓 重要事件时间线**（这是报告主体，占 60% 以上篇幅）\n"
+    "**每行一条，以 `- ` 开头，条与条之间不要空行**。格式固定为：`- 月-日 · 事件 · 验证状态`\n"
+    "- **日期写法**：同一份报告里年份只出现一次。**首条**写 `2026-10-30`，"
+    "其后各条一律只写 `10-31`、`11-06`，**不许再重复 2026**。跨年时才重新写年份。\n"
+    "- **事件**：一句话讲清「谁做了什么 / 发生了什么」，带必要数字。官方动作与社区传闻都要，"
+    "但传闻必须在事件里写明是「传言/群内称」，不许写成事实。纯闲聊不进时间线。\n"
+    "- **验证状态**：每条结尾必须标，二选一（可带半句理由，不超过 25 字）：\n"
+    "    · `✅已验证` —— 有两个及以上独立来源，或链上/官方一手数据直接支持；"
+    "括注写清依据，如「✅已验证（官方X+官网）」\n"
+    "    · `⚠️未验证` —— 只有单一来源、只有群内说法、或只是口头承诺；"
+    "括注写清缺什么，如「⚠️未验证（仅群内称，无公告）」\n"
+    "- **条数**：按事情多少写，**最多 12 条**，重要的排前面；确实没有大事就写 1-3 条并说明「本期无重大事件」。\n"
+    "- **只写真实发生的事**：不要写「与上次相比无变化」「延续上次判断」这种元评估条目——"
+    "没有新事就少写一条，不要在时间线里塞占位行。\n"
+    "- **GitHub 的逐条 commit 不算事件**——数据站「N commits/30d」与 GitHub「最近提交日期」"
+    "是同一事实的两种表述，不得判为冲突；开发节奏最多合并成一条。\n"
+    "\n**📊 当前数据**（只保留**当前价格**，一行即可；不要市值/池子/emission/tempo/epoch 等任何其它指标。"
+    "价格必须照抄抓取原文，不许换算；抓不到就写「当前价格：未获取」。格式：`当前价格：0.002504 τ [bittensor.ai]`）\n"
+    "\n**📌 预期跟踪**（接下来该盯什么，4-6 条，每条必须可验证）\n"
+    "格式：`- 盯什么 → 什么情况算兑现 / 什么情况算证伪`。"
+    "要具体到能拿数据核对（例如「owner 是否在 30 天内继续解仓 → 解仓比例再升 5% 即证伪回购承诺」），"
+    "不要写「关注官方动态」这类空话。\n"
+    "\n【禁止事项】\n"
+    "不要写「一句话结论」段、不要写「事实基线」（只留当前价格那一行）、不要写「交叉验证矩阵」段、"
+    "不要写「群内预期差」段、不要写「风险与未证实」段——"
+    "**验证状态已经跟在每条事件后面了，不需要再单列一节复述**。"
+    "也不要写开场白、不要写总结、不要写「综上所述」。\n"
+    "\n【篇幅】全文 **600-1600 字**。**简短是硬要求，不是建议**：能一句话说清就别写两句，"
+    "不许为了显得详尽而堆形容词、堆免责声明、堆重复表述。宁可 600 字全是干货。\n"
+    "超过 1600 字会被代码层强制压缩（只删不增），可能把你想保留的事件删掉。\n"
     "\n【语言】中文；英文专有名词、代币名、代码库名保留原文。不用 # 标题、不用 > 引用，手机端可读。"
 )
 
@@ -882,6 +985,57 @@ def _ext_block(sources, meta):
     return "\n".join(blocks)
 
 
+def _prev_reports_block(arc, limit=3, skip_date=None, body_chars=900, body_full_for=1, arc_dir=None):
+    """把该子网**此前投研的结论**带给本次，实现「上次说了什么 → 这次怎么变了」。
+
+    没有这一段时，写回档案的报告只是一份堆积的历史文件：下次投研完全不读它，
+    两次报告之间无法体现「进展/反转/被证伪」，档案就失去闭环意义。
+
+    body_chars：最近 body_full_for 份报告带**正文全文**（截断到 body_chars），
+    更早的只带结论句 —— 既要能对比「上次判断的细节」，又不能把输入撑爆。
+
+    旧档案（v1.6.0 之前落的）没有 body 字段，只有 file 指向 research_*.md；
+    传 arc_dir 时按需回读磁盘，避免历史上限在摘要层面。
+    """
+    if not arc:
+        return ""
+    reps = [r for r in (arc.get("reports") or []) if r.get("date")][:limit]
+    if not reps:
+        return ""
+    out = ["【此前 %d 次投研结论（本档案历史留档，供对比「变化」，不要直接当成今天的证据）】"
+           % len(reps)]
+    for i, r in enumerate(reps):
+        toned = (r.get("conclusion") or r.get("title") or "").replace("\n", " ").strip()
+        tag = "（同日上一版）" if (skip_date and r["date"] == skip_date) else ""
+        out.append("- %s%s（证据强度 %s）：%s%s"
+                   % (r["date"], tag, r.get("grade") or "未标注", toned[:320],
+                      ("；当时关键事件：" + (r.get("events") or "")[:160]) if r.get("events") else ""))
+        if i >= body_full_for:
+            continue
+        body = (r.get("body") or "").strip()
+        if not body and arc_dir and r.get("file"):
+            # 老档案没 body：回读同目录报告文件，保证「上次说了什么」不因版本升级而丢失
+            try:
+                p = os.path.join(arc_dir, "SN%d" % int(arc["sn"]), r["file"])
+                with open(p, encoding="utf-8") as f:
+                    body = f.read().strip()
+                # 文件头是 `# 标题\n\n> 生成于…`，截掉，只留正文
+                _m = re.search(r"\n\n([\s\S]+)$", body)
+                if _m:
+                    body = _m.group(1).strip()
+            except Exception:
+                body = ""
+        if body:
+            out.append("  ┌ 该次报告要点（供比对，勿当今天的证据）：")
+            out.append("  " + body[:body_chars].replace("\n", "\n  "))
+            out.append("  └ 完")
+    out.append("用法：若本次外部证据与上述结论**不一致**（如上次说「无动作」这次出现官方公告、"
+               "上次说「锁仓中」这次开始解仓），必须在「群内预期差」或「交叉验证矩阵」里明确点出"
+               "「与 X 月 X 日结论相比发生了变化」；若一致，写「延续上次判断」。"
+               "**不要把历史结论当作今天的证据引用**（来源标记用 [档案]，且必须注明是历史留档）。")
+    return "\n".join(out)
+
+
 def _consensus_block(rows):
     if not rows:
         return "（本次未从任何数据站抓到可比指标）"
@@ -945,9 +1099,15 @@ def _signal_block(sources):
     return ("【代码预判的硬信号（必须体现在报告中，不得忽略）】\n- " + "\n- ".join(sig))
 
 
-def build_input(arc, sources, meta, days=14, cap_per_day=260):
-    """拼装投研输入。arc 为 None 时跳过群聊段（纯全网投研）。"""
+def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, today=None, arc_dir=None):
+    """拼装投研输入。arc 为 None 时跳过群聊段（纯全网投研）。
+
+    prev_arc：用于取「此前投研结论」的档案。arc 会被 run_research 置 None（有档案但无群聊条目），
+    此时历史报告仍然存在，必须单独传进来，否则「上次说了什么」永远进不了输入。
+    """
     arc_txt, n, keys = ("", 0, []) if not arc else _arc_block(arc, days=days, cap_per_day=cap_per_day)
+    hist = _prev_reports_block(prev_arc if prev_arc is not None else arc,
+                              skip_date=today, arc_dir=arc_dir)
     head = (
         "【目标子网】SN%d %s\n【知识库业务描述】%s\n【官网】%s\n【仓库】%s\n"
         "【今日】%s\n"
@@ -964,6 +1124,8 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260):
         body = ("\n===== 一、本地群聊档案（Discord #price-talk，按日分段、按时间升序）=====\n" + arc_txt
                 + "\n\n===== 二、链上/数据站事实（抓取原文）=====\n" + _ext_block(sources, meta)
                 + "\n\n===== 三、交叉验证矩阵（同指标多源并列）=====\n" + _consensus_block(build_consensus(sources)))
+    if hist:
+        body += "\n\n===== 此前投研结论（历史留档）=====\n" + hist
     if sig:
         body += "\n\n===== 末、" + sig
     elif not n:
@@ -981,21 +1143,32 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     if sn is None:
         raise RuntimeError("无法识别子网：%s（可用编号 29 / SN29，或知识库里的子网名）" % sn_arg)
     arc = A.load_archive(arc_dir, sn)
+    # 落档要用「今天」的日期；同时用来在历史报告里排除当天（同日重跑不跟自己的旧版对比）
+    today = datetime.datetime.now(TZ).strftime("%Y-%m-%d")
+    # 历史投研结论要单独留一份引用：下面会把 arc 置 None（有档案但没群聊条目），
+    # 但「上次投研说了什么」仍然必须进输入，否则写回档案的报告永远是死档。
+    prev_arc = arc
     # 没有本地档案 / 档案里没消息：**直接走全网投研**，不读导出记录、更不触发任何导出。
     # 群聊档案在这里退化为「可选加强项」而不是前置条件 —— 用户要的是随时能出报告。
     if arc and not (arc.get("days")):
         arc = None
     if arc:
-        log("档案：%d 条命中消息，覆盖 %d 天（最近：%s）"
+        log("① 调取本地档案：%d 条命中消息，覆盖 %d 天（最近：%s）"
             % (sum(len(v) for v in arc["days"].values()), len(arc["days"]),
                "、".join(sorted(arc["days"].keys())[-5:])))
     else:
-        log("本地暂无 SN%d 档案：本次**纯全网投研**（不读导出记录、不做导出），"
-            "只用外部源交叉验证" % sn)
+        log("① 调取本地档案：SN%d 无群聊归档（不读导出记录、不做导出），本次以档案历史报告 + 全网为准" % sn)
+    _nrep = len((prev_arc or {}).get("reports") or [])
+    if _nrep:
+        log("   档案内历史投研：%d 份（最近 %s），将作为「变化对比」基线一并送入"
+            % (_nrep, ((prev_arc.get("reports") or [{}])[0].get("date") or "-")))
+    else:
+        log("   档案内暂无历史投研报告：本次是首份，出稿后会写入档案")
     meta = _subnet_meta(sn)
-    if not meta["name"] and arc:
-        meta["name"] = arc.get("name") or ""
+    if not meta["name"] and prev_arc:
+        meta["name"] = prev_arc.get("name") or ""
     log("===== 子网投研启动：SN%d %s =====" % (sn, meta["name"] or "（名称待反查）"))
+    log("② 全网抓取增补最新资讯（链上数据站 / 官网 / GitHub / 新闻 / 搜索 / X）…")
     sources = collect(meta, sn, log=log)
     # 知识库缺名称/官网时，用数据站页面反查补齐，再补抓依赖这些字段的源（官网/GitHub/搜索/X）
     before = (meta.get("name"), meta.get("url"), meta.get("github"))
@@ -1014,10 +1187,13 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             sources[name] = r
             log("  投研补抓 %-12s %s" % (name, "OK" if r.get("ok") else "失败"))
     text_block = build_input(arc, sources, meta, days=days,
-                             cap_per_day=int(cfg.get("research_max_items_per_day", 260) or 260))
-    log("投研素材：%d 字符（%s + 外部 %d 源，成功 %d 源）"
+                             cap_per_day=int(cfg.get("research_max_items_per_day", 260) or 260),
+                             prev_arc=prev_arc, today=today, arc_dir=arc_dir)
+    _nhist = len((prev_arc or {}).get("reports") or [])
+    log("投研素材：%d 字符（%s + 外部 %d 源，成功 %d 源%s）"
         % (len(text_block), "群聊" if arc else "无群聊", len(sources),
-           sum(1 for v in sources.values() if v.get("ok"))))
+           sum(1 for v in sources.values() if v.get("ok")),
+           ("；含 %d 份历史投研做对比" % _nhist) if _nhist else ""))
     import pipeline
     if llm is None:
         def llm(body, sp=None):
@@ -1034,21 +1210,32 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     except Exception as e:
         log("投研校对跳过（%s）" % e)
     digest = (digest or "").strip()
-    # 字数硬闸门：投研报告固定 1300-1900 字。
-    # 不定死会出 4900 字的长文，TG 要拆四五条、手机端根本读不完；
-    # 压缩器传恒等清洗函数，保证数字与来源标记不被改写。
+    # 字数闸门：600-1600 字。用户要求「太多废话了，我只要时间、重要事件、预期跟踪」，
+    # 所以这里是真的压短，上限就是手机端一屏半的阅读量。
+    # rounds=3：模型每轮只删一部分，两轮常常压不到位（实测 5061→3465），三轮才收得住。
     try:
-        digest = pipeline.compress_digest(cfg, digest, 1300, 1900,
+        digest = pipeline.compress_digest(cfg, digest, 500, 1600, rounds=3,
                                           system_prompt=RESEARCH_COMPRESS_PROMPT,
                                           sanitize_fn=lambda s: s,
-                                          cut_hint="优先砍「事实基线」里对结论无影响的指标"
-                                                   "（Tempo/Epoch/Network share）与重复的 GitHub commit 罗列，"
-                                                   "**最后才动群聊观点与交叉验证矩阵**"
-                                                   "（那是本报告的核心价值，砍掉就白做了）；"
-                                                   "跟踪清单压到 3-5 条；"
+                                          cut_hint="报告只有三段（时间线 / 当前数据 / 预期跟踪）。"
+                                                   "压缩顺序：① 先删时间线里最不重要的整条事件（合并同类、去掉铺垫词）；"
+                                                   "② 每条事件压到一行、去掉形容词与重复解释，**但日期、事件核心、"
+                                                   "✅已验证/⚠️未验证标记必须留着**；"
+                                                   "③ 预期跟踪压到 4 条；"
+                                                   "④ 「当前价格」那一行永远不许删。"
                                                    "全部数字、来源标记、人名、SN 编号必须原样保留。")
     except Exception as e:
         log("投研压缩跳过（%s）" % e)
+    # 排版整理：时间线每行一条、条间不空行、补 `- `、删占位条目
+    try:
+        digest, _ = tidy_layout(digest, log=log)
+    except Exception as e:
+        log("排版整理跳过（%s）" % e)
+    # 日期去重：同一年份只在首条出现一次（模型常忘，代码兜底）
+    try:
+        digest, _ = tidy_dates(digest, log=log)
+    except Exception as e:
+        log("日期整理跳过（%s）" % e)
     # 数字硬校验：报告里每个带单位的数字都必须能在素材里逐字找到，
     # 找不到的降级为「（数值未核实）」—— 宁可难看，也不放编造数字流出
     try:
@@ -1084,15 +1271,19 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             ("本地档案 + " if arc else "（无本地档案）纯全网 ") + "、".join(ok_srcs),
             "；".join("%s%s" % (k, "✓" if v.get("ok") else "✗") for k, v in sources.items()),
             digest))
-    log("报告已存：%s（%d 字）" % (path, len(re.sub(r"\s", "", digest))))
-    # 投研产出增量写回子网档案：已有档案只追加本日报告摘要，没有档案就新建一个
+    log("③ 报告已生成：%s（%d 字）" % (path, len(re.sub(r"\s", "", digest))))
+    # 投研产出增量写回子网档案：报告正文 + 结论 + 时间线 + 数据源一起入库；
+    # 已有档案只替换本日记录（幂等），没有档案就新建一个 —— 这是下次投研的输入来源。
     try:
-        A.attach_research(cfg, sn, today, title, digest, sources=ok_srcs,
-                          meta={"name": meta.get("name"), "desc": meta.get("desc"),
-                                "url": meta.get("url"), "github": meta.get("github")},
-                          file_name=fname, log=log)
+        _arc = A.attach_research(cfg, sn, today, title, digest, sources=ok_srcs,
+                                 meta={"name": meta.get("name"), "desc": meta.get("desc"),
+                                       "url": meta.get("url"), "github": meta.get("github")},
+                                 file_name=fname, log=log)
+        log("④ 档案增量更新完成：SN%d 现有投研 %d 份、群聊 %d 条 —— 下次投研会先读它"
+            % (sn, len(_arc.get("reports") or []),
+               sum(len(v) for v in (_arc.get("days") or {}).values())))
     except Exception as e:
-        log("投研落档失败（忽略）：%s" % e)
+        log("④ 投研落档失败（报告文件已留存，档案未更新）：%s" % e)
     if push and cfg.get("push_enabled", True):
         want = [x.lower() for x in (targets or ["feishu", "tg"])]
         if "feishu" in want:

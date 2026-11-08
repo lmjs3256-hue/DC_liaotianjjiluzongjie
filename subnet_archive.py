@@ -539,8 +539,8 @@ def build_md(arc, max_lines_per_day=400):
     reports = arc.get("reports") or []
     if reports:
         lines += ["## 🔬 重要事件跟踪报告（投研产出）", "",
-                  "> 报告正文见同目录 `research_*.md`。这里只存研究报告的摘要与元信息，"
-                  "按时间倒序；与上面的原话档案分开存放，互不覆盖。", ""]
+                  "> 报告正文已随档案入库（`archive.json` 的 `reports[].body`），"
+                  "此处按时间倒序展开全文；同目录 `research_*.md` 是同一内容的备份副本。", ""]
         for r in reports[:20]:
             lines.append("### %s · 证据强度 %s" % (r.get("date") or "—", r.get("grade") or "—"))
             # 老档案只有 title（存的是整段结论），新档案有 conclusion；两者都兼容
@@ -553,8 +553,12 @@ def build_md(arc, max_lines_per_day=400):
             if srcs:
                 lines.append("- 数据源：%s" % "、".join(srcs))
             if r.get("file"):
-                lines.append("- 正文：`%s`" % r["file"])
-            lines.append("")
+                lines.append("- 正文副本：`%s`" % r["file"])
+            body = (r.get("body") or "").strip()
+            if body:
+                lines += ["", "<details><summary>展开报告全文</summary>", "", body, "", "</details>", ""]
+            else:
+                lines.append("")
 
     wdays = arc.get("weak_days") or {}
     if wdays:
@@ -597,6 +601,9 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
     now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
     meta = meta or {}
     arc = load_archive(arc_dir, sn)
+    # 必须在写盘前判断：load_archive 之后 save_archive 已经落盘，再 os.path.exists 永远为真，
+    # 日志会一律打印「已更新」，新建档案也被说成更新（实测 SN888 就是如此）。
+    existed = bool(arc)
     _nm = (meta.get("name") or "").strip()
     if _nm.lower() in _PLACEHOLDER_NAMES | {"未知", "（知识库未收录）", "（未收录）"}:
         _nm = ""
@@ -621,23 +628,39 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
             if meta.get(k) and not arc.get(src):
                 arc[src] = meta[k]
 
-    # 从正文里抽三样东西：结论句、时间线首条、证据强度
+    # 从正文里抽：标题句、时间线首条、验证状态统计。
+    # 新版报告只有三段（时间线/当前数据/预期跟踪），没有「一句话结论」了 ——
+    # 标题取「时间线里第一条✅已验证事件」，比人工编一句结论更贴合「以事件为主」的定位。
     txt = digest or ""
     first = ""
-    m = re.search(r"\*\*(?:🎯\s*)?一句话结论\*\*\s*\n+(.+)", txt)
+    m = re.search(r"\*\*(?:🎯\s*)?一句话结论\*\*\s*\n+(.+)", txt)   # 兼容旧报告
     if m:
         first = m.group(1).strip()
-    grade = ""
-    mg = re.search(r"证据强度[：:]\s*\**\s*(强|中|偏?强|弱|中偏强|中偏弱)", first or txt)
-    if mg:
-        grade = mg.group(1)
     events = ""
-    me = re.search(r"\*\*(?:🗓\s*)?重要事件时间线\*\*\s*\n+(-\s*.+)", txt)
+    me = re.search(r"\*\*(?:🗓\s*)?重要事件时间线\*\*\s*\n+((?:-\s*.+\n?)+)", txt)
     if me:
         events = me.group(1).lstrip("- ").strip()
+    # 没有结论段时，拿第一条事件当标题（去掉日期与验证标记，只留事件本身）
+    if not first and events:
+        e0 = events.split("\n")[0].lstrip("- ").strip()
+        e0 = re.sub(r"^[\d]{4}-[\d]{2}-[\d]{2}\s*·\s*|^[\d]{2}-[\d]{2}\s*·\s*", "", e0)
+        e0 = re.sub(r"✅已验证[^·]*|⚠️未验证[^·]*", "", e0)
+        # 括号里的「（官方动作）」「（社区传闻）」是分类标签，当标题没意义
+        e0 = re.sub(r"[（(]\s*(?:官方动作|社区传闻|官方承诺[^）)]*|链上[^）)]*)\s*[）)]", "", e0)
+        first = e0.strip(" ·，,")
+    # 证据强度改由「已验证/未验证」条数推算：全已验证=强，各半=中，多数未验证=弱
+    _ok = len(re.findall(r"✅已验证", events or txt))
+    _bad = len(re.findall(r"⚠️未验证", events or txt))
+    if _ok + _bad:
+        _r = _ok / float(_ok + _bad)
+        grade = "强" if _r >= 0.75 else ("弱" if _r <= 0.35 else "中")
+    else:
+        grade = ""
+    mg = re.search(r"证据强度[：:]\s*\**\s*(强|中|偏?强|弱|中偏强|中偏弱)", first or txt)
+    if mg and not grade:
+        grade = mg.group(1)
     srcs = sorted({s for s in (sources or []) if s})
-    # 结论句是给人看的一整段（常 100+ 字），落档时压成一行标题：
-    # 去掉来源标记与「证据强度」尾巴，截到第一个句号 —— 档案列表和 md 小节标题要用它。
+    # 标题压成一行：去掉来源标记与括号补充，截到第一个句号 —— 档案列表和 md 小节标题要用它
     brief = re.sub(r"\[[^\]]{1,20}\]", "", first)
     brief = re.split(r"证据强度", brief)[0]
     brief = re.split(r"(?<=[。！？])", brief.strip())[0].strip(" -—·；;，,")
@@ -646,7 +669,11 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
     brief = re.sub(r"\s{2,}", " ", brief).strip()[:120] or first[:120]
 
     rec = {"date": date_str, "title": brief, "conclusion": first, "events": events,
-           "grade": grade, "sources": srcs, "file": file_name, "generated_at": now}
+           "grade": grade, "sources": srcs, "file": file_name, "generated_at": now,
+           # 报告全文入库：此前只把摘要写进 archive.json、正文留在 research_*.md，
+           # 结果「档案」和「报告」是两套东西，下次投研根本拿不到上次的完整分析。
+           # 现在正文直接进档案，报告文件只是同一内容的可单独阅读副本。
+           "body": (digest or "").strip()}
     reports = [r for r in (arc.get("reports") or []) if (r.get("date") or "") != date_str]
     reports.insert(0, rec)
     arc["reports"] = reports[:60]
@@ -655,7 +682,7 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
     save_md(arc_dir, arc)
     refresh_index(arc_dir)
     log("投研落档：SN%d 档案%s，已记录 %s 的报告（累计 %d 份）"
-        % (int(sn), "已更新" if os.path.exists(archive_path(arc_dir, sn)) else "已新建",
+        % (int(sn), "已更新" if existed else "已新建",
            date_str, len(arc["reports"])))
     return arc
 

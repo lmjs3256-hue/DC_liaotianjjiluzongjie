@@ -1075,10 +1075,11 @@ COMPRESS_PROMPT = (
 )
 
 
-def compress_digest(cfg, digest, lo, hi, system_prompt=None, sanitize_fn=None, cut_hint=None):
+def compress_digest(cfg, digest, lo, hi, system_prompt=None, sanitize_fn=None, cut_hint=None,
+                    rounds=2):
     """字数硬闸门：超过 hi 就再来一轮纯删减（只删不增），压到 lo-hi 之间。
     模型对「字数配额」经常不听话（Kimi K3 写周报能给到 2800 字），所以必须有代码层兜底；
-    单轮只能删掉 2% 的情况也见过，因此允许最多两轮。
+    单轮只能删掉 2% 的情况也见过，因此默认允许两轮（rounds 可调，投研内容多时用 3 轮）。
     水聊侧记传自己的提示词/清洗函数/删除顺序（它的板块跟日报不一样）。"""
     if not digest:
         return digest
@@ -1087,7 +1088,7 @@ def compress_digest(cfg, digest, lo, hi, system_prompt=None, sanitize_fn=None, c
                        "再把保留的每条压到 40 字以内；🔥 核心趋势、全部小节标题、"
                        "所有 SN 编号/数字/人名必须保留。")
     cur = digest
-    for _attempt in range(2):
+    for _attempt in range(max(1, int(rounds))):
         n = len(re.sub(r"\s", "", cur))
         if n <= int(hi * 1.06):
             return cur

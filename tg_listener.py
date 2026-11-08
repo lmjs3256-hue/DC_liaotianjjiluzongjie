@@ -65,10 +65,12 @@ HELP = (
     "━━ 子网档案 / 投研 ━━\n"
     "（建档全自动：每次导出日报时自动把提到的子网存档，已建档的增量补充、\n"
     "  未建档的自动新建，无需手动操作）\n"
-    "/投研 29 生成 SN29 重要事件跟踪报告：先调本地子网档案，再结合官网/推特/\n"
-    "   GitHub/新闻/全网检索交叉核验，最后出跟踪报告并双推\n"
-    "   /投研 29 30 只看最近 30 天档案；也可写名字：/投研 hotfloat\n"
-    "/档案 列出所有已建档子网；/档案 29 查看某子网档案摘要\n"
+    "★ 直接发子网编号即可出投研：发「29」= 生成 SN29 重要事件跟踪报告\n"
+    "   （不发斜杠也行；SN29 / #29 / subnet 29 都认，发「29 30」= 回看 30 天）\n"
+    "   /投研 29 与上面等价；也认子网名：/投研 hotfloat\n"
+    "   报告内容：先调本地子网档案，再结合官网/推特/GitHub/新闻/全网检索交叉核验，\n"
+    "   分 7 段（结论/事实基线/时间线/交叉验证/预期差/风险/跟踪清单）并双推\n"
+    "/档案 列出所有已建档子网（不知道编号先发这个）；/档案 29 看某子网档案\n"
     "━━ 其它 ━━\n"
     "/watch 查看潜力观察(默认最新; /watch 7 近7天热点; /watch all 全部)\n"
     "/repush 补推最近一次日报(无需日期)\n"
@@ -284,6 +286,7 @@ _KEYBOARD = {
     ],
     "resize_keyboard": True
 }
+
 _REMOVE_KB = {"remove_keyboard": True}
 
 
@@ -492,6 +495,54 @@ def run_feedback(day, feedback, chat_id):
     log("已按用户反馈启动重总结：%s / %s" % (day, feedback[:60]))
 
 
+def _start_research(sn_arg, days_n, chat_id):
+    """解析子网 → 回执 → 后台跑投研。裸编号与 /投研 共用这一条路径。
+
+    先在这里解析一次的原因：① 认不出就当场回提示，不让用户等 1 分钟才收到报错；
+    ② 输入是名字（hotfloat）时，回执要显示真正的 SN 编号，不能拼成「SNhotfloat」。
+    """
+    import subnet_archive as SA
+    cfg = P._CFG or P.load_config()
+    sn = SA.resolve_sn(sn_arg, cfg)
+    if sn is None:
+        send(chat_id, "❌ 认不出子网：%s\n"
+                      "可以直接写编号：/投研 29\n"
+                      "也可以发 /档案 看全部已建档子网（含编号）。" % sn_arg)
+        return
+    name = ""
+    try:
+        idx = SA.load_all_index(SA.get_arc_dir(cfg)).get("subnets") or {}
+        name = (idx.get(str(sn)) or {}).get("name") or ""
+        # 知识库里有些名字是用希腊字母冒充拉丁字母写的（hoτfloaτ），
+        # 回执里换成可读写法，免得用户看到一串奇怪符号。
+        name = SA.ascii_name(name) or name
+    except Exception:
+        pass
+    days = int(days_n) if days_n else int(cfg.get("research_days", 14) or 14)
+    send(chat_id, "🔬 收到，正在做 **SN%d%s** 的重要事件跟踪报告（回看 %d 天档案）。\n"
+                  "流程：调取本地子网档案 → 抓取链上数据站/官网/GitHub/新闻/搜索/X "
+                  "→ 交叉核验 → 生成报告，约 1-3 分钟…"
+                  % (sn, (" " + name) if name else "", days))
+    run_pipeline(["research", str(sn)] + ([days_n] if days_n else []), chat_id)
+
+
+# 裸编号触发：群里直接发「29」「SN29」「#29」「subnet 29」「29 30」即可。
+# 刻意**只认编号、不认裸子网名** —— 群里英文词太多（score / liquidity / instant…），
+# 裸名字误触的概率远大于便利收益，名字统一走 /投研 <名字>。
+_BARE_SN_RE = re.compile(r"^(?:sn|subnet)?\s*#?\s*(\d{1,3})(?:\s+(\d{1,3}))?$", re.I)
+
+
+def parse_bare_sn(text):
+    """把「整条消息就是一个子网编号」解析成 (sn, days_or_None)，否则 None。"""
+    m = _BARE_SN_RE.match((text or "").strip())
+    if not m:
+        return None
+    sn = int(m.group(1))
+    if not (1 <= sn <= 255):      # 子网编号合理范围，防止「2026」这类数字误触
+        return None
+    return sn, m.group(2)
+
+
 def handle(text, chat_id):
     text = (text or "").strip()
     if not text:
@@ -499,6 +550,14 @@ def handle(text, chat_id):
     parts = text.split()
     # 群里发指令可能带 @机器人名（/digest@Dtao_ribao_bot），剥掉后缀再匹配
     cmd = parts[0].lstrip("/").lower().split("@")[0]
+    # 裸编号 = 子网投研：整条消息只有「29」/「SN29」/「#29」/「29 30」时直接开工。
+    # 不带斜杠是为了手机上少打几个字（用户原话：从 TG 发子网编号就触发该子网投研）。
+    if not parts[0].startswith("/"):
+        hit = parse_bare_sn(text)
+        if hit:
+            sn, days_n = hit
+            _start_research(str(sn), days_n, chat_id)
+            return
     if cmd in ("help", "start"):
         send(chat_id, HELP)
     elif cmd in ("keyboard", "按钮"):
@@ -549,20 +608,17 @@ def handle(text, chat_id):
         # 数据链：本地档案 + 链上数据站 + 官网/GitHub/新闻/搜索/X 交叉验证
         rest = parts[1:]
         if not rest:
-            send(chat_id, "用法：/投研 29（也认子网名，如 /投研 hotfloat）\n"
-                          "可指定回看天数：/投研 29 30\n"
-                          "本地没有档案也能出报告：会直接全网核验，出完再新建档案。")
+            send(chat_id, "用法：直接给我一个子网编号就行 ——\n"
+                          "  29　　　（不带斜杠也可以，我认得出这是 SN29）\n"
+                          "  /投研 29　/投研 SN29　/投研 hotfloat（子网名）\n"
+                          "  /投研 29 30　第二个数字 = 回看多少天档案（默认 14）\n"
+                          "不知道编号就先发 /档案 看清单。\n"
+                          "本地没档案也能出报告：直接全网核验，出完自动新建档案。")
             return
         sn_arg = rest[0]
         rest = rest[1:]
-        days_n = ""
-        if rest and rest[0].isdigit():
-            days_n = rest[0]
-        send(chat_id, "🔬 收到，正在做 SN%s 的重要事件跟踪报告。\n"
-                      "流程：调取本地子网档案 → 抓取链上数据站/官网/GitHub/新闻/搜索/X "
-                      "→ 交叉核验 → 生成报告，约 1-3 分钟…" % sn_arg)
-        args = ["research", sn_arg] + ([days_n] if days_n else [])
-        run_pipeline(args, chat_id)
+        days_n = rest[0] if rest and rest[0].isdigit() else ""
+        _start_research(sn_arg, days_n, chat_id)
     elif cmd in ("archive_list", "档案", "建档列表"):
         # /档案        列出所有已建档子网
         # /档案 29     查看该子网档案摘要

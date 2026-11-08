@@ -107,7 +107,100 @@ def _subnet_meta(sn):
         "url": A.real_url(v.get("url")),
         "github": A.real_url(v.get("github")),
         "raw_desc": (v.get("desc") or "").strip(),
+        # 知识库快照时间：subnets.json 是离线抓的，子网改名后不会自动更新。
+        # 报告里要能说清「这个名字是哪天的快照」，否则错误名称会被当成事实引用。
+        "kb_seen": (v.get("last_seen") or "").strip(),
+        "aliases": list(v.get("aliases") or []),
     }
+
+
+def chain_name(sn, log=print):
+    """从 taostats 链上身份取子网**现名**。
+
+    为什么必须单独取一次：subnets.json 是离线快照（靠 `python update_subnets.py`
+    手动更新），子网一旦改名，知识库会一直留在旧名上。SN127 就是实例——
+    链上早已是 Zils，知识库仍是 Astrid（last_seen 停在 11-02），
+    于是投研报告整篇按 Astrid 写，用户看到的就是错名。
+    链上身份是权威来源，优先于本地知识库。
+
+    返回 {"name","desc","url","github"} 或 None（抓不到就退回知识库，不阻断投研）。
+    """
+    try:
+        import update_subnets as U
+        recs = U.fetch_identities(timeout=45)
+    except Exception as e:
+        log("链上身份核对跳过（%s）" % e)
+        return None
+    rec = recs.get(int(sn))
+    if not rec:
+        return None
+    return {
+        "name": (rec.get("name") or "").strip(),
+        "desc": (rec.get("desc") or "").strip(),
+        "url": (rec.get("url") or "").strip(),
+        "github": (rec.get("github") or "").strip(),
+    }
+
+
+def _names_in_feedback(feedback):
+    """从用户反馈里揪出「新名字」候选。
+
+    典型句式：「127 已经改名为 Zils，怎么你总结出来的还是 Astrid」
+    这里只做保守抽取 —— 抓「改名为 X」「叫 X」「是 X」后面的那个英文词，
+    并排除用户自己提到的旧名（「还是 Astrid」里的 Astrid 不该被当成新名）。
+    抓不准就不抓：宁可让模型去理解整句，也不要错误改名。
+    """
+    s = (feedback or "")
+    cands = []
+    for pat in (r"改名为\s*([A-Za-z][\w.\-]{1,30})",
+                r"改叫\s*([A-Za-z][\w.\-]{1,30})",
+                r"现名(?:是|叫)?\s*([A-Za-z][\w.\-]{1,30})",
+                r"现在(?:叫|是)\s*([A-Za-z][\w.\-]{1,30})"):
+        for m in re.finditer(pat, s, re.I):
+            w = m.group(1).strip().rstrip("。，,.、")
+            if w and w not in cands:
+                cands.append(w)
+    if not cands:
+        return []
+    # 排除「还是/仍然 + 旧名」这类句式里出现的词
+    olds = set(w.lower() for w in re.findall(r"(?:还是|仍然是|依旧是)\s*([A-Za-z][\w.\-]{1,30})", s, re.I))
+    out = [w for w in cands if w.lower() not in olds]
+    return out or cands[:1]
+
+
+def apply_chain_name(meta, chain, feedback=None, log=print):
+    """用链上现名校正 meta；名字变了要说出来，不能默默替换。
+
+    三种情况：
+    1. 本地知识库和链上不一致 → 以链上为准，旧名进 aliases，并在 meta 里留
+       `name_changed_from`，提示词会要求报告点明「改名」。
+    2. 只靠用户反馈才知道新名（抓取失败时）→ 同样采信用户，标记来源为 feedback。
+    3. 两边一致 → 什么都不做。
+    """
+    if not meta.get("name"):
+        if chain and chain.get("name"):
+            meta["name"] = chain["name"]
+            log("   名称：知识库无记录，采用链上名「%s」" % chain["name"])
+        return meta
+
+    names_chain = (chain or {}).get("name") or ""
+    if names_chain and A.ascii_name(names_chain).lower() != A.ascii_name(meta["name"]).lower():
+        meta["name_changed_from"] = meta["name"]
+        meta["name_change_source"] = "链上身份（taostats）"
+        meta["aliases"] = sorted(set((meta.get("aliases") or []) + [meta["name"]]))
+        log("   ⚠️ 名称不一致：知识库「%s」（快照 %s）→ 链上现名「%s」，报告以链上为准"
+            % (meta["name"], meta.get("kb_seen") or "未知", names_chain))
+        meta["name"] = names_chain
+        # 改名往往连官网/GitHub/描述一起换（SN127：astrid.global → zils.ai）。
+        # 不跟着换会抓错站：后续官网/GitHub/搜索/X 全按旧地址走，新项目的事实一条也抓不到。
+        for k, label in (("url", "官网"), ("github", "仓库"), ("desc", "业务描述")):
+            new = (chain or {}).get(k) or ""
+            old = meta.get(k) or ""
+            if new and A.real_url(new) != A.real_url(old):
+                meta[k] = A.real_url(new) if k in ("url", "github") else new
+                log("   ↻ %s 同步为链上值：%s → %s" % (label, old or "（空）", meta[k]))
+    return meta
+
 
 
 def enrich_meta(meta, sources, log=print):
@@ -857,7 +950,10 @@ RESEARCH_SYSTEM_PROMPT = (
     "3. 群聊里的传闻/猜测/玩笑**不得**写成事实：写成「群内有人称（MM-DD，谁）：…」。"
     "玩笑、反讽、假设句（if/imagine/假如）不算证据。\n"
     "4. 共现≠因果。某公司/人物与某子网同日出现，不得写成「某公司支持该子网」。\n"
-    "5. 人名、子网名、代币名、SN 编号一律照抄，不音译、不改写大小写。\n"
+    "5. 人名、子网名、代币名、SN 编号一律照抄，不音译、不改写大小写。"
+    "**子网改名时以输入里的现名为准**：若给了【⚠️ 改名提示】，通篇用现名，"
+    "旧名只能写成「（原名 xxx）」；群聊或旧报告里的旧名不是当前名称。"
+    "同理，若给了【用户反馈】且其中指出名称/身份有误，一律以用户反馈为准。\n"
     "6. 多源冲突时**在事件里直接说明冲突**（如「A 站 0.0025 / B 站 0.0027，未证实」），"
     "并标 `⚠️未验证`，不要替读者选一个，也不要为此单开一段。\n"
     "7. 输入里没有的公告、合作、融资、上所，一律不许出现。宁可报告短，不许编。\n"
@@ -1117,6 +1213,14 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
            datetime.datetime.now(TZ).strftime("%Y-%m-%d"),
            ("%s ~ %s（%d 个交易日，%d 条命中消息）" % (keys[0], keys[-1], len(keys), n))
            if keys else "**本次无本地档案**（不做群聊对照，全部结论只依赖外部源）"))
+    if meta.get("name_changed_from"):
+        # 改名必须显式告知模型：否则它会从旧群聊/旧报告里继续沿用旧名，
+        # 或者把「新旧两个名字」当成两个不同的项目来写。
+        head += ("【⚠️ 改名提示】本子网**已改名**：旧名「%s」→ 现名「%s」（依据：%s）。\n"
+                 "报告中一律使用现名；旧名只在解释历史事件时以「（原名 %s）」形式出现。\n"
+                 % (meta["name_changed_from"], meta["name"],
+                    meta.get("name_change_source") or "链上身份",
+                    meta["name_changed_from"]))
     sig = _signal_block(sources)
     body = ("\n===== 一、链上/数据站事实（抓取原文）=====\n" + _ext_block(sources, meta)
             + "\n\n===== 二、交叉验证矩阵（同指标多源并列）=====\n" + _consensus_block(build_consensus(sources)))
@@ -1136,12 +1240,19 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
 
 
 # ------------------------------------------------------------------ 主流程
-def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=True):
-    """生成并推送子网重要事件跟踪报告。返回 (title, digest, path)。"""
+def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=True,
+                 feedback=""):
+    """生成并推送子网重要事件跟踪报告。返回 (title, digest, path)。
+
+    feedback：用户对上一份报告的修正意见（来自 TG `/retry <子网> <反馈>`）。
+    这是**权威修正**，优先于本地知识库与自动抓取：用户明确指出「127 已改名为 Zils」，
+    就不能再按知识库里的 Astrid 出稿。反馈会写进输入并单独成段，提示模型据此纠正。
+    """
     arc_dir = A.get_arc_dir(cfg)
     sn = A.resolve_sn(sn_arg, cfg)
     if sn is None:
         raise RuntimeError("无法识别子网：%s（可用编号 29 / SN29，或知识库里的子网名）" % sn_arg)
+    feedback = (feedback or "").strip()
     arc = A.load_archive(arc_dir, sn)
     # 落档要用「今天」的日期；同时用来在历史报告里排除当天（同日重跑不跟自己的旧版对比）
     today = datetime.datetime.now(TZ).strftime("%Y-%m-%d")
@@ -1167,7 +1278,23 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     meta = _subnet_meta(sn)
     if not meta["name"] and prev_arc:
         meta["name"] = prev_arc.get("name") or ""
+    # 名称以链上身份为准：知识库是离线快照，子网改名后不会自动跟随（SN127 就是
+    # 知识库 Astrid / 链上 Zils）。抓不到链上数据时保留知识库值，不阻断投研。
+    log("   名称核对：链上身份（taostats）…")
+    meta = apply_chain_name(meta, chain_name(sn, log=log), log=log)
+    if feedback:
+        # 用户反馈里的名称同样要能纠正错误：即使链上抓取失败，也要采信用户。
+        _fb_names = _names_in_feedback(feedback)
+        if _fb_names and meta.get("name") and \
+                _fb_names[0].lower() != A.ascii_name(meta["name"]).lower():
+            meta.setdefault("name_changed_from", meta["name"])
+            meta.setdefault("name_change_source", "用户反馈")
+            meta["aliases"] = sorted(set((meta.get("aliases") or []) + [meta["name"]]))
+            log("   ⚠️ 按用户反馈改名：「%s」→「%s」" % (meta["name"], _fb_names[0]))
+            meta["name"] = _fb_names[0]
     log("===== 子网投研启动：SN%d %s =====" % (sn, meta["name"] or "（名称待反查）"))
+    if feedback:
+        log("   本次带用户反馈（将作为权威修正写入输入）：%s" % feedback[:100])
     log("② 全网抓取增补最新资讯（链上数据站 / 官网 / GitHub / 新闻 / 搜索 / X）…")
     sources = collect(meta, sn, log=log)
     # 知识库缺名称/官网时，用数据站页面反查补齐，再补抓依赖这些字段的源（官网/GitHub/搜索/X）
@@ -1189,6 +1316,20 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     text_block = build_input(arc, sources, meta, days=days,
                              cap_per_day=int(cfg.get("research_max_items_per_day", 260) or 260),
                              prev_arc=prev_arc, today=today, arc_dir=arc_dir)
+    if feedback:
+        # 用户反馈单独成段，且明确标「权威修正」：模型很吃这一套，
+        # 只把反馈混在正文里它常常当成又一条群聊传闻，改不动已经写下的判断。
+        text_block += (
+            "\n\n===== 用户反馈（最高优先级，必须据此修正）=====\n"
+            "%s\n"
+            "【执行要求】\n"
+            "1. 上面的反馈是**用户直接指出的错误/补充事实**，优先级高于本地知识库、"
+            "高于此前报告、高于自动抓取到的旧页面文字。\n"
+            "2. 若反馈指出名称/身份不对（例如编号已改名），本次报告**必须使用新名字**，"
+            "并在时间线里补一条该改名的说明；不得再出现旧名作为当前名称使用。\n"
+            "3. 反馈里提到但抓取素材中没有的事实，按「⚠️未验证（用户反馈，待链上/官方确认）」处理，"
+            "不要伪造成已验证。\n"
+            "4. 重新核对整篇报告里与反馈冲突的表述，逐条改掉；不要只改标题。" % feedback)
     _nhist = len((prev_arc or {}).get("reports") or [])
     log("投研素材：%d 字符（%s + 外部 %d 源，成功 %d 源%s）"
         % (len(text_block), "群聊" if arc else "无群聊", len(sources),

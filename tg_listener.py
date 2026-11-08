@@ -81,6 +81,9 @@ HELP = (
     "/retry 反馈内容 按你的意见/补充事实重总结并重推\n"
     "   例：/retry SN34 是宣布转型，不是跑路\n"
     "   可指定日期：/retry 2026-10-30 反馈内容\n"
+    "★ 反馈里带子网编号、且该子网最近做过投研 → **重做投研报告**（不是重跑日报）\n"
+    "   例：/retry 127 已改名为 Zils，报告名字错了\n"
+    "   投研会以链上身份为准核对名称，并按你的反馈逐条修正后重推\n"
     "   反馈带「专题」二字 = 专题总结模式：不修正日报，而是从最近几天已有记录里\n"
     "   还原该专题的原文人物观点并推送。例：/retry 总结SN127专题并推送，还原原文人物观点\n"
     "/help 显示本帮助\n"
@@ -496,11 +499,87 @@ def run_feedback(day, feedback, chat_id):
     log("已按用户反馈启动重总结：%s / %s" % (day, feedback[:60]))
 
 
-def _start_research(sn_arg, days_n, chat_id):
-    """解析子网 → 回执 → 后台跑投研。裸编号与 /投研 共用这一条路径。
+def _research_sn_of_feedback(feedback, day=None, within_hours=72):
+    """判断这条反馈针对的是不是某个子网的**投研报告**；是则返回 SN 编号。
+
+    规则（三条同时满足才返回，宁可退回日报也不能误判）：
+      1. 反馈里出现了子网编号（`127` / `SN127` / `#127`）或已建档子网名；
+      2. 该子网档案里有投研报告；
+      3. 最近一份报告足够新（默认 72 小时内）—— 用户是对刚推出的报告提意见，
+         而不是翻三个月前的旧账（那种情况更可能是想改当天日报）。
+    day 给了日期时，只认那天出的报告。
+    """
+    import subnet_archive as SA
+    cfg = P._CFG or P.load_config()
+    arc_dir = SA.get_arc_dir(cfg)
+
+    # 0) 反馈里明确指向日报 → 一律走日报重总结，不要抢。
+    #    实测「今天日报漏了 SN23 的进展」被误判成投研重做，用户要改的是日报。
+    if re.search(r"日报|水聊|周报|今天的总结|当日总结", feedback):
+        return None
+    # 明确指向投研的措辞，可提高后续判定权重（用在最后一步的兜底）
+    _want_research = bool(re.search(r"投研|跟踪报告|重要事件|研究报告", feedback))
+
+    # 1) 从反馈里找编号：优先 SNxx / #xx，其次裸数字（1-255）
+    sn = None
+    m = re.search(r"(?i)\b(?:sn|subnet)\s*#?\s*(\d{1,3})\b", feedback) or \
+        re.search(r"#\s*(\d{1,3})\b", feedback)
+    if m:
+        sn = int(m.group(1))
+    if sn is None:
+        # 裸数字：只认 1-255，且排除日期样式的数字（2026 之类）
+        for tok in re.findall(r"(?<!\d)(\d{1,3})(?!\d)", feedback):
+            n = int(tok)
+            if 1 <= n <= 255:
+                sn = n
+                break
+    if sn is None:
+        # 也可能只写了子网名（hotfloat / Zils）
+        try:
+            kb = SA.load_kb()
+            nidx = SA.name_index(kb)
+            for tok in re.findall(r"[A-Za-z][\w.\-]{2,30}", feedback):
+                low = SA.ascii_name(tok).lower()
+                if low in nidx:
+                    sn = nidx[low]
+                    break
+        except Exception:
+            sn = None
+    if sn is None:
+        return None
+
+    # 2) 该子网必须有投研报告
+    arc = SA.load_archive(arc_dir, sn) or {}
+    reps = [r for r in (arc.get("reports") or []) if r.get("date")]
+    if not reps:
+        return None
+
+    # 3) 报告要够新（或正好是指定那天）
+    reps.sort(key=lambda r: r.get("date") or "", reverse=True)
+    newest = reps[0].get("date") or ""
+    if day:
+        if not any(r.get("date") == day for r in reps):
+            return None
+    else:
+        try:
+            d = datetime.datetime.strptime(newest, "%Y-%m-%d")
+            age_h = (datetime.datetime.now() - d).total_seconds() / 3600.0
+        except Exception:
+            return None
+        # 72 小时内算「刚出的报告」；超过 72 小时但用户明确说「投研/跟踪报告」也认，
+        # 因为那是在点名要改投研而不是日报。
+        if age_h > within_hours and not _want_research:
+            return None
+    log("反馈命中投研：SN%d（最近报告 %s），走投研重做而非日报重总结" % (sn, newest))
+    return sn
+
+
+def _start_research(sn_arg, days_n, chat_id, feedback=""):
+    """解析子网 → 回执 → 后台跑投研。裸编号、/投研、/retry 投研修正共用这一条路径。
 
     先在这里解析一次的原因：① 认不出就当场回提示，不让用户等 1 分钟才收到报错；
     ② 输入是名字（hotfloat）时，回执要显示真正的 SN 编号，不能拼成「SNhotfloat」。
+    feedback 非空表示这是对上一份报告的修正重做，回执要说明「按你的反馈重做」。
     """
     import subnet_archive as SA
     cfg = P._CFG or P.load_config()
@@ -520,6 +599,17 @@ def _start_research(sn_arg, days_n, chat_id):
     except Exception:
         pass
     days = int(days_n) if days_n else int(cfg.get("research_days", 14) or 14)
+    if feedback:
+        send(chat_id, "🔬 收到，**按你的反馈重做 SN%d%s 的投研报告**（回看 %d 天）。\n"
+                      "反馈：%s\n"
+                      "会重新核对名称/事实并重抓全网，约 1-3 分钟…"
+                      % (sn, (" " + name) if name else "", days, feedback[:200]))
+        # 反馈必须原样传（含空格标点）：pipeline 侧靠整句理解「改名为 X」这种句式，
+        # 拆成 token 再拼回去容易丢中文标点和语气词。`~fb` 是分隔符（不能用 `--fb`，
+        # argparse 会把 `-` 开头的 token 当选项直接报错）。
+        run_pipeline(["research", str(sn)] + ([str(days_n)] if days_n else [])
+                     + ["~fb", feedback], chat_id)
+        return
     send(chat_id, "🔬 收到，正在做 **SN%d%s** 的重要事件跟踪报告（回看 %d 天档案）。\n"
                   "流程：调取本地子网档案 → 抓取链上数据站/官网/GitHub/新闻/搜索/X "
                   "→ 交叉核验 → 生成报告，约 1-3 分钟…"
@@ -714,6 +804,7 @@ def handle(text, chat_id):
     elif cmd in ("retry", "fix", "resummarize", "重总结", "修正"):
         # /retry 反馈内容             -> 对最近一次日报重总结
         # /retry 2026-10-30 反馈内容  -> 对指定日期重总结
+        # /retry 127 已改名为 Zils    -> 若 127 刚做过投研，则**重做投研**（不是日报）
         rest = parts[1:]
         day = None
         if rest and re.match(r"^\d{4}-\d{2}-\d{2}$", rest[0]):
@@ -722,15 +813,24 @@ def handle(text, chat_id):
         elif rest and rest[0] in YESTERDAY_ALIASES:
             day = _resolve_day(rest[0])
             rest = rest[1:]
+        feedback = " ".join(rest).strip()
+        if not feedback:
+            send(chat_id, "用法：/retry 反馈或要补充的事实\n"
+                          "例：/retry SN34 是团队宣布转型，不是跑路\n"
+                          "    /retry 127 已改名为 Zils   ← 127 刚做过投研时，会重做投研报告\n"
+                          "也可指定日期：/retry 2026-10-30 反馈内容")
+            return
+        # 反馈带子网编号且该子网刚做过投研 → 走投研重做。
+        # 为什么需要这一步：用户对「SN127 投研报告」提意见，如果落到日报重总结路径，
+        # 会去重跑 11-07 的日报（466 条消息），既慢又完全没碰到投研报告 —— 实测就是这么错的。
+        _sn_hint = _research_sn_of_feedback(feedback, day)
+        if _sn_hint:
+            _start_research(str(_sn_hint), None, chat_id, feedback=feedback)
+            return
         if not day:
             day = _latest_digest_date()
-        feedback = " ".join(rest).strip()
         if not day:
             send(chat_id, "还没有可修订的日报，请先发 /digest 生成一次。")
-            return
-        if not feedback:
-            send(chat_id, "用法：/retry 反馈或要补充的事实\n例：/retry SN34 是团队宣布转型，不是跑路\n"
-                          "也可指定日期：/retry 2026-10-30 反馈内容")
             return
         run_feedback(day, feedback, chat_id)
     elif cmd == "repush":

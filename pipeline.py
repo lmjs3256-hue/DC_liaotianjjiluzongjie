@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.6.2"
+__version__ = "1.7.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -3106,12 +3106,24 @@ if __name__ == "__main__":
             # 只有第二个及之后的纯数字才是天数。历史坑：/投研 29 被解析成"没给子网"。
             if not rest:
                 raise RuntimeError("research 需要指定子网，例如：python pipeline.py research 29")
-            sn_arg = rest.pop(0)
+            # 剩下的全部当作用户反馈（来自 TG `/retry 127 已改名为 Zils`）。
+            # 分隔符用 `~fb`：argparse 会把以 `-` 开头的 token 当成选项，
+            # `--fb` 会被直接拒掉（实测 unrecognized arguments），`~fb` 安全。
+            feedback = ""
+            if "~fb" in rest:
+                i = rest.index("~fb")
+                feedback = " ".join(rest[i + 1:]).strip()
+                rest = rest[:i]
+            sn_arg = rest.pop(0) if rest else ""
+            if not sn_arg:
+                raise RuntimeError("research 需要指定子网，例如：python pipeline.py research 29")
             days_n = int(cfg.get("research_days", 14) or 14)
             if rest and rest[0].isdigit():
                 days_n = max(3, min(60, int(rest.pop(0))))
+            if feedback:
+                log("投研将按用户反馈修正：%s" % feedback[:120])
             title, digest, path = SR.run_research(cfg, sn_arg, targets or None,
-                                                 days=days_n, log=log)
+                                                 days=days_n, log=log, feedback=feedback)
             log("投研报告：%s" % path)
         else:
             main(args)

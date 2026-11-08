@@ -621,11 +621,24 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
             "note": "本档案由投研报告创建（尚无群聊归档）",
         }
     else:
-        # 只在档案本身缺名称时才用投研抓到的名字补；已有真名不覆盖
-        if _nm and (arc.get("name") or "").strip() in ("", "未知", "（知识库未收录）", "（未收录）"):
+        # 只在档案本身缺名称时才用投研抓到的名字补；已有真名不覆盖。
+        # 例外：投研已用链上身份确认改名（meta["name_changed_from"] 有值），
+        # 这时必须覆盖 —— 否则档案永远留着旧名，下次投研又从旧名起步
+        # （SN127 实测：报告已写 Zils，档案里仍是 Astrid）。
+        _renamed = bool((meta.get("name_changed_from") or "").strip())
+        if _nm and (_renamed or (arc.get("name") or "").strip()
+                    in ("", "未知", "（知识库未收录）", "（未收录）")):
+            if _renamed and (arc.get("name") or "").strip() != _nm:
+                log("   档案名称按链上校正：%s → %s" % (arc.get("name") or "（空）", _nm))
+                old = (arc.get("name") or "").strip()
+                if old:
+                    arc["aliases"] = sorted(set((arc.get("aliases") or []) + [old]))
             arc["name"] = _nm
         for k, src in (("biz", "desc"), ("url", "url"), ("github", "github")):
-            if meta.get(k) and not arc.get(src):
+            # 改名时官网/仓库连带失效，必须同步覆盖，否则下次抓取打到旧站
+            if meta.get(k) and (_renamed or not arc.get(src)):
+                if _renamed and (arc.get(src) or "") != meta[k]:
+                    log("   档案 %s 同步为链上值：%s" % (src, meta[k]))
                 arc[src] = meta[k]
 
     # 从正文里抽：标题句、时间线首条、验证状态统计。

@@ -1,6 +1,6 @@
 # Bittensor 子网对照表（自动生成，勿手改）
 
-> 来源：https://taostats.io/subnets 的链上子网身份（SubnetIdentitiesV2），最后更新：2026-11-02
+> 来源：https://taostats.io/subnets 的链上子网身份（SubnetIdentitiesV2），最后更新：2026-11-09
 > 只记录**当前**业务；描述缺失一律写「未知」。被注销的编号单独列在文末。
 
 | SN | 子网名 | 业务 |
@@ -41,7 +41,7 @@
 | 33 | ReadyAI | 未知 |
 | 34 | Yugos | 推理决策模型 |
 | 35 | Unknown | 未知 |
-| 36 | Bittensor | 未知 |
+| 36 | Weir（旧名：Bittensor） | 未知 |
 | 37 | Aurelius | 去中心化 AI 对齐 |
 | 38 | ChronoLLM | 时间一致性大语言模型竞争训练 |
 | 39 | deprecated | 未知 |
@@ -75,7 +75,7 @@
 | 67 | Harnyx | 矿工群体竞争的深度研究服务 |
 | 68 | NOVA | 加速药物发现 |
 | 69 | Herald | 通过公关公司激励主流媒体 |
-| 70 | Unknown | 未知 |
+| 70 | Fugal（旧名：Unknown） | 未知 |
 | 71 | Leadpoet | 面向销售团队的意向驱动AI |
 | 72 | StreetVision by NATIX | 摄像头网络助力自动驾驶与制图 |
 | 73 | Elenost | 视觉AI能力评估 |
@@ -104,7 +104,7 @@
 | 96 | Verathos | 可验证的 AI 推理与训练 |
 | 97 | Ingot | 小型开放模型铸造 |
 | 98 | NeverPlayAlone | AI 陪伴智能体 |
-| 99 | Thirty Spokes | 未知 |
+| 99 | Unknown（旧名：Thirty Spokes） | 未知 |
 | 100 | Cortex | 开放式自主研究 AI |
 | 101 | Tag101 | 去中心化社交帖子标注 |
 | 102 | ConnitoAI | 分布式训练专家模块并聚合成 AI 系统 |
@@ -132,5 +132,5 @@
 | 124 | Swarm | 未知 |
 | 125 | Refinery | 激励预训练算法改进 |
 | 126 | Attelier | 去中心化生成视频平台 |
-| 127 | Astrid | Bittensor资本枢纽 |
+| 127 | Zils（旧名：Astrid） | Bittensor资本枢纽 |
 | 128 | ByteLeap | 云与区块链基础设施 |

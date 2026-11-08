@@ -129,3 +129,12 @@
 - 新增：SN126 Attelier
 - 新增：SN127 Astrid
 - 新增：SN128 ByteLeap
+
+## 2026-11-09
+- 改名：SN36 Weir（旧名：Bittensor）
+- 业务变更：SN36 Weir
+- 改名：SN70 Fugal（旧名：Unknown）
+- 业务变更：SN70 Fugal
+- 改名：SN99 Unknown（旧名：Thirty Spokes）
+- 改名：SN127 Zils（旧名：Astrid）
+- 业务变更：SN127 Zils

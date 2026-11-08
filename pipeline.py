@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -2449,7 +2449,17 @@ def run_one_day(cfg, after_dt, before_dt):
             import subnet_archive as SA
             todo = _day_json_files(cfg, day_str) if action.startswith("export") else list(sources)
             if todo:
-                r = SA.archive_files(cfg, todo, log=log, translate=False)
+                # 顺手补译文（v1.6.2）：只翻本次新增、且缓存里没有的条目。
+                # 早期这里写死 translate=False，导致「自动建档进来的条目没有中文译文」，
+                # 而手动 `pipeline.py archive` 建的却有 —— 同一份档案一半有译文一半没有。
+                # 自动增量每天只新增十几条，且走 _trans_cache，重复导出零成本。
+                _tr = bool(cfg.get("archive_translate", True))
+                _llm = None
+                if _tr:
+                    def _tr_llm(body, sp=None):
+                        return call_deepseek(cfg, body, system_prompt=sp)
+                    _llm = _tr_llm
+                r = SA.archive_files(cfg, todo, log=log, llm=_llm, translate=_tr)
                 if r.get("subnets"):
                     log("子网建档（自动）：涉及 %d 个子网，新增 %d 条，累计 %d 条"
                         % (r["subnets"], r["new"], sum(v["strong"] for v in r["index"]["subnets"].values())))

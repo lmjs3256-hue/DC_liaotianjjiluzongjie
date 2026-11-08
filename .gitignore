@@ -27,6 +27,7 @@ __pycache__/
 # ===== WorkBuddy 内部数据（非项目代码）=====
 .workbuddy/
 
-# ===== 监听运行时文件（进程号 / 守护锁）=====
+# ===== 监听运行时文件（进程号 / 守护锁 / 守护日志）=====
 tg_listener.pid
 .guard.lock
+tg_guard.log

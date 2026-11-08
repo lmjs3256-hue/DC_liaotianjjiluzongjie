@@ -4,7 +4,7 @@
 > 用 AI 总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.6.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.6.1** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 **当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
@@ -41,7 +41,7 @@
 - 🌏 **日报时间范围 = 北京时间自然日**：v1.5.0 前导出按 UTC 日界（北京 08:00 → 次日 08:00），现在精确对齐北京时间 00:00–24:00，日报里的时间也都换算成北京时间显示
 - 🌗 **总结「昨天」导出到当下（v1.5.2）**：`/digest 昨日` 的导出范围是**昨日 00:00 → 现在**（跨零点补录今晨讨论）；下一天的消息自动打「次日」标记，日报里必须写「今晨」，不会和昨天的事件混写；「今日」导出不变（今日 00:00 → 现在）；更早的日期仍为自然日
 - 🔍 **/retry 专题总结（v1.5.2）**：反馈里带「专题」二字即进入专题模式——不修正日报，而是从最近几天已有记录里**还原该专题的原文人物观点**并双推（不重新导出、不耗配额）。例：`/retry 总结SN127专题并推送，还原原文人物观点`
-- 🛡 **监听单实例保护（v1.5.5）**：`tg_listener.py` 用 Windows 命名互斥体保证**全局只有一个监听**。以前开机自启 + 手动启动 + 守护脚本叠加，最多跑过 4 个进程，同一条 `/digest` 被各执行一遍 → **一天推了 3 条日报**，Telegram 还一直报 `409 Conflict`。现在新进程启动会**主动杀掉旧监听**（改完代码重启即生效，不用手工清进程），守护脚本也加了独占锁，无论双击多少次都只会有一个监听在跑
+- 🛡 **监听单实例保护（v1.5.5 / 守护单例 v1.6.1）**：`tg_listener.py` 用 Windows 命名互斥体保证**全局只有一个监听**。以前开机自启 + 手动启动 + 守护脚本叠加，最多跑过 4 个进程，同一条 `/digest` 被各执行一遍 → **一天推了 3 条日报**，Telegram 还一直报 `409 Conflict`。现在新进程启动会**主动杀掉旧监听**（改完代码重启即生效，不用手工清进程）；守护循环本身在 `tg_guard.py`，也用互斥体做单例，并且**会接管已在跑的监听、不重复拉起**（v1.6.1 修掉了 `.guard.lock` 锁失效导致两个守护循环互杀、发指令毫无反应的故障）
 - 📊 **潜力观察独立成篇**：日报**不再**夹带「潜力观察」，改为单独生成落盘；只有你发 `/watch` 时才推送，日报保持精简
 - 🚀 **内置 API 导出后端（默认）**：不依赖 DiscordChatExporter，直接调 Discord REST API 导出，秒级完成；若仍用 DCE，超时（120s）会自动回退到 API 后端兜底
 - 🛡 **监听崩溃自愈 + 流水线不静默失败**：流水线在后台线程执行、异常全兜底；守护脚本在监听意外退出后 **15 秒自动重启**；流水线出错时会把完整堆栈写进 `run.log`，不再「失败得无声无息」
@@ -468,13 +468,31 @@ python update_subnets.py --no-llm   # 不调模型，中文标签留空（退回
 
 **最简单：开机自启（推荐，无需管理员）**
 - 把 `DTAO_Listener_Autostart.bat` 放进「启动」文件夹（路径见下）。它负责拉起项目里的
-  `DTAO_TG_Listener_Guard.bat` —— **守护版**，监听崩溃或退出后 **15 秒自动重启**。
+  `DTAO_TG_Listener_Guard.bat` → 后者转发到 `tg_guard.py`（**守护版**，监听崩溃或退出后 **20 秒自动重启**）。
   - 启动文件夹路径：`C:/Users/你的用户名/AppData/Roaming/Microsoft/Windows/Start Menu/Startup/`
     （`Win+R` → 输入 `shell:startup` → 回车即可直接打开）
   - ⚠️ 别把 `DTAO_TG_Listener_Guard.bat` 直接拷进启动文件夹：它用 `%~dp0` 定位
     `tg_listener.py`，拷过去会找不到程序、自启失效。用 `DTAO_Listener_Autostart.bat`
     （内部写死了项目路径）就没这个问题。
 - 放好后，**下次开机 / 登录 Windows 会自动运行**监听，窗口最小化、不碍事（别关那个黑色小窗）。
+
+**守护单例（v1.6.1 修复）**
+- 守护循环在 `tg_guard.py`，用 **Windows 命名互斥体**做单例：无论双击多少次，只有一个守护。
+  日志见 `tg_guard.log`。
+- 守护**每轮先检查 `tg_listener.pid`**：已有监听在跑就只做存活监控，**不会新起一个去杀掉它**。
+  所以「计划任务 + 启动文件夹」同时存在也没关系，手工 `start_tg_listener.bat` 起的监听同样不会被误杀。
+- 推荐再注册一个计划任务，双保险（登录触发、无时长限制）：
+  ```powershell
+  $dir = "D:\UGit\DC_price_talkzongjie\DC_liaotianjjiluzongjie"
+  $pyw = "<你的 Python 路径>\pythonw.exe"
+  $action  = New-ScheduledTaskAction -Execute $pyw -Argument "`"$dir\tg_guard.py`"" -WorkingDirectory $dir
+  $trigger = New-ScheduledTaskTrigger -AtLogOn
+  $set     = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
+  Register-ScheduledTask -TaskName "DTAO_TG_Guard" -Action $action -Trigger $trigger -Settings $set -Force
+  ```
+- **历史坑（别再踩）**：v1.5.5 的 `.guard.lock` 是假的——cmd 的 `>>` 重定向是共享追加，
+  多个守护实例都能打开成功，锁从来没生效。叠出两个 `:loop` 后，靠 `tg_listener.py`
+  「启动杀旧实例」互相残杀，每 20 秒打死一次正在跑投研的进程，表现就是**发指令毫无反应**。
 - 想现在立刻启动：双击项目里的 `DTAO_TG_Listener_Guard.bat`。
 
 **手动临时跑（看得到窗口）**
@@ -692,7 +710,8 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 | `config.json` | 你的真实配置（含密钥，**不入库**） |
 | `start_tg_listener.bat` | 手动启动监听（带窗口） |
 | `DTAO_TG_Listener.bat` | 开机自启版（放启动文件夹，无窗口） |
-| `DTAO_TG_Listener_Guard.bat` | 守护版启动脚本：监听崩溃/退出后 **15 秒自动重启**（带最小化窗口，可看崩溃报错） |
+| `DTAO_TG_Listener_Guard.bat` | 守护版入口：转发到 `tg_guard.py`（监听崩溃/退出后 **20 秒自动重启**） |
+| `tg_guard.py` | 真正的守护循环：**互斥体单例** + 接管已在跑的监听（不重复拉起）+ 秒退保护；日志 `tg_guard.log` |
 | `DTAO_Listener_Autostart.bat` | 放「启动」文件夹用的自启引导（内部写死项目路径，开机自动拉起上面的守护脚本） |
 | `install_task_login.ps1` | 注册任务计划程序自启（更稳，失败自动重启；**需以管理员身份运行**） |
 | `DEPLOY_HOMEPC.md` | 部署到另一台常开 Windows 电脑的完整教程 |

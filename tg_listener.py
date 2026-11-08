@@ -27,6 +27,7 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
 """
 import os
 import re
+import ssl
 import sys
 import json
 import glob
@@ -831,8 +832,23 @@ def main():
             log("已停止"); break
         except BaseException as e:
             # 兜底：连 BaseException 也不让监听退出（KeyboardInterrupt 上面已处理）
-            log("监听异常(BaseException，已忽略继续运行)：%s" % e)
-            time.sleep(10)
+            # 网络抖动（SSL: UNEXPECTED_EOF / ConnectionReset）在国内访问 Telegram
+            # 很常见，属于可自愈的小故障：退避从 1 秒起翻倍、封顶 30 秒，
+            # 连续失败才拉长间隔。老代码固定 sleep(10)，指令高峰期会白白
+            # 拖慢响应 10 秒。
+            net_err = isinstance(e, (ssl.SSLError, OSError)) or \
+                      "urlopen" in str(e) or "SSL" in str(e)
+            if net_err:
+                _net_fail = globals().get("_NET_FAIL", 0) + 1
+                globals()["_NET_FAIL"] = _net_fail
+                wait = min(30, 2 ** min(_net_fail - 1, 5))
+                log("网络异常第 %d 次（%s），%d 秒后重连"
+                    % (_net_fail, type(e).__name__, wait))
+                time.sleep(wait)
+            else:
+                globals()["_NET_FAIL"] = 0
+                log("监听异常(BaseException，已忽略继续运行)：%s" % e)
+                time.sleep(10)
 
 
 if __name__ == "__main__":

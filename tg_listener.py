@@ -31,6 +31,7 @@ import sys
 import json
 import glob
 import time
+import atexit
 import datetime
 import subprocess
 import threading
@@ -73,7 +74,165 @@ HELP = (
     "   还原该专题的原文人物观点并推送。例：/retry 总结SN127专题并推送，还原原文人物观点\n"
     "/help 显示本帮助\n"
     "/keyboard 重新显示底部按钮栏（回复后会自动收起）\n"
+    "/收起 立即收起底部按钮栏（/hidekeyboard 同义）\n"
 )
+
+
+# ---------------------------------------------------------------------------
+# 单实例保护
+#
+# 为什么必须有：Telegram 的 getUpdates 是「谁先抢到谁拿」，多个监听进程会各自
+# 轮询同一个 bot —— 同一条 /digest 被 N 个进程各执行一遍，于是同一天推 N 份日报；
+# 其余进程还会不断收到 HTTP 409 Conflict。历史上就是开机自启 + 手动启动 +
+# 守护脚本三重叠加，跑出了 3 个实例、3 条日报。
+#
+# 做法：命名互斥体（Windows）/ 文件锁（其它平台）保证全局唯一；
+# 并且**新进程启动时主动杀掉旧进程**，这样改完代码重启即可，不必手工清进程。
+# ---------------------------------------------------------------------------
+# 用 Local\ 而不是 Global\：创建 Global 对象需要 SeCreateGlobalPrivilege，
+# 普通登录用户（非服务）经常拿不到，会导致互斥体形同虚设。
+# Local\ 覆盖同一登录会话，正好是「同一台电脑同一个人多开」这个真实场景。
+_MUTEX_NAME = "Local\\DTAO_TG_Listener_SingleInstance"
+_mutex_handle = None
+_PID_FILE = os.path.join(HERE, "tg_listener.pid")
+# 已处理过的消息指纹（chat_id:message_id），进程内幂等去重
+_SEEN_MSG_IDS = {}
+
+
+
+def _pid_alive(pid):
+    """进程是否真的还活着（OpenProcess 拿句柄成功并不代表活着，要查退出码）。"""
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong(0)
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return False
+
+
+def _list_listener_pids():
+    """列出所有正在跑「本项目 tg_listener.py」的 python 进程 pid（不含自己）。
+
+    优先用 PowerShell 的 CIM 拿命令行（能精确匹配本项目路径）；
+    拿不到就退回 pid 文件里记录的那个 pid。两者都失败就什么都不杀——
+    宁可留着旧进程让它被互斥体挡在外，也不要误杀用户的其它 python 程序。
+    """
+    pids = set()
+    me = os.getpid()
+    ps_cmd = (
+        "Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\" | "
+        "Where-Object { $_.CommandLine -and $_.CommandLine -like '*tg_listener.py*' } | "
+        "ForEach-Object { $_.ProcessId }"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=25,
+        ).stdout
+        for line in out.splitlines():
+            line = line.strip()
+            if line.isdigit():
+                pid = int(line)
+                if pid != me and _pid_alive(pid):
+                    pids.add(pid)
+    except Exception as e:
+        log("枚举监听进程失败（改用 pid 文件）：%s" % e)
+
+    if not pids:
+        try:
+            with open(_PID_FILE, "r", encoding="utf-8") as f:
+                pid = int((f.read() or "0").strip() or 0)
+            if pid and pid != me and _pid_alive(pid):
+                pids.add(pid)
+        except Exception:
+            pass
+    return pids
+
+
+def _kill_pid(pid):
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_TERMINATE = 0x0001
+        h = k32.OpenProcess(PROCESS_TERMINATE, False, pid)
+        if not h:
+            return False
+        try:
+            return bool(k32.TerminateProcess(h, 0))
+        finally:
+            k32.CloseHandle(h)
+    except Exception as e:
+        log("终止 pid=%s 失败（忽略）：%s" % (pid, e))
+        return False
+
+
+def _kill_stale_instances():
+    """启动时杀掉所有旧监听实例（含守护脚本留下的多重实例）。"""
+    killed = []
+    for pid in sorted(_list_listener_pids()):
+        if _kill_pid(pid):
+            killed.append(pid)
+            log("已终止旧监听进程 pid=%d" % pid)
+    if killed:
+        # 给旧进程一点时间释放互斥体和端口
+        time.sleep(1.5)
+    return killed
+
+
+def acquire_single_instance():
+    """申请全局唯一实例；已有实例则拒绝启动。返回 True 表示拿到锁。"""
+    global _mutex_handle
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.CreateMutexW.restype = wintypes.HANDLE
+            h = k32.CreateMutexW(None, False, _MUTEX_NAME)
+            ERROR_ALREADY_EXISTS = 183
+            if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+                if h:
+                    k32.CloseHandle(h)
+                return False
+            _mutex_handle = h
+        except Exception as e:
+            log("单实例互斥体创建失败（降级为继续运行）：%s" % e)
+    try:
+        with open(_PID_FILE, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+    return True
+
+
+def release_single_instance():
+    global _mutex_handle
+    try:
+        if _mutex_handle:
+            import ctypes
+            ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(_mutex_handle)
+            _mutex_handle = None
+    except Exception:
+        pass
+    try:
+        if os.path.exists(_PID_FILE):
+            with open(_PID_FILE, "r", encoding="utf-8") as f:
+                if (f.read() or "").strip() == str(os.getpid()):
+                    os.remove(_PID_FILE)
+    except Exception:
+        pass
 
 
 def tg_api(token, method, params=None, timeout=40):
@@ -292,6 +451,10 @@ def handle(text, chat_id):
         # 重新唤出底部按钮栏（平时随回复自动收起）
         send(chat_id, "⌨️ 按钮栏已恢复（bot 回复后会自动收起；发 /keyboard 可再次唤出）",
              markup=_KEYBOARD)
+    elif cmd in ("hidekeyboard", "收起", "关闭按钮", "nokeyboard"):
+        # 显式收起底部按钮栏（等价于任何一个后续回复，但立刻生效、不用等）
+        send(chat_id, "⌨️ 按钮栏已收起。需要时发 /keyboard 唤出。",
+             markup=_REMOVE_KB)
     elif cmd == "digest":
         run_pipeline(["daily"] + parts[1:], chat_id)
     elif cmd in ("today", "jinri"):
@@ -384,6 +547,19 @@ def handle(text, chat_id):
 
 
 def main():
+    # 启动即抢单实例：先杀掉 pid 文件里的旧进程（改完代码重启即可，不用手工清），
+    # 再抢互斥体。抢不到说明还有别的实例没退干净，直接退出——绝不允许两个进程
+    # 同时轮询同一个 bot，否则一条指令会被执行多次、推多份日报。
+    _kill_stale_instances()
+    if not acquire_single_instance():
+        log("❌ 已有 tg_listener 实例在运行，本进程退出（避免同一条指令被重复执行）")
+        try:
+            print("已有监听实例在运行，本进程退出。")
+        except Exception:
+            pass
+        return
+    atexit.register(release_single_instance)
+
     cfg = P.load_config()
     P._CFG = cfg
     # 记录本次加载的 pipeline 版本：常驻进程会把代码固化在内存里，
@@ -433,6 +609,16 @@ def main():
                 if allowed_users and from_id not in allowed_users:
                     log("忽略非白名单用户 %s 的指令（开放模式需清空 allowed_user_ids）" % from_id)
                     continue
+                # 幂等去重：同一条消息（同一 update 或同 chat+message_id）只处理一次。
+                # 多实例、或进程重启后 offset 回退时，靠这一层兜底避免重复推送。
+                key = "%s:%s" % (chat_id, msg.get("message_id"))
+                if key in _SEEN_MSG_IDS:
+                    log("跳过重复指令（已处理过 %s）" % key)
+                    continue
+                _SEEN_MSG_IDS[key] = u["update_id"]
+                if len(_SEEN_MSG_IDS) > 500:
+                    for _k in sorted(_SEEN_MSG_IDS, key=_SEEN_MSG_IDS.get)[:200]:
+                        _SEEN_MSG_IDS.pop(_k, None)
                 log("收到指令 chat=%s from=%s text=%s" % (chat_id, from_id, (msg.get("text") or "")[:80]))
                 # 单条指令处理异常绝不影响主循环（第二层兜底）
                 try:

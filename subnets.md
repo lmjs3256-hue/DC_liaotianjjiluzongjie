@@ -132,5 +132,5 @@
 | 124 | Swarm | 未知 |
 | 125 | Refinery | 激励预训练算法改进 |
 | 126 | Attelier | 去中心化生成视频平台 |
-| 127 | Zils（旧名：Astrid） | Bittensor资本枢纽 |
+| 127 | Zils（旧名：Astrid） | 竞赛训练开源小模型以替代昂贵LLM调用 |
 | 128 | ByteLeap | 云与区块链基础设施 |

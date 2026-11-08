@@ -51,16 +51,39 @@ def _proxy_url(cfg):
     return None
 
 
-def fetch_identities(cfg=None, timeout=90):
-    """从 taostats 的子网页抓取链上身份 JSON（页面内嵌了 SubnetIdentities 数据）。"""
+def fetch_identities(cfg=None, timeout=90, retries=3, log=None):
+    """从 taostats 的子网页抓取链上身份 JSON（页面内嵌了 SubnetIdentities 数据）。
+
+    重试是必需的：国内直连 taostats 经常抛 `SSL: UNEXPECTED_EOF_WHILE_READING`，
+    这是可自愈的抖动而不是页面改版。不重试的话，周更正好撞上一次抖动就白等一周。
+    """
+    log = log or P.log
     pu = _proxy_url(cfg)
     handlers = [P.urllib.request.ProxyHandler({"http": pu, "https": pu})] if pu else \
                [P.urllib.request.ProxyHandler({})]
     op = P.urllib.request.build_opener(*handlers)
     req = P.urllib.request.Request(
         SRC_URL, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DTAO-Pipeline/1.0"})
-    with op.open(req, timeout=timeout) as resp:
-        html = resp.read().decode("utf-8", "replace")
+
+    html = ""
+    last_err = None
+    for i in range(max(1, retries)):
+        try:
+            with op.open(req, timeout=timeout) as resp:
+                html = resp.read().decode("utf-8", "replace")
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            if i + 1 < max(1, retries):
+                wait = 5 * (2 ** i)          # 5 / 10 / 20 秒
+                log("  链上身份抓取失败（第 %d/%d 次）：%s，%d 秒后重试"
+                    % (i + 1, retries, e, wait))
+                import time as _t
+                _t.sleep(wait)
+    if last_err is not None:
+        raise last_err
+
     # 页面里的 JSON 是转义后嵌进脚本的，先反转义再按对象切
     raw = html.replace('\\"', '"').replace("\\\\", "\\")
     recs = {}
@@ -227,18 +250,107 @@ def log_changes(changes, today):
 
 
 # ----------------------------------------------------------------------------
-def main():
-    dry = "--dry-run" in sys.argv
-    use_llm = "--no-llm" not in sys.argv
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    cfg = P.load_config()
+# 5) 把知识库同步进已建档案
+# ----------------------------------------------------------------------------
+def sync_archives(cfg, kb=None, dry=False, log=None):
+    """用知识库的当前「名称 / 业务 / 官网 / 仓库」校正已建子网档案。
 
-    P.log("拉取链上子网身份：%s" % SRC_URL)
-    fresh = fetch_identities(cfg)
+    为什么必须做：subnets.json 是名字与业务的事实来源，档案只是它的副本。
+    2026-11-09 就吃过这个亏 —— 链上和报告都改成 Zils 了，档案里还写着 Astrid，
+    于是 `/档案` 显示旧名、`/retry` 的别名反查从旧名起步、下次投研又从旧名开写。
+
+    只改有依据的新值：知识库给不出真名（占位值 deprecated/unknown）就不动档案，
+    绝不拿空值覆盖已有内容。旧名进 aliases，保留可追溯。
+    """
+    import glob
+    import subnet_archive as A
+
+    log = log or P.log
+    kb = kb if kb is not None else load_data()
+    subs = kb.get("subnets") or {}
+    arc_dir = A.get_arc_dir(cfg)
+    changed = []
+    for path in sorted(glob.glob(os.path.join(arc_dir, "SN*", "archive.json"))):
+        try:
+            with open(path, encoding="utf-8") as f:
+                arc = json.load(f)
+        except Exception:
+            continue
+        rec = subs.get(str(arc.get("sn")))
+        if not rec:
+            continue
+        nm = A.real_name(rec)
+        biz = A.real_desc(rec)
+        url = A.real_url(rec.get("url"))
+        gh = A.real_url(rec.get("github"))
+
+        old_name = (arc.get("name") or "").strip()
+        dirty = []
+        if nm and nm != old_name:
+            if old_name and old_name not in ("未知", "（知识库未收录）", "（未收录）"):
+                al = arc.setdefault("aliases", [])
+                if old_name not in al:
+                    al.append(old_name)
+            arc["name"] = nm
+            dirty.append("名称 %s → %s" % (old_name or "（空）", nm))
+        for key, val, label in (("biz", biz, "业务"), ("url", url, "官网"), ("github", gh, "仓库")):
+            if val and (arc.get(key) or "") != val:
+                arc[key] = val
+                dirty.append(label)
+        if not dirty:
+            continue
+
+        if not dry:
+            arc["updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            A.save_archive(arc_dir, arc)
+            try:
+                A.save_md(arc_dir, arc)
+            except Exception:
+                pass
+        changed.append((arc.get("sn"), old_name, arc.get("name") or "", dirty))
+        log("  ↳ SN%s 档案同步：%s" % (arc.get("sn"), "；".join(dirty)))
+
+    if changed and not dry:
+        try:
+            A.refresh_index(arc_dir)
+        except Exception as e:
+            log("档案索引刷新失败（忽略）：%s" % e)
+    if changed:
+        log("档案同步完成：%d 份子网档案已对齐知识库" % len(changed))
+    return changed
+
+
+# ----------------------------------------------------------------------------
+# 6) 可编程入口（CLI 与 TG 周更共用，避免两套逻辑分叉）
+# ----------------------------------------------------------------------------
+def run(cfg=None, use_llm=True, dry=False, sync_archive=True, log=None):
+    """执行一次校对，返回结构化结果。
+
+    {"ok", "fetched", "changes": [(kind, sn, name, old_name)],
+     "archive_synced": [(sn, old_name, new_name, [改动项])], "error"}
+
+    ok=False 时**一个文件都不写**：抓不到链上数据就什么都不动，
+    绝不让空数据把好不容易校好的知识库覆盖成空表。
+    """
+    log = log or P.log
+    cfg = cfg if cfg is not None else P.load_config()
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    out = {"ok": False, "fetched": 0, "changes": [], "archive_synced": [],
+           "error": "", "dry": dry}
+
+    log("拉取链上子网身份：%s" % SRC_URL)
+    try:
+        fresh = fetch_identities(cfg, log=log)
+    except Exception as e:
+        out["error"] = "抓取异常：%s" % e
+        log("❌ %s，本次不做任何修改" % out["error"])
+        return out
     if not fresh:
-        P.log("❌ 没解析到任何子网数据（页面结构可能变了），本次不做任何修改")
-        return 2
-    P.log("解析到 %d 个子网" % len(fresh))
+        out["error"] = "没解析到任何子网数据（页面结构可能变了）"
+        log("❌ %s，本次不做任何修改" % out["error"])
+        return out
+    out["fetched"] = len(fresh)
+    log("解析到 %d 个子网" % len(fresh))
 
     old = load_data()
     old_sub = old.get("subnets") or {}
@@ -251,27 +363,53 @@ def main():
             need.append((nid, rec["name"], rec["desc"]))
     zh_map = {}
     if need and use_llm:
-        P.log("需要生成中文业务标签 %d 条，调用模型中…" % len(need))
+        log("需要生成中文业务标签 %d 条，调用模型中…" % len(need))
         zh_map = translate_batch(cfg, need)
-        P.log("中文标签完成 %d/%d" % (len(zh_map), len(need)))
+        log("中文标签完成 %d/%d" % (len(zh_map), len(need)))
 
     new, changes = apply_update(old, fresh, zh_map, today)
+    out["changes"] = changes
     if changes:
-        P.log("变更 %d 项：" % len(changes))
+        log("变更 %d 项：" % len(changes))
         for kind, nid, name, extra in changes[:40]:
-            P.log("  - %s SN%d %s%s" % (kind, nid, name, ("（旧名 %s）" % extra) if extra else ""))
+            log("  - %s SN%d %s%s" % (kind, nid, name, ("（旧名 %s）" % extra) if extra else ""))
+        if len(changes) > 40:
+            log("  …还有 %d 项（详见 %s）" % (len(changes) - 40, os.path.basename(LOG_PATH)))
     else:
-        P.log("与上次一致，无变化")
+        log("与上次一致，无变化")
 
     if dry:
-        P.log("--dry-run：不写文件")
-        return 0
+        # dry-run 也把档案同步的差异试算出来（只打印不写盘），否则看不出全貌
+        if sync_archive:
+            try:
+                out["archive_synced"] = sync_archives(cfg, kb=new, dry=True, log=log)
+            except Exception as e:
+                log("档案同步预演失败（忽略）：%s" % e)
+        log("--dry-run：不写文件")
+        out["ok"] = True
+        return out
 
     write_json(new)
     write_md(new)
     log_changes(changes, today)
-    P.log("已更新 %s / %s" % (os.path.basename(DATA_PATH), os.path.basename(MD_PATH)))
-    return 0
+    log("已更新 %s / %s" % (os.path.basename(DATA_PATH), os.path.basename(MD_PATH)))
+    out["ok"] = True
+
+    if sync_archive:
+        try:
+            out["archive_synced"] = sync_archives(cfg, kb=new, log=log)
+        except Exception as e:
+            log("档案同步失败（知识库已更新，不影响本次结果）：%s" % e)
+    return out
+
+
+# ----------------------------------------------------------------------------
+def main():
+    dry = "--dry-run" in sys.argv
+    use_llm = "--no-llm" not in sys.argv
+    sync = "--no-sync-archive" not in sys.argv
+    res = run(use_llm=use_llm, dry=dry, sync_archive=sync)
+    return 0 if res.get("ok") else 2
 
 
 if __name__ == "__main__":

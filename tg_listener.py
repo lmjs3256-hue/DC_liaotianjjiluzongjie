@@ -72,6 +72,8 @@ HELP = (
     "   报告内容：先调本地子网档案，再结合官网/推特/GitHub/新闻/全网检索交叉核验，\n"
     "   分 7 段（结论/事实基线/时间线/交叉验证/预期差/风险/跟踪清单）并双推\n"
     "/档案 列出所有已建档子网（不知道编号先发这个）；/档案 29 看某子网档案\n"
+    "📚 /kb 子网知识库周更状态（排程/上次更新/待补跑）；/kb update 立即校对\n"
+    "   （每周自动跑一次：拉链上身份核对子网名与业务，并同步到已建档案）\n"
     "━━ 其它 ━━\n"
     "/watch 查看潜力观察(默认最新; /watch 7 近7天热点; /watch all 全部)\n"
     "/repush 补推最近一次日报(无需日期)\n"
@@ -455,6 +457,71 @@ def run_pipeline(args, chat_id):
     log("已在后台线程启动流水线：%s" % " ".join(args))
 
 
+def _pipeline_busy():
+    """给周更调度器用的让路判断：日报/建档在跑时别同时改档案。"""
+    return bool(_BUSY)
+
+
+def _kb_worker(chat_id):
+    """后台线程：立即跑一次知识库校对（同步档案），结果推给发指令的会话。"""
+    try:
+        import kb_weekly as K
+        res = K.run_now(P._CFG, notify=lambda t: send(chat_id, t),
+                        log=log, reason="TG 手动触发")
+        if not res.get("ok"):
+            send(chat_id, "❌ 更新失败：%s" % (res.get("error") or "未知错误"))
+    except Exception as e:
+        log("知识库手动更新线程异常：%s" % e)
+        try:
+            send(chat_id, "❌ 更新异常：%s" % e)
+        except Exception:
+            pass
+    finally:
+        global _BUSY
+        with _BUSY_LOCK:
+            _BUSY = False
+
+
+def run_kb_update(chat_id):
+    """`/kb update`：占执行锁后用后台线程跑，避免和日报同时写档案。"""
+    global _BUSY
+    with _BUSY_LOCK:
+        if _BUSY:
+            try:
+                send(chat_id, "⏳ 有任务正在执行，请稍后再试（避免并发写档案）")
+            except Exception:
+                pass
+            return
+        _BUSY = True
+    try:
+        send(chat_id, "📚 开始校对子网知识库（拉链上身份 + 同步已建档案），约 1-2 分钟…")
+    except Exception:
+        pass
+    threading.Thread(target=_kb_worker, args=(chat_id,), daemon=True).start()
+
+
+def _start_kb_scheduler():
+    """启动知识库周更后台调度（监听启动时调用一次）。"""
+    try:
+        import kb_weekly as K
+        K.start_thread(
+            P._CFG,
+            notify=lambda t: send(P._CFG.get("telegram_chat_id") or _last_chat_id(), t),
+            log=log,
+            busy=_pipeline_busy,
+        )
+    except Exception as e:
+        log("知识库周更排程启动失败（忽略，手动 /kb update 仍可用）：%s" % e)
+
+
+def _last_chat_id():
+    """没有配置 telegram_chat_id 时，退回到最近一次收到指令的会话。"""
+    return _LAST_CHAT_ID[0] if _LAST_CHAT_ID[0] else ""
+
+
+_LAST_CHAT_ID = [""]
+
+
 def _latest_digest_date():
     """扫描 exports/dtao_YYYY-MM-DD.digest.txt，返回最新日期；无则返回 None。"""
     files = glob.glob(os.path.join(HERE, "exports", "dtao_*.digest.txt"))
@@ -833,6 +900,22 @@ def handle(text, chat_id):
             send(chat_id, "还没有可修订的日报，请先发 /digest 生成一次。")
             return
         run_feedback(day, feedback, chat_id)
+    elif cmd in ("kb", "知识库", "子网表"):
+        # /kb          查看周更状态（排程、上次成功、当前快照、待补跑原因）
+        # /kb update   立即校对一次（拉链上身份 + 同步已建档案）
+        arg = parts[1].lower() if len(parts) > 1 else ""
+        if arg in ("update", "now", "run", "更新", "立即"):
+            run_kb_update(chat_id)
+        elif arg in ("off", "关"):
+            send(chat_id, "周更开关在 config.json：kb_auto_update=false 即关闭"
+                          "（改完需重启监听）。本次仍可通过 /kb update 手动更新。")
+        else:
+            try:
+                import kb_weekly as K
+                send(chat_id, K.status_text(P._CFG))
+            except Exception as e:
+                log("读取知识库状态失败：%s" % e)
+                send(chat_id, "读取状态失败：%s" % e)
     elif cmd == "repush":
         day = None
         targets = []
@@ -890,6 +973,14 @@ def main():
         log("TG 指令监听已启动（白名单模式：仅 %s 可触发）... Ctrl+C 停止" % allowed_users)
     else:
         log("TG 指令监听已启动（开放模式：任意会话/任意用户均可触发，每日导出节流保护）... Ctrl+C 停止")
+
+    # 知识库周更：每 7 天校对一次子网名/业务并同步已建档案。
+    # 交给监听进程托管（而不是另注册一个计划任务），这样只需保证监听活着，
+    # 且与日报共用同一把执行锁，不会同时写档案。
+    if cfg.get("telegram_chat_id"):
+        _LAST_CHAT_ID[0] = str(cfg.get("telegram_chat_id"))
+    _start_kb_scheduler()
+
     last_hb = time.time()
     while True:
         try:
@@ -923,6 +1014,9 @@ def main():
                     for _k in sorted(_SEEN_MSG_IDS, key=_SEEN_MSG_IDS.get)[:200]:
                         _SEEN_MSG_IDS.pop(_k, None)
                 log("收到指令 chat=%s from=%s text=%s" % (chat_id, from_id, (msg.get("text") or "")[:80]))
+                # 记住最近活跃会话：周更通知在没配 telegram_chat_id 时用它兜底
+                if chat_id:
+                    _LAST_CHAT_ID[0] = chat_id
                 # 单条指令处理异常绝不影响主循环（第二层兜底）
                 try:
                     handle(msg.get("text"), chat_id)

@@ -42,5 +42,9 @@
   "archive_dir": "subnet_archive",
   "archive_translate": true,
   "research_days": 14,
-  "research_max_items_per_day": 260
+  "research_max_items_per_day": 260,
+  "kb_auto_update": true,
+  "kb_update_weekday": 0,
+  "kb_update_hour": 9,
+  "kb_update_notify": true
 }

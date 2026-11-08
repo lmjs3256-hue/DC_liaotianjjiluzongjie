@@ -190,25 +190,47 @@ def _kill_stale_instances():
     return killed
 
 
-def acquire_single_instance():
-    """申请全局唯一实例；已有实例则拒绝启动。返回 True 表示拿到锁。"""
-    global _mutex_handle
-    if os.name == "nt":
-        try:
-            import ctypes
-            from ctypes import wintypes
+def acquire_single_instance(retries=6, delay=0.8):
+    """申请全局唯一实例；已有实例则拒绝启动。返回 True 表示拿到锁。
 
-            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            k32.CreateMutexW.restype = wintypes.HANDLE
-            h = k32.CreateMutexW(None, False, _MUTEX_NAME)
-            ERROR_ALREADY_EXISTS = 183
-            if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-                if h:
-                    k32.CloseHandle(h)
-                return False
-            _mutex_handle = h
-        except Exception as e:
-            log("单实例互斥体创建失败（降级为继续运行）：%s" % e)
+    注意顺序：**先抢锁，抢不到再杀旧进程，然后重抢**。
+    反过来（先杀再造）会有竞态——旧进程刚被 TerminateProcess 时，
+    内核对象还引用着互斥体没释放，新进程这时去 CreateMutex 会拿到
+    ERROR_ALREADY_EXISTS，于是刚要启动就把自己判成「已有实例」退出，
+    表现就是「杀掉了旧的不见新的起来」。所以这里必须带重试。
+    """
+    global _mutex_handle
+    for attempt in range(retries):
+        if os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                k32.CreateMutexW.restype = wintypes.HANDLE
+                k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+                h = k32.CreateMutexW(None, False, _MUTEX_NAME)
+                ERROR_ALREADY_EXISTS = 183
+                err = ctypes.get_last_error()
+                if err == ERROR_ALREADY_EXISTS:
+                    if h:
+                        k32.CloseHandle(h)
+                    if attempt == 0:
+                        # 第一次抢不到 → 说明确实有旧实例，杀掉再重抢
+                        killed = _kill_stale_instances()
+                        if not killed:
+                            return False       # 有锁但没有可杀的进程（极少见）→ 放弃
+                    time.sleep(delay * (attempt + 1))
+                    continue
+                _mutex_handle = h
+                break
+            except Exception as e:
+                log("单实例互斥体创建失败（降级为继续运行）：%s" % e)
+                break
+        else:
+            break
+    else:
+        return False
     try:
         with open(_PID_FILE, "w", encoding="utf-8") as f:
             f.write(str(os.getpid()))
@@ -547,10 +569,8 @@ def handle(text, chat_id):
 
 
 def main():
-    # 启动即抢单实例：先杀掉 pid 文件里的旧进程（改完代码重启即可，不用手工清），
-    # 再抢互斥体。抢不到说明还有别的实例没退干净，直接退出——绝不允许两个进程
-    # 同时轮询同一个 bot，否则一条指令会被执行多次、推多份日报。
-    _kill_stale_instances()
+    # 单实例：抢锁 → 抢不到就杀掉旧监听 → 重抢（acquire_single_instance 内部完成）。
+    # 绝不允许两个进程同时轮询同一个 bot，否则一条指令会被执行多次、推多份日报。
     if not acquire_single_instance():
         log("❌ 已有 tg_listener 实例在运行，本进程退出（避免同一条指令被重复执行）")
         try:

@@ -588,13 +588,18 @@ def save_md(arc_dir, arc):
 
 # ---------------------------------------------------------------- 投研落档
 def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
-                    file_name="", log=print):
+                    file_name="", log=print, income_snap=None):
     """把一次投研的产出增量写入子网档案。
 
     - 档案已存在：只追加/替换**同一天**的报告记录，原有群聊条目一条不动；
     - 档案不存在：新建一个（只有报告、没有群聊条目也是合法档案）。
     为什么只存摘要：正文是长文，放 archive.json 会把档案撑爆；正文留在 research_*.md，
     json 里只留「结论 + 关键事件 + 数据源 + 证据强度」，方便以后按子网回看历史判断。
+
+    income_snap：本次的收入/回购指标快照（标量字典）。单独存进 `income_hist`，
+    下次投研拿它做「跟上一次比，哪些数字变了」的对比基准。
+    为什么不放进 reports[]：报告会被后续同日重跑覆盖（date 相同就替换），
+    而快照是「时间序列」，覆盖了就永远比不出变化，必须追加保存。
     """
     arc_dir = _archive_dir_of(cfg)
     os.makedirs(arc_dir, exist_ok=True)
@@ -690,6 +695,13 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
     reports = [r for r in (arc.get("reports") or []) if (r.get("date") or "") != date_str]
     reports.insert(0, rec)
     arc["reports"] = reports[:60]
+    # 收入/回购快照：按日期追加（同日重跑覆盖当天那条，不重复堆积）
+    if income_snap:
+        _ih = [x for x in (arc.get("income_hist") or [])
+               if (x.get("date") or "") != date_str]
+        _ih.append({"date": date_str, "snapshot": income_snap})
+        _ih.sort(key=lambda x: x.get("date") or "")
+        arc["income_hist"] = _ih[-40:]
     arc["updated_at"] = now
     save_archive(arc_dir, arc)
     save_md(arc_dir, arc)

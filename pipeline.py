@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1940,7 +1940,7 @@ def feishu_sign(secret):
 # 排版增强：识别「EMOJI 标题行」并加粗（飞书 lark_md / TG Markdown 通用）
 # ---------------------------------------------------------------------------
 _SECTION_EMOJI = ("🔥", "🔢", "👥", "📊", "📎", "💡", "📌", "⚠️", "✅", "❌", "📝", "📈", "🧭",
-                  "😄", "🗣", "🎲", "🥴", "💬")
+                  "💰", "📰", "🗓", "😄", "🗣", "🎲", "🥴", "💬")
 
 
 def prettify_headers(text):
@@ -2055,7 +2055,7 @@ def push_feishu(cfg, title, digest):
         day = m.group(1) if m else ""
     kind = ("周报" if "周报" in title else ("专题" if "专题" in title
             else ("水聊" if "水聊" in title else "日报")))
-    body = prettify_headers(digest)
+    body = prettify_headers(mark_changes_feishu(digest))
     # 正文顶部放「加粗标题 + 日期行」，与正文合并进同一个文本块（不加分隔线），
     # 这样在飞书手机端长按复制时，标题+日期+正文会被一并选中，日报才有完整意义
     title_line = "**%s**" % title
@@ -2089,6 +2089,41 @@ def push_feishu(cfg, title, digest):
     _post_json(url, card)
     log("飞书推送完成")
 
+# 红色标注：飞书 lark_md 支持 <font color='red'>，TG 旧版 Markdown 完全不支持颜色。
+# 所以同一条稿子要分两条通道处理：飞书原样保留（真红字），TG 降级成「▲/▼ + 粗体」，
+# 保证两边都能一眼看出「哪里变了」，而不是 TG 侧露出一坨 HTML 标签。
+_RED_RE = re.compile(r"<font\s+color=[\"']?red[\"']?\s*>(.*?)</font>", re.I | re.S)
+
+
+def mark_changes_feishu(text):
+    """飞书通道：把变化值包成 <font color='red'>，已是红色的不重复包。"""
+    if not text:
+        return text
+    # 模型有时用自己的写法，统一规范成 lark_md 认可的引号形式
+    return re.sub(r"<font\s+color=[\"']?(?:red|#?f{0,1}f0000)[\"']?\s*>",
+                  "<font color='red'>", text, flags=re.I)
+
+
+def mark_changes_tg(text):
+    """TG 通道：红色标签降级成「▲新值」粗体，并去掉 HTML 残渣。
+
+    TG 旧版 Markdown 里没有颜色，硬塞 <font> 会原样显示成文字；
+    用 ▲（上升）/ ▼（下降）替代颜色语义，配合粗体足够醒目。
+    """
+    if not text:
+        return text
+
+    def _sub(m):
+        inner = m.group(1)
+        arrow = "▲" if "+" in inner else ("▼" if "-" in inner or "−" in inner else "●")
+        return "**%s %s**" % (arrow, inner)
+
+    out = _RED_RE.sub(_sub, text)
+    # 清掉任何漏网的 font 标签，避免 TG 侧露出 HTML
+    out = re.sub(r"</?font[^>]*>", "", out, flags=re.I)
+    return out
+
+
 def _tg_md(s):
     # 把飞书 lark_md 的 **加粗** 转成 Telegram 旧版 Markdown 的 *加粗*，
     # 并转义会破坏解析的字符（保留 * 用于加粗）
@@ -2104,7 +2139,7 @@ def push_telegram(cfg, title, digest):
         return
     url = "https://api.telegram.org/bot%s/sendMessage" % token
     # TG 仅支持基础 Markdown：板块标题加粗 + 上下分隔线框，提升可读性
-    body = _tg_md(prettify_headers(digest))
+    body = _tg_md(prettify_headers(mark_changes_tg(digest)))
     sep = "────────────"
     t = _tg_md(title)
     kind = ("周报" if "周报" in title else ("专题" if "专题" in title

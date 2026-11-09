@@ -285,6 +285,180 @@ def src_bittensor_ai(sn):
             "err": "" if facts else "未解析到指标"}
 
 
+def _rsc_grab(html, key):
+    """从 Next.js RSC payload 里抠出一个 JSON 值（对象/数组）。
+
+    bittensor.ai 是 RSC 流式渲染，数据不在 DOM 里而是在
+    `<script>self.__next_f.push([1,"..."])</script>` 的转义字符串里：
+        \"ownerBuybacks\":{\"netuid\":51,...}
+    所以既要还原 \" 转义，又要让 JSON 解析器自己判断边界
+    （手动括号配平会被外层 [1,"..."] 的方括号带偏，实测会多吞一大段）。
+    """
+    if not html:
+        return None
+    for k in ('\\"%s\\":' % key, '"%s":' % key):
+        i = html.find(k)
+        if i < 0:
+            continue
+        raw = html[i + len(k):].replace('\\"', '"').replace('\\\\', '\\')
+        try:
+            return json.JSONDecoder().raw_decode(raw)[0]
+        except Exception:
+            continue
+    return None
+
+
+def _rao(v, scale=1e9):
+    """把 RSC 里的 rao 整数字符串换成可读数值（1 TAO = 1e9 rao）。"""
+    try:
+        return float(v) / scale
+    except Exception:
+        return 0.0
+
+
+# bittensor.ai 的「Revenue / Recycle」定义（页面原文，原文照抄便于溯源）：
+#   The owner's emission cut at today's price, over the TAO recycled for
+#   registrations that day. Excludes the owner's validator dividends.
+# 也就是说：收入看 owner cut 抽到的 alpha，回购看 ownerBuybacks。
+
+
+def _income_from_page(html):
+    """从 bittensor.ai 页面正文里取「收入/分配」相关数字。
+
+    页面结构（实测 SN64）：
+        Owner Cut 18.00%
+        Daily distribution ... 7,200.0000 ش /day ≈ 489.9801 τ
+        Miners 43.84% 3,156.1963 ش ≈ 214.7880 τ /day
+        Validators 38.16% 2,747.8367 ش ≈ 186.9980 τ /day
+        Owner 18.00% 1,295.9670 ش ≈ 88.1942 τ /day
+        Revenue / Recycle   No recycle last day
+    """
+    t = to_text(html)
+    out = {}
+
+    m = re.search(r"Owner Cut\s*([0-9.]+)%", t)
+    if m:
+        out["owner_cut_pct"] = m.group(1)
+
+    m = re.search(r"Daily distribution[^0-9]{0,80}([0-9.,]+)\s*\S+\s*/day\s*≈\s*([0-9.,]+)\s*τ", t)
+    if m:
+        out["daily_alpha"] = m.group(1).replace(",", "")
+        out["daily_tao"] = m.group(2).replace(",", "")
+
+    # 三个分配方（矿工/验证人/所有者），取各自 alpha 与 TAO
+    for label, key in (("Miners", "miner"), ("Validators", "validator"), ("Owner", "owner")):
+        m = re.search(r"%s\s+([0-9.]+)%%\s*([0-9.,]+)\s*\S+\s*≈\s*([0-9.,]+)\s*τ" % label, t)
+        if m:
+            out[key + "_pct"] = m.group(1)
+            out[key + "_alpha"] = m.group(2).replace(",", "")
+            out[key + "_tao"] = m.group(3).replace(",", "")
+
+    # Revenue / Recycle 一句话结论（"No recycle last day" / "1.23×"）
+    m = re.search(r"Revenue\s*/\s*Recycle\s*(.{0,60}?)(?=\s*Emissions|\s*$)", t, re.S)
+    if m:
+        out["rev_recycle"] = " ".join(m.group(1).split())[:60]
+
+    return out
+
+
+def src_income(sn):
+    """子网收入 + 回购（这是「子网重大事件总结」的收入模块数据源）。
+
+    为什么要单独一个源：dtaoscan/bittensor.ai 的常规 facts 里**没有**收入与回购，
+    它们藏在 bittensor.ai 的 RSC payload（ownerBuybacks / netEmission）和
+    资金流图（buckets[].flows.protocolBuy）里，必须单独解析。
+
+    返回结构：
+        owner_cut_pct   所有者抽成比例（收入分配基准）
+        owner_tao_day   所有者每日抽成（TAO，页面当日价折算）—— 收入口径
+        daily_tao       子网每日总分配（TAO）
+        burn/pool       所有者回购：30 天 + 终身（alpha 与 TAO 两套口径）
+        protocol_buy    协议回购：逐日 flows.protocolBuy（TAO）与累计
+        burned_pct      累计销毁占供应比
+        trend           收入/回购的逐日序列（供模型判断趋势）
+    """
+    ok, h = fetch("https://bittensor.ai/subnets/%d" % sn, timeout=30)
+    if not ok:
+        return {"src": "收入/回购", "ok": False, "err": h}
+    out = {"src": "收入/回购", "ok": False, "sn": sn, "err": ""}
+
+    out.update(_income_from_page(h))
+
+    ob = _rsc_grab(h, "ownerBuybacks")
+    if isinstance(ob, dict):
+        burn = ob.get("burn") or {}
+        pool = ob.get("poolBuys") or {}
+        out["ob"] = {
+            "burn_alpha_30d": _rao(burn.get("alpha30dRao")),
+            "burn_tao_30d": _rao(burn.get("tao30dRao")),
+            "burn_alpha_life": _rao(burn.get("lifetimeAlphaRao")),
+            "burn_tao_life": _rao(burn.get("lifetimeTaoRao")),
+            "burn_count_life": burn.get("lifetimeCount") or 0,
+            "pool_alpha_30d": _rao(pool.get("alpha30dRao")),
+            "pool_tao_30d": _rao(pool.get("tao30dRao")),
+            "pool_alpha_life": _rao(pool.get("lifetimeAlphaRao")),
+            "pool_tao_life": _rao(pool.get("lifetimeTaoRao")),
+            "pool_share_30d": pool.get("shareOfOwnerCut30d") or 0,
+        }
+
+    ne = _rsc_grab(h, "netEmission")
+    if isinstance(ne, dict):
+        w = ne.get("windows") or {}
+        out["emission"] = {}
+        for k in ("24h", "7d", "30d"):
+            x = w.get(k) or {}
+            out["emission"][k] = {
+                "net_alpha": _rao(x.get("net_alpha")),
+                "burned_alpha": _rao(x.get("burned_alpha")),
+                "recycled_alpha": _rao(x.get("recycled_alpha")),
+            }
+        out["burned_pct"] = ne.get("cumulative_burned_pct_of_supply")
+
+    # 协议回购：资金流图逐日数据（30 天）
+    buckets = _rsc_grab(h, "buckets")
+    if isinstance(buckets, list) and buckets:
+        series = []
+        for b in buckets:
+            if not isinstance(b, dict):
+                continue
+            fl = b.get("flows") or {}
+            # 注意：flows 里的金额**已经是 TAO/alpha 浮点数**，不能再除 1e9。
+            # （只有 ownerBuybacks / netEmission 里的 *Rao 字段才是 rao 整数。
+            #   这里早期版本误用了 _rao()，261.29 τ 被压成 0.00000026 → round 成 0，
+            #   表现是「有回购的子网也显示 30 天全零」。）
+            def _f(x):
+                try:
+                    return round(float(x), 2)
+                except Exception:
+                    return 0.0
+            series.append({
+                "d": (b.get("start") or "")[:10],
+                "pb": _f(fl.get("protocolBuy")),      # 协议回购 TAO
+                "ps": _f(fl.get("protocolSell")),
+                "ub": _f(fl.get("userBuy")),
+                "us": _f(fl.get("userSell")),
+                "px": b.get("priceClose"),
+            })
+        out["series"] = series
+        days_with_buy = [s for s in series if s["pb"] > 0]
+        out["protocol_buy"] = {
+            "days": len(series),
+            "sum": round(sum(s["pb"] for s in series), 2),
+            "avg": round(sum(s["pb"] for s in series) / max(1, len(series)), 2),
+            "active_days": len(days_with_buy),
+            "zero_days": len(series) - len(days_with_buy),
+            "first": series[0]["d"], "last": series[-1]["d"],
+            # 前后对比：把窗口切成两半看趋势（前 15 天 vs 后 15 天）
+            "half_early": round(sum(s["pb"] for s in series[:len(series)//2]), 2),
+            "half_late": round(sum(s["pb"] for s in series[len(series)//2:]), 2),
+        }
+
+    out["ok"] = bool(out.get("owner_tao_day") or out.get("ob") or out.get("protocol_buy"))
+    if not out["ok"]:
+        out["err"] = "页面可访问但未解析到收入/回购字段"
+    return out
+
+
 def src_dtaoscan(sn):
     """dtaoscan：这个站信息最全 —— alpha 价格、池子深度、emission、
     神经元占用、owner Conviction 锁仓（官方动作的强证据）。"""
@@ -905,6 +1079,9 @@ def collect(meta, sn, log=print, extra_x_links=None, days=14):
         ("bittensor.ai", lambda: src_bittensor_ai(sn)),
         ("taostats", lambda: src_taostats(sn)),
         ("dtaoscan", lambda: src_dtaoscan(sn)),
+        # 收入/回购单独抓一次 bittensor.ai：数据藏在 RSC payload 里，
+        # 和上面的常规指标解析路径不同（不能合并，否则一边失败会拖累另一边）
+        ("收入/回购", lambda: src_income(sn)),
         ("官网", lambda: src_website(meta)),
         ("GitHub", lambda: src_github(meta)),
         ("Google News", lambda: src_news(meta, sn)),
@@ -1252,15 +1429,16 @@ _RESEARCH_PROMPT_TMPL = (
     "你是 Bittensor 子网的买方研究员。输入会分成几块：【本地群聊档案】（Discord 真实讨论，带日期时间，"
     "**可能没有**）、【此前投研结论】（该子网档案里存的历史报告，只有做过投研才会有）、"
     "【链上/数据站事实】（抓取到的页面字段）、【官方与公开信息】（官网、GitHub、新闻、搜索、X）、"
-    "【交叉验证矩阵】（同指标多源并列及其一致性判定）。"
+    "【交叉验证矩阵】（同指标多源并列及其一致性判定）、"
+    "【收入与回购】（owner cut 收入、协议回购逐日汇总、所有者回购 30 天/终身、净 emission）。"
     "另外会额外给出一段【代码预判的硬信号】——那是程序根据链上字段判定的客观状态"
     "（owner 解仓、神经元满员、注册关闭等），**必须写入报告**，不得忽略或弱化。\n"
     "\n【工作顺序（必须遵守）】\n"
     "先读【本地群聊档案】与【此前投研结论】，把「档案里已经确认过的事实」当成**起点**；"
     "再读外部源，专门找**上次报告之后的新增变化**（新公告、新解仓、新数据、群里新出现的说法），"
     "把这些变化写进时间线。**已经在上次报告里写过、这次没有新进展的事，不要重复罗列**。\n"
-    "报告只回答四个问题：**什么时候发生了什么（时间线）· 现在什么价（当前数据）· "
-    "外面刚说了什么（最新资讯）· 接下来盯什么（预期跟踪）**。"
+    "报告只回答五个问题：**什么时候发生了什么（时间线）· 现在什么价（当前数据）· "
+    "外面刚说了什么（最新资讯）· 收入多少、有没有回购（收入与回购）· 接下来盯什么（预期跟踪）**。"
     "除此之外的分析、感慨、免责声明、方法论说明，一律不要。\n"
     "\n【最新资讯是必答题，不是选答（本条优先级极高）】\n"
     "群聊只是「社区在聊什么」，**不等于外部世界发生了什么**。用户明确要求："
@@ -1294,7 +1472,7 @@ _RESEARCH_PROMPT_TMPL = (
     "10. **X 贴文只能按输入里的原文引用**：不要把英文长段落直接照搬，翻成中文、保留关键英文专有名词；"
     "标了「生态账号提及」的是第三方转述，**不得**写成「官方宣布」；"
     "链接要不要给都可以，但作者名与日期必须准确。\n"
-    "\n【输出结构（只有这四段，严格按顺序，不要加别的段）】\n"
+    "\n【输出结构（只有这五段，严格按顺序，不要加别的段）】\n"
     "\n**🗓 重要事件时间线**（报告主体，占 50%% 以上篇幅）\n"
     "**每行一条，以 `- ` 开头，条与条之间不要空行**。格式固定为：`- 月-日 · 事件 · 验证状态`\n"
     "- **日期写法**：同一份报告里年份只出现一次。**首条**写 `2026-10-30`，"
@@ -1320,10 +1498,31 @@ _RESEARCH_PROMPT_TMPL = (
     "GitHub 发版。已经写进时间线的同一事件，这里只补一句「详见时间线」，或换个角度写影响；不要整段复述。\n"
     "- **所有源都没抓到**才写「本期无外部资讯（X/新闻/官网 均未获取）」，并如实写清哪个源失败；"
     "**不许**在明明抓到内容的情况下留空或写「无」。\n"
-    "\n**📌 预期跟踪**（接下来该盯什么，4-6 条，每条必须可验证）\n"
-    "格式：`- 盯什么 → 什么情况算兑现 / 什么情况算证伪`。"
+    "\n**💰 收入与回购**（用户明确要求必须有这一段；3-6 行，每行一条，格式 `- 项目：数值 · 变化说明`）\n"
+    "- **必须回答三件事**：① 收入多少（所有者抽成比例 + 每日收入 τ）② 趋势如何（协议回购上升/下降/持平）"
+    "③ 有没有回购、回购多少（协议回购 vs 所有者回购**分开写**，别混成一句）。\n"
+    "- **数字全部照抄**上面【与上次投研的收入对比】与【子网收入与回购】段，**不要自己换算或再算百分比**。\n"
+    "- **和上次比有变化的项，必须用红色标出来**，写法：`<font color=\"red\">新值（+/-X%%）</font>`。"
+    "例如：`- 所有者收入：<font color=\"red\">160.59 τ/日（+10.8%%）</font>（上次 145.00）`。"
+    "**没变化的项不要标红**，也不要为了标红而编造变化。\n"
+    "- 若输入里**没有**【与上次投研的收入对比】段（说明是首次投研，或本地无历史快照），"
+    "就只写本次绝对值，并在末尾加一句「首次记录，下次投研起可对比变化」。\n"
+    "- 若所有者回购为**零**，必须明确写「所有者回购：零（团队未用 owner cut 回购）」，"
+    "**不要**含糊带过——零回购本身是重要结论。\n"
+    "- 抓不到收入数据（输入里没有该段）就整段写「收入与回购：未获取（数据源未返回）」，不要留空、不要编数字。\n"
+    "\n**📌 预期跟踪**（先逐条结清上次的，再写本次新增的；合计 4-7 条）\n"
+    "**若输入里有【上次跟踪事项（逐条回答）】段，必须先逐条给结论**，一条都不许漏：\n"
+    "  格式：`- ✅已兑现 / ⏳进行中 / ❌已证伪 / ⚔️条件未触发：<上次那条的简述> → <这次的事实依据>`\n"
+    "  · `✅已兑现` = 输入里有明确证据说明条件成立；\n"
+    "  · `❌已证伪` = 输入里有明确证据说明条件被打破（如上次说「跌破 350 τ 视为走弱」，这次日均确实跌破）；\n"
+    "  · `⏳进行中` = 有部分进展但还没到判定线；\n"
+    "  · `⚔️条件未触发` = 这次输入里根本没有能判定它的数据（**这种情况要老实写，不许假装判定**）。\n"
+    "  · 判定依据里的数字**必须来自本次输入**，不许拿上次报告里的数字充数。\n"
+    "**结清之后**，再写本次新增的跟踪项，格式：`- 盯什么 → 什么情况算兑现 / 什么情况算证伪`。"
     "要具体到能拿数据核对（例如「owner 是否在 30 天内继续解仓 → 解仓比例再升 5%% 即证伪回购承诺」），"
     "不要写「关注官方动态」这类空话。\n"
+    "- 变化了的判定结论（原来是「进行中」现在变「已兑现/已证伪」）**用红色标出结论词**，"
+    "写法 `<font color=\"red\">✅已兑现</font>`。\n"
     "\n【禁止事项】\n"
     "不要写「一句话结论」段、不要写「事实基线」（只留当前价格那一行）、不要写「交叉验证矩阵」段、"
     "不要写「群内预期差」段、不要写「风险与未证实」段——"
@@ -1472,6 +1671,78 @@ def _ext_block(sources, meta):
     return "\n".join(blocks)
 
 
+def _tracking_items(digest):
+    """从一份报告正文里抽出「📌 预期跟踪」的条目列表。
+
+    这些条目是上次投研承诺「接下来盯什么 → 什么算兑现/证伪」的具体条件，
+    本次必须逐条回答「兑现了没有」——这才是用户要的「跟踪进度对比」。
+    """
+    if not digest:
+        return []
+    m = re.search(r"\*\*(?:📌\s*)?预期跟踪\*\*\s*\n((?:-\s*.+\n?)+)", digest)
+    if not m:
+        return []
+    out = []
+    for ln in m.group(1).split("\n"):
+        s = ln.strip()
+        if not s.startswith(("-", "•")):
+            continue
+        s = re.sub(r"^[-•]\s*", "", s).strip()
+        # 去掉红色标注，避免把 HTML 带进判定
+        s = _RED_STRIP_RE.sub(r"\1", s)
+        if len(s) >= 8:
+            out.append(s[:200])
+    return out
+
+
+def tracking_block(prev_arc, today=None, arc_dir=None, limit=1, max_items=6):
+    """生成「上次的跟踪事项 → 这次逐条判定」的输入段（用户明确要求）。
+
+    为什么单独成段而不是塞进历史报告块：
+    历史报告块是「上次说了什么」的**叙述**，模型容易泛泛地写「延续上次判断」；
+    而用户要的是**逐条打钩**：上次说「盯 X → Y 算兑现」，这次必须回答 X 出现没有、算不算兑现。
+    把条目拆成编号清单，模型才会照条回答。
+    """
+    if not prev_arc:
+        return ""
+    reps = [r for r in (prev_arc.get("reports") or []) if r.get("date")]
+    # 找最近一份「不是今天」的报告（同日重跑不跟自己比）
+    target = None
+    for r in reps:
+        if today and r.get("date") == today:
+            continue
+        target = r
+        break
+    if not target:
+        return ""
+    body = (target.get("body") or "").strip()
+    if not body and arc_dir and target.get("file"):
+        try:
+            with open(os.path.join(arc_dir, "SN%d" % int(prev_arc["sn"]),
+                                   target["file"]), encoding="utf-8") as f:
+                body = f.read()
+        except Exception:
+            body = ""
+    items = _tracking_items(body)
+    if not items:
+        return ""
+    L = ["【上次投研（%s）留下的跟踪事项 —— 本次必须逐条回答】" % target.get("date")]
+    for i, it in enumerate(items[:max_items], 1):
+        L.append("%d. %s" % (i, it))
+    L.append("**要求**：对上面每一条，在本次的「📌 预期跟踪」段里逐条给出结论，"
+             "写法 `- ✅已兑现 / ⏳进行中 / ❌已证伪 / ⚔️条件未触发：<上次那条的简述> → <这次的事实依据>`。"
+             "判定标准：\n"
+             "  · 该条描述的现象在本次输入里**确实发生**了 → ✅已兑现；\n"
+             "  · 该条描述的**反面**发生了（上次说「守住 438 τ」，这次跌破；上次说「转正」，这次仍是零）"
+             "→ ❌已证伪。**注意：不能一律写「⏳进行中」蒙过去**，"
+             "「仍是零」「跌破」本身就是明确结论；\n"
+             "  · 只有「部分进展、还没到判定线」才是 ⏳进行中；\n"
+             "  · 本次输入里**根本没有**能判定它的数据 → ⚔️条件未触发。\n"
+             "判定依据里的数字必须是本次输入里的真值，**不许**为了凑结论编造进展。"
+             "结清之后再写本次新增的跟踪项。")
+    return "\n".join(L)
+
+
 def _prev_reports_block(arc, limit=3, skip_date=None, body_chars=900, body_full_for=1, arc_dir=None):
     """把该子网**此前投研的结论**带给本次，实现「上次说了什么 → 这次怎么变了」。
 
@@ -1531,6 +1802,255 @@ def _consensus_block(rows):
         vals = "；".join("%s=%s" % (s, v) for s, v in r["vals"])
         lines.append("- %s：%s → %s" % (r["label"], vals, r["status"]))
     return "\n".join(lines)
+
+
+# -*- coding: utf-8 -*-
+
+
+# 最近一次 build_input 抽出的收入快照（run_research 落档时取用）
+_LAST_INC_SNAP = {}
+
+
+# ------------------------------------------------------------------ 收入与回购
+# 设计要点（2026-11-09 用户需求）：
+#   1. 子网重大事件总结里必须有「收入模块」：收入多少、趋势如何、有没有回购、回购多少；
+#   2. 本地有历史投研时，要**对比上次**的同一组指标，把变化的地方标出来；
+#   3. 变化用红色字体。飞书 lark_md 支持 <font color='red'>，TG 旧版 Markdown 不支持，
+#      所以红色只加在飞书通道，TG 侧降级成「⬆/⬇ + 星标」。
+
+# 参与「变化对比」的指标：(字段路径, 展示名, 单位, 小数位, 变化阈值%)
+# 阈值含义：变动幅度小于它视为「基本持平」，不标红，避免噪声满屏飘红
+# 从正文里剥离红色标注（判定跟踪事项时不该把 HTML 当成条件的一部分）
+_RED_STRIP_RE = re.compile(r"<font[^>]*>(.*?)</font>", re.I | re.S)
+
+_INCOME_METRICS = (
+    (("owner_tao",), "所有者抽成收入", "τ/日", 2, 5.0),
+    (("daily_tao",), "子网日分配总额", "τ/日", 2, 5.0),
+    (("owner_cut_pct",), "所有者抽成比例", "%", 2, 0.0),
+    (("protocol_buy", "sum"), "协议回购（30天累计）", "τ", 2, 10.0),
+    (("protocol_buy", "avg"), "协议回购（日均）", "τ", 2, 10.0),
+    (("protocol_buy", "active_days"), "有回购的天数", "天", 0, 0.0),
+    (("ob", "pool_alpha_30d"), "所有者回购·池内（30天）", "α", 0, 0.0),
+    (("ob", "burn_alpha_30d"), "所有者回购·销毁（30天）", "α", 0, 0.0),
+    (("ob", "pool_alpha_life"), "所有者回购·池内（终身）", "α", 0, 1.0),
+    (("burned_pct",), "累计销毁占供应", "%", 2, 1.0),
+)
+
+
+def _dig(d, path):
+    cur = d
+    for k in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
+def income_snapshot(inc):
+    """从 src_income() 的结果里抽出**可对比的标量快照**（存进档案，下次用来比变化）。
+
+    只存标量不存逐日序列：序列 30 条 × 每次投研会把档案撑大，
+    而趋势结论（前半 vs 后半、有回购天数）已经在 protocol_buy 里算好了。
+    """
+    if not isinstance(inc, dict) or not inc.get("ok"):
+        return {}
+    snap = {"as_of": datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")}
+    for path, _label, _unit, nd, _th in _INCOME_METRICS:
+        v = _dig(inc, path)
+        if v is None:
+            continue
+        try:
+            snap[path[0] if len(path) == 1 else ".".join(path)] = round(float(v), nd)
+        except Exception:
+            pass
+    pb = inc.get("protocol_buy") or {}
+    for k in ("days", "zero_days", "half_early", "half_late", "first", "last"):
+        if k in pb:
+            snap["protocol_buy." + k] = pb[k]
+    if inc.get("rev_recycle"):
+        snap["rev_recycle"] = inc["rev_recycle"]
+    return snap
+
+
+def _fmt_num(v, nd):
+    # None / 空串必须给占位符，不能直接 str() —— 否则报告输入里会漏出「约 None α/日」
+    # 这种残渣，模型照抄进报告就是一条硬伤（数字硬校验也拦不住，因为它不是数字）。
+    if v is None or v == "":
+        return "—"
+    try:
+        f = float(v)
+    except Exception:
+        return str(v)
+    if nd == 0:
+        return "{:,.0f}".format(f)
+    return "{:,.{nd}f}".format(f, nd=nd)
+
+
+def diff_income(prev, cur):
+    """对比两次快照，返回 [(标签, 旧值, 新值, 变化率%, 是否显著)]。
+
+    「显著」才标红：比例类指标只要变了就算变（阈值 0），
+    金额类给 5%/10% 阈值，过滤掉日常波动噪声。
+    """
+    out = []
+    if not prev or not cur:
+        return out
+    for path, label, unit, nd, th in _INCOME_METRICS:
+        key = path[0] if len(path) == 1 else ".".join(path)
+        if key not in prev or key not in cur:
+            continue
+        try:
+            a, b = float(prev[key]), float(cur[key])
+        except Exception:
+            continue
+        if a == b:
+            pct, sig = 0.0, False
+        else:
+            pct = (b - a) / abs(a) * 100.0 if a else (100.0 if b else 0.0)
+            sig = abs(pct) >= th if a else True
+        out.append((label, a, b, pct, sig, unit, nd))
+    return out
+
+
+def _trend_word(pb):
+    """把「前半 vs 后半」翻成一句话趋势判断。
+
+    必须区分两种情况，否则会把「有回购但没算出前后半段」误报成「无回购」：
+      · `half_early`/`half_late` 都缺 → 趋势算不出来，只能说「不可判」
+      · 两者都在且都 ≤0 → 才是真的「窗口内无协议回购」
+    """
+    if not pb:
+        return ""
+    e, l = pb.get("half_early"), pb.get("half_late")
+    if e is None and l is None:
+        # 逐日序列不足（比如只拿到 1-2 天）时算不出前后半段。
+        # 不带外层括号：调用处已经是「趋势%s」，再加括号会变成「趋势（…）」套括号。
+        return "不可判（逐日数据不足）"
+    e, l = e or 0, l or 0
+    if e <= 0 and l <= 0:
+        return "窗口内无协议回购，趋势不可判"
+    if e <= 0 < l:
+        return "由无到有（后半段开始回购）"
+    d = (l - e) / abs(e) * 100.0
+    if d >= 20:
+        return "上升（后半段 +%.0f%%）" % d
+    if d <= -20:
+        return "下降（后半段 %.0f%%）" % d
+    return "基本持平（后半段 %+.0f%%）" % d
+
+
+def income_block(inc, prev_snap=None, source_tag="[bittensor.ai]"):
+    """拼「收入模块」输入段：给模型的数据块（不含排版）。
+
+    模型拿到的必须是**已经算好的数字与变化**，而不是让它自己从
+    30 天序列里做加减法 —— 数字硬校验（audit_numbers）只认输入里逐字存在的值。
+    """
+    # 注意：这个函数恒返回二元组 (文本, 快照)，早退也必须给全 —— 调用方是
+    # `inc_txt, inc_snap = income_block(...)` 直接解包，返回单个字符串会 ValueError。
+    if not isinstance(inc, dict) or not inc.get("ok"):
+        return "", {}
+    L = ["【子网收入与回购（链上/官方数据站口径，可直接引用）】"]
+    L.append("口径说明：收入 = 所有者按 Owner Cut 抽到的 emission（页面按当日价折算成 TAO）；"
+             "回购分两种，**不要混为一谈**：①「协议回购」= 链上把多余 emission 的 TAO "
+             "从池子买入 alpha（推价，全子网通用机制）；"
+             "②「所有者回购」= 子网团队用自己的 owner cut 买回 alpha 或销毁（团队主动行为）。")
+
+    cut = inc.get("owner_cut_pct")
+    if cut:
+        L.append("- 所有者抽成比例：%s%% %s" % (cut, source_tag))
+    if inc.get("owner_tao"):
+        # α 折算是可选的（页面偶尔不给 alpha 口径），没有就整段省略，不要留「约 — α/日」
+        _oa = inc.get("owner_alpha")
+        _line = "- 所有者收入（当前口径）：%s τ/日" % _fmt_num(inc["owner_tao"], 2)
+        if _oa:
+            _line += "（约 %s α/日）" % _fmt_num(_oa, 0)
+        L.append(_line + " %s" % source_tag)
+    if inc.get("daily_tao"):
+        # 三方占比缺数据时只写总额，不要写「矿工 ?% / 验证人 ?% / 所有者 ?%」
+        _split = [("矿工", inc.get("miner_pct")), ("验证人", inc.get("validator_pct")),
+                  ("所有者", inc.get("owner_pct"))]
+        _has = [(n, v) for n, v in _split if v not in (None, "", 0)]
+        _line = "- 子网每日分配总额：%s τ/日" % _fmt_num(inc["daily_tao"], 2)
+        if _has:
+            _line += "（%s）" % " / ".join("%s %s%%" % (n, v) for n, v in _has)
+        L.append(_line + " %s" % source_tag)
+    if inc.get("rev_recycle"):
+        L.append("- 站点「Revenue / Recycle」结论：%s（= 当日所有者 emission 抽成 ÷ 当日注册销毁 TAO）"
+                 % inc["rev_recycle"])
+
+    pb = inc.get("protocol_buy") or {}
+    if pb.get("days"):
+        # 日期区间有就写，没有就省略括号（不要留「近 30 天， ~ 」这种空区间）
+        _span = ""
+        if pb.get("first") and pb.get("last"):
+            _span = "，%s ~ %s" % (pb["first"], pb["last"])
+        L.append("- 协议回购（近 %d 天%s）：累计 %s τ，日均 %s τ，有回购 %d 天 / 零回购 %d 天；"
+                 "趋势%s %s"
+                 % (pb["days"], _span,
+                    _fmt_num(pb.get("sum"), 2), _fmt_num(pb.get("avg"), 2),
+                    pb.get("active_days", 0), pb.get("zero_days", 0),
+                    _trend_word(pb), source_tag))
+        if pb.get("half_early") is not None:
+            L.append("  （前半段 %s τ → 后半段 %s τ）"
+                     % (_fmt_num(pb["half_early"], 2), _fmt_num(pb["half_late"], 2)))
+
+    ob = inc.get("ob") or {}
+    if ob:
+        b30, p30 = ob.get("burn_alpha_30d") or 0, ob.get("pool_alpha_30d") or 0
+        if b30 or p30:
+            L.append("- **所有者回购（近 30 天）：销毁型 %s α（%s τ）+ 池内买入 %s α（%s τ）；"
+                     "占 owner cut 的 %.2f%%** %s"
+                     % (_fmt_num(b30, 0), _fmt_num(ob.get("burn_tao_30d"), 2),
+                        _fmt_num(p30, 0), _fmt_num(ob.get("pool_tao_30d"), 2),
+                        (ob.get("pool_share_30d") or 0) * 100, source_tag))
+        else:
+            L.append("- 所有者回购（近 30 天）：**零**——团队没有用自己的 owner cut 回购 "
+                     "（不代表没收入，只代表收入没拿来回购） %s" % source_tag)
+        life = (ob.get("burn_alpha_life") or 0) + (ob.get("pool_alpha_life") or 0)
+        if life:
+            # 终身累计要拆开写：销毁型和池内买入是两种不同性质的行为，
+            # 合成一个数会让模型误判成「团队一直在回购」。
+            _b, _p = ob.get("burn_alpha_life") or 0, ob.get("pool_alpha_life") or 0
+            _parts = []
+            if _b:
+                _parts.append("销毁型 %s α" % _fmt_num(_b, 0))
+            if _p:
+                _parts.append("池内买入 %s α" % _fmt_num(_p, 0))
+            _tao = (ob.get("burn_tao_life") or 0) + (ob.get("pool_tao_life") or 0)
+            _line = "- 所有者回购（终身累计）：%s" % " + ".join(_parts or ["%s α" % _fmt_num(life, 0)])
+            if _tao:
+                _line += "（约 %s τ）" % _fmt_num(_tao, 2)
+            L.append(_line)
+    if inc.get("burned_pct"):
+        L.append("- 累计销毁占供应量：%s%%" % _fmt_num(inc["burned_pct"], 2))
+
+    em = inc.get("emission") or {}
+    if em.get("24h"):
+        L.append("- 净 emission：24h %s α / 7d %s α / 30d %s α（其中销毁 %s α）"
+                 % (_fmt_num(em["24h"].get("net_alpha"), 0),
+                    _fmt_num((em.get("7d") or {}).get("net_alpha"), 0),
+                    _fmt_num((em.get("30d") or {}).get("net_alpha"), 0),
+                    _fmt_num((em.get("30d") or {}).get("burned_alpha"), 0)))
+
+    # ---- 与上次投研的对比 ----
+    if prev_snap:
+        rows = [r for r in diff_income(prev_snap, income_snapshot(inc)) if r[4]]
+        # 只有**真有变化**时才出对比段。一项变化都没有却顶着个「对比」标题，
+        # 模型会硬凑一条「无变化」占位，读者看到的是空壳。
+        if rows:
+            L.append("\n【与上次投研的收入对比（上次快照 %s）】" % prev_snap.get("as_of", "?"))
+            for label, a, b, pct, sig, unit, nd in rows:
+                arrow = "↑" if b > a else ("↓" if b < a else "＝")
+                # 百分号不加空格（中文排版），其余单位用空格隔开
+                joiner = "" if unit == "%" else " "
+                L.append("- %s：%s → %s%s%s（%+.1f%%）%s"
+                         % (label, _fmt_num(a, nd), _fmt_num(b, nd), joiner, unit, pct, arrow))
+            L.append("**以上变化项必须在报告的「收入与回购」段里逐条写出，并标注变化幅度**；"
+                     "括号里的箭头与幅度照抄，不要自己再算一遍。")
+        else:
+            L.append("\n【与上次投研的收入对比】上次快照 %s：各项指标**均无显著变化**，"
+                     "本次不必标红，也不要编造变化。" % prev_snap.get("as_of", "?"))
+    return "\n".join(L), income_snapshot(inc)
 
 
 def _signal_block(sources):
@@ -1613,20 +2133,43 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
                     meta.get("name_change_source") or "链上身份",
                     meta["name_changed_from"]))
     sig = _signal_block(sources)
+    # 收入模块：单独成段，且**必须**出现在报告里（用户明确要求）。
+    # 上次快照从档案的 income_hist 取（每次投研都会 append），用来比「变化」。
+    _inc = sources.get("收入/回购") or {}
+    _prev_snap = {}
+    _pa = prev_arc if prev_arc is not None else arc
+    if _pa:
+        _ih = _pa.get("income_hist") or []
+        # 取「最近一次、且不是今天」的快照：同日重跑不该跟自己比
+        for _x in reversed(_ih):
+            if (_x.get("snapshot") or {}) and (_x.get("date") or "") != today:
+                _prev_snap = _x["snapshot"]
+                break
+    inc_txt, inc_snap = income_block(_inc, prev_snap=_prev_snap)
     body = ("\n===== 一、链上/数据站事实（抓取原文）=====\n" + _ext_block(sources, meta)
             + "\n\n===== 二、交叉验证矩阵（同指标多源并列）=====\n" + _consensus_block(build_consensus(sources)))
     if n:
         body = ("\n===== 一、本地群聊档案（Discord #price-talk，按日分段、按时间升序）=====\n" + arc_txt
                 + "\n\n===== 二、链上/数据站事实（抓取原文）=====\n" + _ext_block(sources, meta)
                 + "\n\n===== 三、交叉验证矩阵（同指标多源并列）=====\n" + _consensus_block(build_consensus(sources)))
+    if inc_txt:
+        body += "\n\n===== 收入与回购（链上口径，报告必须单独成段）=====\n" + inc_txt
     if hist:
         body += "\n\n===== 此前投研结论（历史留档）=====\n" + hist
+    # 上次的「预期跟踪」逐条清单：报告必须逐条打钩（兑现/证伪/未触发）
+    _trk = tracking_block(_pa, today=today, arc_dir=arc_dir)
+    if _trk:
+        body += "\n\n===== 上次跟踪事项（逐条回答）=====\n" + _trk
     if sig:
         body += "\n\n===== 末、" + sig
     elif not n:
         # 没有群聊素材时，交叉验证只能发生在「外部源之间」，必须写明，避免模型编造群内说法
         body += ("\n\n【注意】本次**没有本地群聊档案**：不得出现「群内有人说」「群里传」之类表述，"
                  "也不得虚构社区情绪；交叉验证只在外部源（数据站/官网/GitHub/新闻/搜索/X）之间进行。")
+    # 收入快照挂到模块级"最后一次构建"上：改返回值会破坏所有按字符串使用它的调用点，
+    # 而快照只有 run_research 落档时用得到，走旁路最省事。
+    global _LAST_INC_SNAP
+    _LAST_INC_SNAP = inc_snap or {}
     return head + body
 
 
@@ -1783,14 +2326,16 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         digest = pipeline.compress_digest(cfg, digest, 0, 1600, rounds=3,
                                           system_prompt=RESEARCH_COMPRESS_PROMPT,
                                           sanitize_fn=lambda s: pipeline.strip_length_tags(s),
-                                          cut_hint="报告只有四段（时间线 / 当前数据 / 最新资讯 / 预期跟踪）。"
+                                          cut_hint="报告只有五段（时间线 / 当前数据 / 最新资讯 / 收入与回购 / 预期跟踪）。"
                                                    "压缩顺序：① 先删时间线里最不重要的整条事件（合并同类、去掉铺垫词）；"
                                                    "② 每条事件压到一行、去掉形容词与重复解释，**但日期、事件核心、"
                                                    "✅已验证/⚠️未验证标记必须留着**；"
                                                    "③ 预期跟踪压到 4 条；"
-                                                   "④ 「当前价格」那一行与「最新资讯」段永远不许删；"
+                                                   "④ 「当前价格」「最新资讯」「💰 收入与回购」三段**永远不许删**"
+                                                   "（收入段是用户点名要求的）；收入段最多把相近项合并成一行，"
+                                                   "但收入额、回购金额、变化百分比一个都不许丢；"
                                                    "⑤ 删掉时间线与最新资讯之间完全重复的表述，只留一处。"
-                                                   "全部数字、来源标记、人名、SN 编号必须原样保留。")
+                                                   "全部数字、来源标记、人名、SN 编号、<font color=\"red\"> 标红必须原样保留。")
     except Exception as e:
         log("投研压缩跳过（%s）" % e)
     # 排版整理：时间线每行一条、条间不空行、补 `- `、删占位条目
@@ -1836,6 +2381,11 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     def _src_state(k, v):
         if not v.get("ok"):
             return "%s✗" % k
+        # 收入/回购源的结构跟其它源不同（没有 items/facts，用的是 owner_tao 等扁平字段），
+        # 漏判会让它明明抓到数据却显示「本期无内容」——实测 SN51 就出现过这个假警报。
+        if k == "收入/回购":
+            return "%s✓" % k if (v.get("owner_tao") or v.get("ob")
+                                 or v.get("protocol_buy")) else "%s✓（本期无内容）" % k
         if not (v.get("items") or v.get("recent") or v.get("facts") or v.get("posts")):
             return "%s✓（本期无内容）" % k
         return "%s✓" % k
@@ -1853,7 +2403,8 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         _arc = A.attach_research(cfg, sn, today, title, digest, sources=ok_srcs,
                                  meta={"name": meta.get("name"), "desc": meta.get("desc"),
                                        "url": meta.get("url"), "github": meta.get("github")},
-                                 file_name=fname, log=log)
+                                 file_name=fname, log=log,
+                                 income_snap=(_LAST_INC_SNAP or None))
         log("④ 档案增量更新完成：SN%d 现有投研 %d 份、群聊 %d 条 —— 下次投研会先读它"
             % (sn, len(_arc.get("reports") or []),
                sum(len(v) for v in (_arc.get("days") or {}).values())))

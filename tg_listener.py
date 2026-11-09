@@ -950,7 +950,8 @@ def main():
     P._CFG = cfg
     # 记录本次加载的 pipeline 版本：常驻进程会把代码固化在内存里，
     # 之后若 pipeline.py 有更新，必须重启监听才会同步（这条日志便于排查）
-    log("已加载 pipeline 模块 v%s（若 pipeline.py 更新，请重启监听）"
+    log("已加载 pipeline 模块 v%s（代码已固化在内存；pipeline.py 更新后需重启监听，"
+        "杀进程即可，tg_guard 会在 20 秒后自动拉起）"
         % getattr(P, "__version__", "?"))
     token = cfg.get("telegram_bot_token")
     if not token:

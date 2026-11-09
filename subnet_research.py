@@ -342,7 +342,9 @@ def src_website(meta):
         desc = re.sub(r"\s+", " ", html.unescape(m.group(1))).strip()
     body = to_text(h)[:1200]
     return {"src": "官网", "ok": True, "url": url, "title": title,
-            "desc": desc, "excerpt": body}
+            "desc": desc, "excerpt": body,
+            # 原始 HTML 留着，供 src_x 从页面里捞官方 X 账号链接
+            "html": h[:400000]}
 
 
 def src_github(meta, days=120):
@@ -378,6 +380,29 @@ def src_github(meta, days=120):
     return out
 
 
+def _rss_date(s):
+    """RSS 的 RFC822 日期 → ISO（`Mon, 07 Sep 2026 10:00:00 GMT` → `2026-09-07`）。
+
+    早期实现直接 `[:16]` 截断，导致报告里出现「Mon, 07 Se」这种半截日期——
+    模型照抄进正文，读者根本看不出是哪天，还浪费字数。"""
+    s = (s or "").strip()
+    for fmt in ("%a, %d %b %Y %H:%M:%S %Z", "%a, %d %b %Y %H:%M:%S %z",
+                "%d %b %Y %H:%M:%S %Z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    m = re.search(r"(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})", s)
+    if m:
+        try:
+            return datetime.datetime.strptime(
+                "%s %s %s" % (m.group(1), m.group(2), m.group(3)),
+                "%d %b %Y").strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return s[:10]
+
+
 def src_news(meta, sn, days=21):
     """Google News RSS：按「子网名 / SNxx bittensor」检索，过滤时间窗。"""
     names = [n for n in {meta.get("name"), A.ascii_name(meta.get("name"))} if n and len(n) >= 3]
@@ -402,7 +427,7 @@ def src_news(meta, sn, days=21):
             if not title or title in seen:
                 continue
             seen.add(title)
-            items.append({"title": title, "at": (pd.group(1) if pd else "")[:16],
+            items.append({"title": title, "at": _rss_date(pd.group(1) if pd else ""),
                           "url": (lk.group(1) if lk else "").strip(),
                           "source": html.unescape(re.sub(r"<.*?>", "", so.group(1))).strip() if so else ""})
         if len(items) >= 12:
@@ -476,6 +501,45 @@ def _ddg(query, limit=8):
     return {"src": "DuckDuckGo", "ok": False, "items": [], "err": "检索被拦截或无结果"}
 
 
+def _bing(query, limit=8):
+    """Bing 检索（兜底）。DDG 自 2026-11 起对无头请求常态返回「选鸭子」人机验证页，
+    导致「搜索」源长期静默失效。Bing 不需要 cookie，能稳定返回 b_algo 结果块。
+    注意：Bing 对长尾垂类词的召回很差，只当兜底，不要指望它替代 X/新闻源。"""
+    u = ("https://www.bing.com/search?q=%s&count=%d&setlang=en&cc=US"
+         % (urllib.parse.quote_plus(query), max(10, limit * 2)))
+    ok, h = fetch(u, timeout=25)
+    if not ok:
+        return {"src": "DuckDuckGo", "ok": False, "items": [], "err": h}
+    out, seen = [], set()
+    for b in re.findall(r"<li class=\"b_algo\".*?</li>", h, re.S):
+        m = re.search(r"<h2[^>]*>\s*<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", b, re.S)
+        if not m:
+            continue
+        real = html.unescape(m.group(1))
+        if "bing.com/ck/a" in real:          # 跳转壳，还原不出真实地址就丢掉
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        p = re.search(r"<p[^>]*>(.*?)</p>", b, re.S)
+        snip = html.unescape(re.sub(r"<[^>]+>", " ", p.group(1) if p else ""))
+        out.append({"title": html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip()[:150],
+                    "url": real,
+                    "snip": re.sub(r"\s+", " ", snip).strip()[:220]})
+        if len(out) >= limit:
+            break
+    return {"src": "DuckDuckGo", "ok": bool(out), "items": out[:limit],
+            "err": "" if out else "Bing 无可用结果"}
+
+
+def _web_search_items(query, limit=8):
+    """统一检索入口：DDG 优先，被拦就落 Bing。返回 [{"title","url","snip"}]。"""
+    r = _ddg(query, limit=limit)
+    if r.get("items"):
+        return r["items"]
+    return _bing(query, limit=limit).get("items", [])
+
+
 def src_web_search(meta, sn, limit=8):
     """搜索引擎：官网/文档/第三方分析/AMA 等公开页面（含摘要）。"""
     names = [n for n in {meta.get("name"), A.ascii_name(meta.get("name"))} if n and len(n) >= 3]
@@ -485,8 +549,7 @@ def src_web_search(meta, sn, limit=8):
     qs.append('bittensor "subnet %d"' % sn)
     out, seen = [], set()
     for q in qs[:2]:
-        r = _ddg(q, limit=limit)
-        for it in r.get("items", []):
+        for it in _web_search_items(q, limit=limit):
             if it["url"] in seen:
                 continue
             seen.add(it["url"])
@@ -497,30 +560,79 @@ def src_web_search(meta, sn, limit=8):
             "err": "" if out else "检索被拦截或无结果"}
 
 
-def _x_candidates(meta):
-    """猜官方 X 账号：官网直链 > 搜索引擎命中 site:x.com > 子网名变体。
-    注意 GitHub owner 往往是开发者个人号，只能作为低优先候选（且必须过相关性校验）。"""
+# ------------------------------------------------------------------ X / 推特
+# 通道演进史（别再改回 jina）：早期用 r.jina.ai 镜像读 x.com，2026-11 起该镜像
+# 全线返回 401 Unauthorized，X 源实际已 100% 失效，而报告里仍标「X✓」——
+# 这就是「明明有新资讯却什么都没提供」的直接原因。现改为两级：
+#   ① api.fxtwitter.com v2（无需鉴权，结构化 JSON，带时间戳/作者/互动数，可翻页）
+#   ② syndication / nitter 系保底（多数已 403/429，仅作兜底，不指望）
+FX_PROFILE = "https://api.fxtwitter.com/2/profile/%s/statuses"
+FX_TWEET = "https://api.fxtwitter.com/%s/status/%s"
+X_RESERVED = {"i", "intent", "share", "home", "search", "hashtag", "status",
+              "explore", "settings", "login", "signup", "tos", "privacy", "compose"}
+
+
+def _fx_json(url, timeout=25):
+    """取 fxtwitter JSON。它偶尔 404/SSL 抖动，固定重试 2 次（1.5s 退避）。"""
+    import time as _t
+    last = ""
+    for i in range(3):
+        ok, txt = fetch(url, timeout=timeout, retries=1)
+        if ok and txt.strip().startswith("{"):
+            try:
+                return True, json.loads(txt)
+            except Exception as e:
+                last = "JSON 解析失败：%s" % str(e)[:80]
+        else:
+            last = (txt or "")[:100]
+        if i < 2:
+            _t.sleep(1.5 * (i + 1))
+    return False, last
+
+
+def _x_handles_from_html(h):
+    """从官网/公告页 HTML 里捞出 X 账号（比搜索引擎猜名可靠得多）。
+
+    实测 zils.ai → zils_ai、chutes.ai → chutes_ai、lium.io → lium_io 全部命中；
+    比「子网名 + _ai」这种盲猜强。"""
+    out = []
+    for m in re.finditer(r"(?:https?:)?//(?:www\.)?(?:x|twitter)\.com/([A-Za-z0-9_]{2,20})",
+                         h or "", re.I):
+        hd = m.group(1)
+        if hd.lower() in X_RESERVED:
+            continue
+        out.append(hd)
+    return list(dict.fromkeys(out))
+
+
+def _x_candidates(meta, site_html=""):
+    """定位官方 X 账号，来源按可信度排序：
+    ① 官网页面里自己挂的 X 链接（最硬，项目方主动展示）
+    ② 知识库/官网 URL 本身就是 x.com/xxx
+    ③ 搜索引擎命中 site:x.com（DDG 常被反爬拦，Bing 兜底）
+    ④ 子网名变体（最弱，只作最后尝试）
+    GitHub owner 通常是人名，仅作低优先候选且必须过相关性校验。"""
     cands, low = [], []
     u = meta.get("url") or ""
     m = re.search(r"(?:twitter|x)\.com/([A-Za-z0-9_]{2,20})", u)
-    if m:
+    if m and m.group(1).lower() not in X_RESERVED:
         cands.append(m.group(1))
+    cands += _x_handles_from_html(site_html)
     base = A.ascii_name(meta.get("name"))
-    q = 'site:x.com "%s" bittensor' % (base or "subnet %d" % meta.get("sn", 0))
-    r = _ddg(q, limit=8)
-    for it in r.get("items", []):
-        mm = re.search(r"x\.com/([A-Za-z0-9_]{2,20})", it["url"])
-        if mm:
-            h = mm.group(1)
-            if h.lower() not in ("i", "intent", "share", "home", "search", "hashtag", "status"):
-                cands.append(h)
+    # 只有官网没挂 X 链接时才去搜索引擎找（搜索通道慢且常被拦，别每次都用）
+    if not _x_handles_from_html(site_html):
+        for it in _web_search_items('site:x.com "%s" bittensor'
+                                   % (base or "subnet %d" % meta.get("sn", 0)), limit=8):
+            mm = re.search(r"x\.com/([A-Za-z0-9_]{2,20})", it.get("url", ""))
+            if mm and mm.group(1).lower() not in X_RESERVED and "/status/" in it.get("url", ""):
+                cands.append(mm.group(1))
     if base and re.fullmatch(r"[A-Za-z0-9_]{3,20}", base):
         cands += [base, base + "_ai", base + "ai"]
     gh = meta.get("github") or ""
     mg = re.search(r"github\.com/([A-Za-z0-9_.\-]+)/", gh)
     if mg and mg.group(1).lower() not in ("bittensor", "opentensor", "orgs"):
         low.append(mg.group(1))
-    return list(dict.fromkeys(cands))[:5], list(dict.fromkeys(low))[:2]
+    return list(dict.fromkeys(cands))[:6], list(dict.fromkeys(low))[:2]
 
 
 # 判断一个 X 号是否真的与本子网相关（避免把开发者个人碎碎念当官方表态）
@@ -529,73 +641,208 @@ X_TOPIC = re.compile(
     r"inference|mining|neuron)")
 
 
-def _x_extract(t):
-    """从 jina 还原的 X 页面里抽账号简介 + 贴文。"""
-    head = t.split("Markdown Content", 1)[1] if "Markdown Content" in t else t
-    bio = ""
-    mb = re.search(r"@[A-Za-z0-9_]{2,20}\s*\n+\s*([^\n\[]{10,220})", head)
-    if mb:
-        bio = mb.group(1).strip()
-    nposts = re.search(r"([0-9,]+)\s+posts", head)
+def _x_post_from_fx(it):
+    """把 fxtwitter 的一条 status 规整成内部结构。"""
+    a = it.get("author") or {}
+    ts = it.get("created_timestamp") or 0
+    try:
+        dt = datetime.datetime.fromtimestamp(int(ts), TZ)
+        at = dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        at = (it.get("created_at") or "")[:16]
+    txt = re.sub(r"https?://t\.co/\S+", "", it.get("text") or "")
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return {"id": str(it.get("id") or ""), "url": it.get("url") or "",
+            "text": txt, "at": at, "ts": int(ts or 0),
+            "author": a.get("screen_name") or "", "author_name": a.get("name") or "",
+            "bio": (a.get("description") or "").strip(),
+            "likes": int(it.get("likes") or 0), "replies": int(it.get("replies") or 0),
+            "reposts": int(it.get("reposts") or 0), "views": int(it.get("views") or 0),
+            "media": bool((it.get("media") or {}).get("all")) if isinstance(it.get("media"), dict)
+                     else bool(it.get("media")),
+            # reposted_by 非空 = 该账号转推了别人的贴（内容不是本人写的，但「转谁」本身是表态）
+            "is_rt": bool(it.get("reposted_by")),
+            "rt_by": (it.get("reposted_by") or {}).get("screen_name") or "",
+            "lang": it.get("lang") or ""}
+
+
+def x_user_posts(handle, pages=2, log=None):
+    """取某账号最近贴文（fxtwitter，可按 bottom 游标翻页）。
+    返回 (profile_dict, [post...])；账号不存在/取不到时 profile 为 None。"""
+    hd = (handle or "").lstrip("@").strip()
+    if not hd:
+        return None, []
+    ok, d = _fx_json(FX_PROFILE % hd)
+    if not ok or not isinstance(d, dict):
+        return None, []
+    prof = None
     posts = []
-    for line in head.splitlines():
-        s = line.strip()
-        if not s.startswith("*"):
+    for it in d.get("results") or []:
+        if it.get("type") not in (None, "status"):
             continue
-        s = re.sub(r"\[!\[Image[^\]]*\]\([^)]*\)\]\([^)]*\)", " ", s)
-        s = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", s)
-        s = re.sub(r"\[!\[[^\]]*\]\]\([^)]*\)", " ", s)          # 残留的空图链
-        s = re.sub(r"\[\]\([^)]*\)", " ", s)                     # 空链接
-        s = re.sub(r"\[([^\]]{2,160})\]\((https?://[^)]+)\)", r"\1", s)
-        s = re.sub(r"https?://\S+", " ", s)
-        s = re.sub(r"^[\*\s\-–—•\[\]]+", "", s).strip()
-        s = re.sub(r"\s+", " ", s)
-        if len(s) < 30 or s.lower().startswith("pinned"):
+        p = _x_post_from_fx(it)
+        if not p["text"]:
             continue
-        posts.append(s[:400])
-        if len(posts) >= 8:
+        if prof is None and p["author"].lower() == hd.lower():
+            prof = {"handle": p["author"], "name": p["author_name"], "bio": p["bio"]}
+        posts.append(p)
+    if prof is None:
+        prof = {"handle": hd, "name": "", "bio": ""}
+    cur = (d.get("cursor") or {}).get("bottom")
+    for _ in range(max(0, pages - 1)):
+        if not cur:
             break
-    return bio, (nposts.group(1) if nposts else ""), posts
+        ok, d2 = _fx_json((FX_PROFILE % hd) + "?cursor=" + urllib.parse.quote(cur))
+        if not ok or not isinstance(d2, dict) or not d2.get("results"):
+            break
+        for it in d2["results"]:
+            if it.get("type") not in (None, "status"):
+                continue
+            p = _x_post_from_fx(it)
+            if p["text"]:
+                posts.append(p)
+        nxt = (d2.get("cursor") or {}).get("bottom")
+        if not nxt or nxt == cur:
+            break
+        cur = nxt
+    if log:
+        log("    X @%s：%d 条贴文（含转推）" % (hd, len(posts)))
+    return prof, posts
 
 
-def src_x(meta):
-    """X（推特）：定位官方账号 → 经 r.jina.ai 镜像读时间线 → **身份校验**。
+def x_tweet(url_or_id, log=None):
+    """按链接/ID 抓单条 X 帖（用户在反馈里贴的链接必须能读出来，不能只写「未获取」）。"""
+    m = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]{2,20})/status/(\d+)", url_or_id or "")
+    if m:
+        hd, tid = m.group(1), m.group(2)
+    else:
+        m2 = re.search(r"\b(\d{15,25})\b", url_or_id or "")
+        if not m2:
+            return None
+        hd, tid = "_", m2.group(1)
+    ok, d = _fx_json(FX_TWEET % (hd, tid) if hd != "_" else
+                     "https://api.fxtwitter.com/status/%s" % tid)
+    if not ok or not isinstance(d, dict):
+        return None
+    t = d.get("tweet") or {}
+    if not t:
+        return None
+    p = _x_post_from_fx(t)
+    # 顶层 tweet 可能不含 author 详情，补一次
+    if not p["bio"]:
+        p["bio"] = ((t.get("author") or {}).get("description") or "").strip()
+    if log:
+        log("    X 单帖已读取：@%s %s「%s…」" % (p["author"], p["at"], p["text"][:40]))
+    return p
 
-    校验分三级，报告里必须按级别标注，不能用 KOL 的话冒充官方表态：
-      official  = 账号名或简介里出现该子网名（基本可认定为项目方账号）
-      thirdparty= 账号本身不是项目方，但贴文里点名了该子网（只能标「第三方提及」）
-      其余       = 丢弃（同名路人和泛 Bittensor 大 V 一律不要）
+
+def x_links_in(text):
+    """从任意文本（群聊、用户反馈）里抽出 X 帖链接，去重保序。"""
+    out = []
+    for m in re.finditer(r"(?:https?://)?(?:www\.)?(?:x|twitter)\.com/[A-Za-z0-9_]{2,20}/status/\d+",
+                         text or ""):
+        u = m.group(0)
+        if not u.startswith("http"):
+            u = "https://" + u
+        if u not in out:
+            out.append(u)
+    return out
+
+
+# Bittensor 生态圈的几个「广播站」账号：它们发的是全生态资讯，
+# 单个子网的官方号往往不转，但社区消息面主要来自这里（如 opentensor 报
+# 「Chutes 与腾讯云合作」）。按需过滤出提到本子网的贴文。
+X_ECO_ACCOUNTS = ("opentensor", "taostats", "bittensor")
+
+
+def x_eco_posts(meta, days=14, log=None, skip_handles=None):
+    """抓生态广播号的近期贴文，挑出点名本子网的（子网名 / SN 编号）。
+    身份记为「生态账号提及」——比子网官方号弱，但比路人强，必须如实标注。
+
+    skip_handles：本子网官方号已经在 src_x 里抓过了，这里跳过，避免重复请求。"""
+    name = (A.ascii_name(meta.get("name")) or "").strip()
+    sn = int(meta.get("sn") or 0)
+    skip = {h.lower().lstrip("@") for h in (skip_handles or []) if h}
+    pats = []
+    if name and len(name) >= 3:
+        pats.append(re.compile(r"\b%s\b" % re.escape(name), re.I))
+    pats.append(re.compile(r"(?i)\bsubnet\s*%d\b|\bSN\s*%d\b|\bnetuid\s*%d\b" % (sn, sn, sn)))
+    lo_ts = int((datetime.datetime.now(TZ) -
+                 datetime.timedelta(days=max(3, int(days or 14)))).timestamp())
+    hits, seen = [], set()
+    for h in X_ECO_ACCOUNTS:
+        if h.lower() in skip:
+            continue
+        try:
+            _p, posts = x_user_posts(h, pages=1)
+        except Exception:
+            continue
+        for p in posts:
+            if p["id"] in seen or p["ts"] < lo_ts:
+                continue
+            hit = [x.pattern for x in pats if x.search(p["text"])]
+            if not hit:
+                continue
+            # SN 编号正则太宽（"subnet 8" 会命中 subnet 80），要求同时出现名字或独立编号
+            if name and len(name) >= 3 and not pats[0].search(p["text"]):
+                m = re.search(r"(?i)\bsubnet\s*%d\b|\bSN\s*%d\b|\bnetuid\s*%d\b" % (sn, sn, sn),
+                              p["text"])
+                if not m:
+                    continue
+            seen.add(p["id"])
+            hits.append(p)
+    hits.sort(key=lambda x: -x["ts"])
+    if hits and log:
+        log("    X 生态圈：%d 条提及 SN%d/%s" % (len(hits), sn, name or "-"))
+    return hits
+
+
+def src_x(meta, site_html="", extra_links=None, days=14, log=None):
+    """X（推特）：读官方账号时间线 + 用户在群里/反馈里贴出的具体帖子。
+
+    身份分级（报告里必须按级别标注，不能用 KOL 的话冒充官方表态）：
+      official  = 账号名/简介里出现该子网名，或该号就是官网自己挂的 X 链接
+      thirdparty= 账号本身不是项目方，但贴文点名了该子网（只能标「第三方提及」）
+    其余一律丢弃，不把同名路人和泛 Bittensor 大 V 当官方。
     """
-    hi, lo = _x_candidates(meta)
-    if not hi and not lo:
-        return {"src": "X", "ok": False, "err": "未找到官方 X 账号线索", "posts": []}
+    extra_links = list(extra_links or [])
     base = (A.ascii_name(meta.get("name")) or "").lower()
-    tried, third = [], None
-    for h, trusted in [(x, True) for x in hi] + [(x, False) for x in lo]:
-        ok, t = fetch("https://r.jina.ai/https://x.com/%s" % h, timeout=40)
-        if not ok or "Markdown Content" not in t:
+    sn = meta.get("sn", 0)
+    hi, lo = _x_candidates(meta, site_html=site_html)
+    site_handles = {h.lower() for h in _x_handles_from_html(site_html)}
+    tried, third, best = [], None, None
+    all_posts, official = [], None
+    # 官网挂出来的 X 号优先试：命中就不用再看后面的候选（实测每次翻页约 4 秒，
+    # 逐个试完 5-6 个候选要 50 秒以上，投研整体会超时）。
+    pri = sorted(hi, key=lambda h: 0 if h.lower() in site_handles else 1)
+    for h in pri + [x for x in lo if x]:
+        trusted = h not in lo
+        prof, posts = x_user_posts(h, pages=2, log=log)
+        if not prof:
             tried.append("%s:不可达" % h)
             continue
-        if "This account doesn't exist" in t or "Profile Not Found" in t:
-            tried.append("%s:不存在" % h)
-            continue
-        bio, nposts, posts = _x_extract(t)
         if not posts:
             tried.append("%s:无公开贴文" % h)
             continue
-        blob = " ".join([bio] + posts).lower()
-        if any(k in blob for k in X_TOPIC.findall(blob)) and not X_TOPIC.search(blob):
-            tried.append("%s:主题无关" % h)
-            continue
+        own = [p for p in posts if p["author"].lower() == h.lower() and not p["is_rt"]]
+        blob = " ".join([prof.get("bio") or ""] + [p["text"] for p in own]).lower()
         topic_hits = len(X_TOPIC.findall(blob))
-        name_in_id = bool(base) and (base in h.lower() or base in (bio or "").lower())
-        name_in_posts = bool(base) and base in " ".join(posts).lower()
-        rec = {"src": "X", "ok": True, "handle": h, "bio": bio, "nposts": nposts,
-               "posts": posts, "topic_hits": topic_hits}
-        if name_in_id:
+        name_in_id = bool(base) and (base in h.lower() or base in (prof.get("bio") or "").lower())
+        name_in_posts = bool(base) and base in " ".join(p["text"] for p in own).lower()
+        is_site = h.lower() in site_handles
+        rec = {"src": "X", "ok": True, "handle": prof.get("handle") or h,
+               "bio": prof.get("bio") or "", "nposts": str(len(posts)),
+               "posts": [p["text"] for p in own[:10]], "items": posts,
+               "links": [p["url"] for p in own[:10]],
+               "topic_hits": topic_hits, "via": "fxtwitter"}
+        if trusted and (is_site or name_in_id) and (topic_hits >= 1 or is_site):
             rec["level"] = "official"
-            rec["note"] = "账号名/简介含子网名，认定为项目方账号"
-            return rec
+            rec["note"] = ("官网挂出的 X 账号" if is_site
+                           else "账号名/简介含子网名，认定为项目方账号")
+            if official is None:
+                official = rec
+                all_posts += own
+            break        # 官方号已定，不再试其它候选（省时间，也避免误配别人的号）
         if name_in_posts and topic_hits >= 1:
             rec["level"] = "thirdparty"
             rec["note"] = "非项目方账号，但贴文点名本子网 —— 只可作第三方提及"
@@ -603,13 +850,57 @@ def src_x(meta):
             tried.append("%s:第三方提及" % h)
             continue
         tried.append("%s:与本子网无关（命中 %d）" % (h, topic_hits))
-    if third:
-        return third
-    return {"src": "X", "ok": False, "err": "；".join(tried[-3:]) or "账号不可达", "posts": []}
+        if best is None and topic_hits >= 2:
+            best = rec
+
+    # 用户直接给的帖子链接：优先级最高，哪怕不是官方号也一定读出来（这是用户明确要看的）
+    linked = []
+    for u in extra_links[:6]:
+        p = x_tweet(u, log=log)
+        if p:
+            p["from"] = "用户提供链接"
+            linked.append(p)
+
+    rec = official or third or best
+    if rec is None and linked:
+        # 官方号没找到，但用户给了链接：以链接为准建一条记录
+        rec = {"src": "X", "ok": True, "handle": linked[0]["author"],
+               "bio": "", "nposts": str(len(linked)), "posts": [p["text"] for p in linked],
+               "items": linked, "links": [p["url"] for p in linked],
+               "topic_hits": 0, "via": "fxtwitter",
+               "level": "thirdparty",
+               "note": "仅取到用户提供的具体帖子，未确认官方账号归属"}
+    if rec:
+        # 合并用户给的链接（按 id 去重），让模型一定看得到这几条
+        items = {p["id"]: p for p in (rec.get("items") or [])}
+        for p in linked:
+            if p["id"] and p["id"] not in items:
+                items[p["id"]] = p
+        merged = sorted(items.values(), key=lambda x: -x["ts"])
+        # 只留近 N 天（官方时间线可能含很久以前的贴），但用户给的链接不受时间窗限制
+        lo_ts = int((datetime.datetime.now(TZ) -
+                     datetime.timedelta(days=max(3, int(days or 14)))).timestamp())
+        kept = [p for p in merged if p["ts"] >= lo_ts or p.get("from")]
+        rec["items"] = merged
+        rec["recent"] = kept
+        rec["posts"] = [p["text"] for p in kept[:12]]
+        rec["links"] = [p["url"] for p in kept[:12]]
+        rec["linked"] = linked
+        rec["nposts"] = str(len(merged))
+        if log:
+            log("    X 结论：@%s（%s），近 %d 天 %d 条，含用户提供 %d 条"
+                % (rec.get("handle"), rec.get("level") or "未定级",
+                   int(days or 14), len(kept), len(linked)))
+        return rec
+    return {"src": "X", "ok": False, "err": "；".join(tried[-3:]) or "账号不可达",
+            "posts": [], "items": [], "recent": []}
 
 
-def collect(meta, sn, log=print):
-    """并发度不做，串行抓取（源少、且要统一走代理，串行更稳）。"""
+def collect(meta, sn, log=print, extra_x_links=None, days=14):
+    """并发度不做，串行抓取（源少、且要统一走代理，串行更稳）。
+
+    X 放在官网之后：官网页面里挂的 X 账号是最可靠的账号来源，
+    所以先把官网 HTML 拿到手，再把其中的 X 链接喂给 src_x 定位。"""
     jobs = [
         ("bittensor.ai", lambda: src_bittensor_ai(sn)),
         ("taostats", lambda: src_taostats(sn)),
@@ -618,7 +909,6 @@ def collect(meta, sn, log=print):
         ("GitHub", lambda: src_github(meta)),
         ("Google News", lambda: src_news(meta, sn)),
         ("DuckDuckGo", lambda: src_web_search(meta, sn)),
-        ("X", lambda: src_x(meta)),
     ]
     res = {}
     for name, fn in jobs:
@@ -629,6 +919,35 @@ def collect(meta, sn, log=print):
         res[name] = r
         log("  投研抓取 %-12s %s%s" % (name, "OK" if r.get("ok") else "失败",
                                      "" if r.get("ok") else "（%s）" % r.get("err", "")[:80]))
+    # 官网原文（HTML）用于定位官方 X 账号
+    site_html = (res.get("官网") or {}).get("html") or ""
+    try:
+        r = src_x(meta, site_html=site_html, extra_links=extra_x_links,
+                  days=days, log=log)
+    except Exception as e:
+        r = {"src": "X", "ok": False, "err": str(e)[:160], "posts": [], "recent": []}
+    res["X"] = r
+    log("  投研抓取 %-12s %s%s" % ("X", "OK" if r.get("ok") else "失败",
+                                 "" if r.get("ok") else "（%s）" % r.get("err", "")[:80]))
+    # 生态广播号里点名本子网的贴文（官方号没动静时，这里往往是唯一的外部消息源）
+    try:
+        # 官方号已经抓过（含两条转发），这里跳过它，只补其它生态广播号
+        _skip = [res["X"].get("handle")] if (res.get("X") or {}).get("ok") else []
+        eco = x_eco_posts(meta, days=days, log=log, skip_handles=_skip)
+    except Exception as e:
+        eco = []
+        log("  投研抓取 %-12s 失败（%s）" % ("X 生态圈", str(e)[:80]))
+    if eco:
+        res["X 生态圈"] = {"src": "X 生态圈", "ok": True, "items": eco,
+                          "handle": "、".join(sorted({p["author"] for p in eco}))}
+    else:
+        # 「生态账号近期没提到本子网」是**正常结果**，不是抓取失败：
+        # 打成 ✗ 会让日志和报告头部显示成故障，误导后续排查。
+        res["X 生态圈"] = {"src": "X 生态圈", "ok": True, "items": [], "skipped": True,
+                          "err": "近 %d 天生态账号无点名本子网的贴文" % int(days or 14)}
+    # 合并进 X 源，好让 _ext_block 一并输出（生态号必须标成「生态账号提及」）
+    if eco and res.get("X"):
+        res["X"]["eco"] = eco
     return res
 
 
@@ -929,7 +1248,7 @@ def rewrite_bad_sources(digest, hits, sources, llm=None, log=print):
 
 
 # ------------------------------------------------------------------ 提示词
-RESEARCH_SYSTEM_PROMPT = (
+_RESEARCH_PROMPT_TMPL = (
     "你是 Bittensor 子网的买方研究员。输入会分成几块：【本地群聊档案】（Discord 真实讨论，带日期时间，"
     "**可能没有**）、【此前投研结论】（该子网档案里存的历史报告，只有做过投研才会有）、"
     "【链上/数据站事实】（抓取到的页面字段）、【官方与公开信息】（官网、GitHub、新闻、搜索、X）、"
@@ -940,8 +1259,20 @@ RESEARCH_SYSTEM_PROMPT = (
     "先读【本地群聊档案】与【此前投研结论】，把「档案里已经确认过的事实」当成**起点**；"
     "再读外部源，专门找**上次报告之后的新增变化**（新公告、新解仓、新数据、群里新出现的说法），"
     "把这些变化写进时间线。**已经在上次报告里写过、这次没有新进展的事，不要重复罗列**。\n"
-    "报告只回答三个问题：**什么时候发生了什么（时间线）· 现在什么价（当前价格）· 接下来盯什么（预期跟踪）**。"
+    "报告只回答四个问题：**什么时候发生了什么（时间线）· 现在什么价（当前数据）· "
+    "外面刚说了什么（最新资讯）· 接下来盯什么（预期跟踪）**。"
     "除此之外的分析、感慨、免责声明、方法论说明，一律不要。\n"
+    "\n【最新资讯是必答题，不是选答（本条优先级极高）】\n"
+    "群聊只是「社区在聊什么」，**不等于外部世界发生了什么**。用户明确要求："
+    "不能出现「明明有新资讯，报告里却一条都没有」。所以：\n"
+    "1. 输入里只要 [X] / [X 生态圈提及] / [新闻] / [官网] / [GitHub] 段里**有任何一条**"
+    "近 %(days)d 天内的新内容，就必须出现在「📰 最新资讯」段里，一条都不许漏；\n"
+    "2. 特别是 [X] 段里标了「（用户提供）」的贴文——那是用户自己贴过来要你看的，"
+    "**必须逐条写进去**，写清发布者、日期、原话要点；\n"
+    "3. 只有某源**真的没抓到**（输入里明确写着「未获取」）时，才可以在该段写「X：未获取」；"
+    "不许因为「内容太琐碎」「拿不准」就整段略过；\n"
+    "4. 官方号时间线里看似日常的运营贴，只要含**新事实**（新合作、新上线、新功能、新数据、"
+    "人事变动、被谁提到），就算资讯；纯表情、纯口号、纯抽奖不算。\n"
     "\n【事实纪律（违反即作废）】\n"
     "1. 每条事实后面必须带来源标记：`[群聊 MM-DD]`、`[档案]`（引用档案里的历史投研结论时用）、"
     "`[taostats]`、`[bittensor.ai]`、`[dtaoscan]`、`[官网]`、`[GitHub]`、`[新闻]`、`[X]`、`[搜索]`；"
@@ -960,8 +1291,11 @@ RESEARCH_SYSTEM_PROMPT = (
     "8. **没有本地档案时**：绝对不许出现「群内有人说」「社区在传」「大家认为」这类表述，"
     "只依据外部源写时间线。\n"
     "9. 年份只在时间线首条出现一次，后面只写 `月-日`；价格只写当前价，不写历史价对比、不写涨跌幅。\n"
-    "\n【输出结构（只有这三段，严格按顺序，不要加别的段）】\n"
-    "\n**🗓 重要事件时间线**（这是报告主体，占 60% 以上篇幅）\n"
+    "10. **X 贴文只能按输入里的原文引用**：不要把英文长段落直接照搬，翻成中文、保留关键英文专有名词；"
+    "标了「生态账号提及」的是第三方转述，**不得**写成「官方宣布」；"
+    "链接要不要给都可以，但作者名与日期必须准确。\n"
+    "\n【输出结构（只有这四段，严格按顺序，不要加别的段）】\n"
+    "\n**🗓 重要事件时间线**（报告主体，占 50%% 以上篇幅）\n"
     "**每行一条，以 `- ` 开头，条与条之间不要空行**。格式固定为：`- 月-日 · 事件 · 验证状态`\n"
     "- **日期写法**：同一份报告里年份只出现一次。**首条**写 `2026-10-30`，"
     "其后各条一律只写 `10-31`、`11-06`，**不许再重复 2026**。跨年时才重新写年份。\n"
@@ -977,22 +1311,39 @@ RESEARCH_SYSTEM_PROMPT = (
     "没有新事就少写一条，不要在时间线里塞占位行。\n"
     "- **GitHub 的逐条 commit 不算事件**——数据站「N commits/30d」与 GitHub「最近提交日期」"
     "是同一事实的两种表述，不得判为冲突；开发节奏最多合并成一条。\n"
+    "- **时间线不止群聊**：官方 X 帖、生态账号提及、新闻、官网更新、GitHub release 都要按真实日期进时间线，"
+    "不要只写群里说过什么。\n"
     "\n**📊 当前数据**（只保留**当前价格**，一行即可；不要市值/池子/emission/tempo/epoch 等任何其它指标。"
     "价格必须照抄抓取原文，不许换算；抓不到就写「当前价格：未获取」。格式：`当前价格：0.002504 τ [bittensor.ai]`）\n"
+    "\n**📰 最新资讯**（外部世界最近说了什么；2-6 条，每条一行，格式 `- 月-日 · @账号/媒体 · 要点 [X]`）\n"
+    "- 这一段的唯一职责是**补群聊看不到的信息**：官方发帖、合作、上线、媒体报道、生态账号点名、"
+    "GitHub 发版。已经写进时间线的同一事件，这里只补一句「详见时间线」，或换个角度写影响；不要整段复述。\n"
+    "- **所有源都没抓到**才写「本期无外部资讯（X/新闻/官网 均未获取）」，并如实写清哪个源失败；"
+    "**不许**在明明抓到内容的情况下留空或写「无」。\n"
     "\n**📌 预期跟踪**（接下来该盯什么，4-6 条，每条必须可验证）\n"
     "格式：`- 盯什么 → 什么情况算兑现 / 什么情况算证伪`。"
-    "要具体到能拿数据核对（例如「owner 是否在 30 天内继续解仓 → 解仓比例再升 5% 即证伪回购承诺」），"
+    "要具体到能拿数据核对（例如「owner 是否在 30 天内继续解仓 → 解仓比例再升 5%% 即证伪回购承诺」），"
     "不要写「关注官方动态」这类空话。\n"
     "\n【禁止事项】\n"
     "不要写「一句话结论」段、不要写「事实基线」（只留当前价格那一行）、不要写「交叉验证矩阵」段、"
     "不要写「群内预期差」段、不要写「风险与未证实」段——"
     "**验证状态已经跟在每条事件后面了，不需要再单列一节复述**。"
-    "也不要写开场白、不要写总结、不要写「综上所述」。\n"
-    "\n【篇幅】全文 **600-1600 字**。**简短是硬要求，不是建议**：能一句话说清就别写两句，"
-    "不许为了显得详尽而堆形容词、堆免责声明、堆重复表述。宁可 600 字全是干货。\n"
+    "也不要写开场白、不要写总结、不要写「综上所述」。"
+    "**更不要在正文里写「（45-60字）」「（约 50 字）」这类字数标注**——那是给你自己看的约束，不是内容。\n"
+    "\n【篇幅】**只有上限、没有下限**：全文不超过 **1600 字**。"
+    "**简短是硬要求，不是建议**：能一句话说清就别写两句，"
+    "本期只有 3 件事，就写 3 条、四百字收工，不要为了显得详尽而堆形容词、堆免责声明、堆重复表述。\n"
     "超过 1600 字会被代码层强制压缩（只删不增），可能把你想保留的事件删掉。\n"
     "\n【语言】中文；英文专有名词、代币名、代码库名保留原文。不用 # 标题、不用 > 引用，手机端可读。"
-)
+)              # 注意：这里不能就地 % 格式化，模板里含 %% 字面量，交给 research_prompt 统一处理
+
+
+def research_prompt(days=14):
+    """投研系统提示词（天数可配，默认 14 天窗口）。"""
+    return _RESEARCH_PROMPT_TMPL % {"days": int(days or 14)}
+
+
+RESEARCH_SYSTEM_PROMPT = research_prompt(14)
 
 RESEARCH_VERIFY_PROMPT = (
     "你是投研报告的合规校对员，不是作者。输入是【原始素材】+【报告初稿】。\n"
@@ -1070,14 +1421,54 @@ def _ext_block(sources, meta):
     else:
         blocks.append("[搜索] 未获取")
     x = sources.get("X") or {}
-    if x.get("posts"):
-        lvl = ("项目方账号（可作官方表态）" if x.get("level") == "official"
+    recent = x.get("recent") or []
+    if recent:
+        lvl = ("项目方官方账号（可作官方表态）" if x.get("level") == "official"
                else "第三方账号（**只能作第三方提及，不得写成官方公告**）")
-        blocks.append("[X @%s] 身份：%s；粉丝贴文 %s 条；简介：%s\n  "
-                      % (x.get("handle", ""), lvl, x.get("nposts", "?"), (x.get("bio") or "")[:140])
-                      + "\n  ".join("- " + p[:240] for p in x["posts"][:6]))
+        head = ("[X @%s] 身份：%s（%s）；简介：%s；本次抓到 %d 条贴文（按时间从新到旧，"
+                "每条已带准确 UTC+8 时间与互动数）"
+                % (x.get("handle", ""), lvl, x.get("note") or x.get("via") or "",
+                   (x.get("bio") or "")[:200].replace("\n", " "),
+                   len(recent)))
+        lines = []
+        # 只给最近 10 条：X 时间线动辄 20+ 条，全塞进去会把 Chat 素材挤到没边，
+        # 模型也只会重复前几条。用户给的链接永远排最前（已按时间倒序，但单独保底）。
+        _show = recent[:10]
+        for p in _show:
+            if p.get("from"):
+                tagx = "（用户提供的链接）"
+            elif p.get("is_rt"):
+                tagx = "（@%s 转推 @%s 的贴）" % (p.get("rt_by") or x.get("handle") or "?",
+                                              p.get("author") or "?")
+            else:
+                tagx = ""
+            hot = ""
+            if p.get("likes", 0) >= 100:
+                hot = "，%d 赞" % p["likes"]
+            elif p.get("views", 0) >= 5000:
+                hot = "，%d 次浏览" % p["views"]
+            lines.append("  - [%s] @%s%s%s：%s"
+                         % (p.get("at") or "-", p.get("author") or "?", tagx, hot,
+                            (p.get("text") or "")[:520].replace("\n", " ")))
+            if p.get("url"):
+                lines.append("    ↳ %s" % p["url"])
+        blocks.append(head + "\n" + "\n".join(lines))
+    elif x.get("ok"):
+        blocks.append("[X @%s] 账号可达但时间窗内无新贴文（简介：%s）"
+                      % (x.get("handle", ""), (x.get("bio") or "")[:140]))
     else:
         blocks.append("[X] 未获取（%s）——不得据此推断官方态度" % x.get("err", ""))
+    # 生态广播号（opentensor / taostats / bittensor）里点名本子网的贴文：
+    # 这类是「第三方权威提及」，既不是子网官方公告，也不是路人闲聊，必须单独标注。
+    eco = x.get("eco") or (sources.get("X 生态圈") or {}).get("items") or []
+    if eco:
+        blocks.append("[X 生态圈提及] 以下贴文来自生态广播账号（**不是本子网官方公告**，"
+                      "引用时标「生态账号提及」）：\n"
+                      + "\n".join("  - [%s] @%s（%d 赞）：%s"
+                                  % (p.get("at") or "-", p.get("author") or "?",
+                                     p.get("likes", 0),
+                                     (p.get("text") or "")[:400].replace("\n", " "))
+                                  for p in eco[:8]))
     return "\n".join(blocks)
 
 
@@ -1295,16 +1686,28 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     log("===== 子网投研启动：SN%d %s =====" % (sn, meta["name"] or "（名称待反查）"))
     if feedback:
         log("   本次带用户反馈（将作为权威修正写入输入）：%s" % feedback[:100])
+    # 群里/用户反馈里贴出的 X 链接：用户既然给了链接，就必须真去读出来。
+    # 这是「明明知道有新资讯却什么都没提供」的最直接来源。
+    extra_links = x_links_in(feedback)
+    # 群聊档案里出现过的 X 链接同样是「社区看到的最新资讯」，一并读（近期的优先）
+    if arc:
+        _chat_txt = "\n".join(e.get("text") or ""
+                              for ents in (arc.get("days") or {}).values() for e in ents)
+        for u in x_links_in(_chat_txt):
+            if u not in extra_links:
+                extra_links.append(u)
+    extra_links = extra_links[:8]
+    if extra_links:
+        log("   待读取的 X 帖链接：%d 条（来自反馈/群聊）" % len(extra_links))
     log("② 全网抓取增补最新资讯（链上数据站 / 官网 / GitHub / 新闻 / 搜索 / X）…")
-    sources = collect(meta, sn, log=log)
+    sources = collect(meta, sn, log=log, extra_x_links=extra_links, days=days)
     # 知识库缺名称/官网时，用数据站页面反查补齐，再补抓依赖这些字段的源（官网/GitHub/搜索/X）
     before = (meta.get("name"), meta.get("url"), meta.get("github"))
     meta = enrich_meta(meta, sources, log=log)
     if (meta.get("name"), meta.get("url"), meta.get("github")) != before:
         for name, fn in (("官网", lambda: src_website(meta)),
                          ("GitHub", lambda: src_github(meta)),
-                         ("DuckDuckGo", lambda: src_web_search(meta, sn)),
-                         ("X", lambda: src_x(meta))):
+                         ("DuckDuckGo", lambda: src_web_search(meta, sn))):
             if sources.get(name, {}).get("ok"):
                 continue
             try:
@@ -1313,12 +1716,29 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
                 r = {"src": name, "ok": False, "err": str(e)[:120]}
             sources[name] = r
             log("  投研补抓 %-12s %s" % (name, "OK" if r.get("ok") else "失败"))
+        if not (sources.get("X") or {}).get("ok"):
+            try:
+                r = src_x(meta, site_html=(sources.get("官网") or {}).get("html") or "",
+                          extra_links=extra_links, days=days, log=log)
+            except Exception as e:
+                r = {"src": "X", "ok": False, "err": str(e)[:120], "recent": []}
+            sources["X"] = r
+            log("  投研补抓 %-12s %s" % ("X", "OK" if r.get("ok") else "失败"))
     text_block = build_input(arc, sources, meta, days=days,
                              cap_per_day=int(cfg.get("research_max_items_per_day", 260) or 260),
                              prev_arc=prev_arc, today=today, arc_dir=arc_dir)
     if feedback:
         # 用户反馈单独成段，且明确标「权威修正」：模型很吃这一套，
         # 只把反馈混在正文里它常常当成又一条群聊传闻，改不动已经写下的判断。
+        _xr = (sources.get("X") or {}).get("linked") or []
+        _xnote = ""
+        if extra_links and _xr:
+            _xnote = ("\n【重要】反馈里的 X 链接已真实抓取到原文，正文在上面的 [X] 段里（标注了"
+                      "「用户提供」）。**必须**把这些内容写进时间线并注明日期与发布者；"
+                      "**禁止**再写「帖子内容未获取/待确认」这类话——原文就在输入里。\n")
+        elif extra_links and not _xr:
+            _xnote = ("\n【说明】反馈里的 X 链接本次抓取失败（可能已被删除或设为私密），"
+                      "如需提及只能写「链接不可访问」，不得编造其内容。\n")
         text_block += (
             "\n\n===== 用户反馈（最高优先级，必须据此修正）=====\n"
             "%s\n"
@@ -1329,7 +1749,7 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             "并在时间线里补一条该改名的说明；不得再出现旧名作为当前名称使用。\n"
             "3. 反馈里提到但抓取素材中没有的事实，按「⚠️未验证（用户反馈，待链上/官方确认）」处理，"
             "不要伪造成已验证。\n"
-            "4. 重新核对整篇报告里与反馈冲突的表述，逐条改掉；不要只改标题。" % feedback)
+            "4. 重新核对整篇报告里与反馈冲突的表述，逐条改掉；不要只改标题。%s" % (feedback, _xnote))
     _nhist = len((prev_arc or {}).get("reports") or [])
     log("投研素材：%d 字符（%s + 外部 %d 源，成功 %d 源%s）"
         % (len(text_block), "群聊" if arc else "无群聊", len(sources),
@@ -1340,30 +1760,36 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         def llm(body, sp=None):
             return pipeline.call_deepseek(cfg, body, system_prompt=sp)
 
-    digest = llm(text_block, RESEARCH_SYSTEM_PROMPT)
+    digest = llm(text_block, research_prompt(days))
+    # 字数标注清除：模型会把「每条 45-60 字」这类配额直接抄进正文，
+    # 变成「**kτwτ**（45-60字）：…」——读者看到的是提示词不是内容，必须先删掉。
+    try:
+        digest = pipeline.strip_length_tags(digest or "")
+    except Exception:
+        pass
     # 二次校对：核对数字/来源标记/传闻降级（失败不阻断，报告仍可用）
     # 注意 sanitize_fn 必须传恒等函数：投研报告要保留英文来源标签与人名，
     # 日报那套 sanitize_digest 会把英文全译成中文，反而破坏来源可追溯性。
     try:
         digest = pipeline.polish_digest(cfg, text_block, digest,
                                         verify_prompt=RESEARCH_VERIFY_PROMPT,
-                                        sanitize_fn=lambda s: s)
+                                        sanitize_fn=lambda s: pipeline.strip_length_tags(s))
     except Exception as e:
         log("投研校对跳过（%s）" % e)
     digest = (digest or "").strip()
-    # 字数闸门：600-1600 字。用户要求「太多废话了，我只要时间、重要事件、预期跟踪」，
-    # 所以这里是真的压短，上限就是手机端一屏半的阅读量。
+    # 字数闸门：只限上限 1600 字（第四段「最新资讯」要留出空间），不设下限。
     # rounds=3：模型每轮只删一部分，两轮常常压不到位（实测 5061→3465），三轮才收得住。
     try:
-        digest = pipeline.compress_digest(cfg, digest, 500, 1600, rounds=3,
+        digest = pipeline.compress_digest(cfg, digest, 0, 1600, rounds=3,
                                           system_prompt=RESEARCH_COMPRESS_PROMPT,
-                                          sanitize_fn=lambda s: s,
-                                          cut_hint="报告只有三段（时间线 / 当前数据 / 预期跟踪）。"
+                                          sanitize_fn=lambda s: pipeline.strip_length_tags(s),
+                                          cut_hint="报告只有四段（时间线 / 当前数据 / 最新资讯 / 预期跟踪）。"
                                                    "压缩顺序：① 先删时间线里最不重要的整条事件（合并同类、去掉铺垫词）；"
                                                    "② 每条事件压到一行、去掉形容词与重复解释，**但日期、事件核心、"
                                                    "✅已验证/⚠️未验证标记必须留着**；"
                                                    "③ 预期跟踪压到 4 条；"
-                                                   "④ 「当前价格」那一行永远不许删。"
+                                                   "④ 「当前价格」那一行与「最新资讯」段永远不许删；"
+                                                   "⑤ 删掉时间线与最新资讯之间完全重复的表述，只留一处。"
                                                    "全部数字、来源标记、人名、SN 编号必须原样保留。")
     except Exception as e:
         log("投研压缩跳过（%s）" % e)
@@ -1406,11 +1832,19 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     fname = "research_%s.md" % today
     path = os.path.join(d, fname)
     ok_srcs = [k for k, v in sources.items() if v.get("ok")]
+
+    def _src_state(k, v):
+        if not v.get("ok"):
+            return "%s✗" % k
+        if not (v.get("items") or v.get("recent") or v.get("facts") or v.get("posts")):
+            return "%s✓（本期无内容）" % k
+        return "%s✓" % k
+
     with open(path, "w", encoding="utf-8") as f:
         f.write("# %s\n\n> 生成于 %s ｜ 数据源：%s\n> 抓取状态：%s\n\n%s\n" % (
             title, datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
             ("本地档案 + " if arc else "（无本地档案）纯全网 ") + "、".join(ok_srcs),
-            "；".join("%s%s" % (k, "✓" if v.get("ok") else "✗") for k, v in sources.items()),
+            "；".join(_src_state(k, v) for k, v in sources.items()),
             digest))
     log("③ 报告已生成：%s（%d 字）" % (path, len(re.sub(r"\s", "", digest))))
     # 投研产出增量写回子网档案：报告正文 + 结论 + 时间线 + 数据源一起入库；

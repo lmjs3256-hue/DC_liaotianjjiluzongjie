@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -762,11 +762,12 @@ SYSTEM_PROMPT = (
     "- 忽略：纯表情包、水聊、无信息量的喊单、与 Bittensor 无关的话题。\n"
     "\n"
     "【输出结构（严格按顺序；无内容的小节写「暂无」或省略；所有小节标题都用 **加粗**）】\n"
-    "**🔥 必读重点**（5-7 条，当天最该知道的全部内容；每条一句说清「谁/什么 + 关键结论」，长度控制在 50-70 字，"
+    "**🔥 必读重点**（**有几件事写几条，通常 3-7 条**，当天最该知道的全部内容；"
+    "每条一句说清「谁/什么 + 关键结论」，写得越短越好、意思说全即可，"
     "并把关键人物、**SN编号/子网名**、事件用 **加粗**；子网异动、上线、rug、机制变更、算力变化都写在这里，"
     "用 ⚠️ 或 ✅ 标注。**本节即子网动向的唯一出口，不要再单列子网汇总小节，避免重复**）\n"
-    "**👥 重要人物观点**（点名 **@人物/开发者**，他讲了什么、对什么有影响；与上面重复的事实不用复述，只补充观点与依据；普通群友无关发言不列）\n"
-    "**📎 其他细节**（补遗：前面没覆盖但有价值的细节，确保不错过）\n"
+    "**👥 重要人物观点**（点名 **@人物/开发者**，他讲了什么、对什么有影响；与上面重复的事实不用复述，只补充观点与依据；普通群友无关发言不列；**没有值得单列的就不写这一节**）\n"
+    "**📎 其他细节**（补遗：前面没覆盖但有价值的细节；**没有就整节省略**，不要硬凑）\n"
     "**💡 一句话总结**（当天全局判断，一句收束）\n"
     "\n"
     "【不要输出潜力观察】「潜力观察/布局建议」由另一个专门流程单独生成，日报正文中**不要**出现该板块，"
@@ -782,12 +783,20 @@ SYSTEM_PROMPT = (
     "- 客观、不臆测、引用具体编号与名字。\n"
     "\n"
     "【篇幅与精炼（务必遵守，写长了即不合格）】\n"
-    "- **全文 1100-1400 字**（含标点），手机两屏内能读完；写不到下限也不要注水。\n"
-    "- 配额：🔥 必读重点 **5-7 条**，每条 **50-70 字**；👥 重要人物观点 **3-5 条**，每条 **45-60 字**；"
-    "📎 其他细节 **最多 6 条**，每条 **35-50 字**；💡 一句话总结 **40-60 字**。\n"
+    "- **只有字数上限，没有下限**：全文**不超过 1200 字**（含标点）。"
+    "**内容少就按少的写**——当天只有 3 件事，就写 3 条、300 字收工，"
+    "不要为了「看起来完整」而稀释、铺陈、补背景。简洁 + 信息全 = 合格；长而稀 = 不合格。\n"
+    "- 条数以「有几件事」为准，绝不凑数：一件事就一条，五件事就五条；"
+    "把一件事拆成两三条、或把无关小事塞进「其他细节」，都算凑字数。\n"
+    "- **绝对不许在正文里写任何字数标注**：不写「（45-60字）」「（约 50 字）」「（60字）」这类字样——"
+    "那是写给你自己看的约束，写进正文就是废话，代码层会直接删除。\n"
     "- 一条只说一件事：先写结论，再写一句依据（谁说的/原文怎么讲），不铺垫、不结尾升华。\n"
-    "- **禁止废话**：不写「值得一提的是」「此外」「总体来看」「可以看出」这类填充词；"
-    "不复述前面已经说过的事实；同一子网的碎片讨论合并成一条，不要拆成多条凑数。\n"
+    "- **禁止废话（重点整治）**：不写「值得一提的是」「此外」「总体来看」「可以看出」「这一点值得关注」"
+    "这类填充词；不复述前面已经说过的事实；**不要解释自己为什么这么写**"
+    "（如「由于信息有限」「考虑到篇幅」「此处只列要点」）；不写「综上所述」「总而言之」这类收尾套话；"
+    "同一子网的碎片讨论合并成一条，不要拆成多条凑数。\n"
+    "- **每条都必须是「信息」而非「修辞」**：删掉所有不携带新事实的形容词、程度副词、背景铺垫。"
+    "删掉某个词后读者理解不变，那个词就该删。\n"
     "- 数字只留关键的（金额、TAO 数、涨幅、时间窗），次要数字删掉；形容词能删就删。\n"
     "- **精炼不等于省略**：当天发生的子网事件、机制变更、明确质疑、未解答的疑问都必须保留，"
     "只是用更短的话说清；宁可删形容词，也不能丢事实。\n"
@@ -940,8 +949,9 @@ WEEKLY_SYSTEM_PROMPT = (
     "【不要输出潜力观察】布局建议由独立流程生成，周报正文中**不要**出现潜力观察/布局/目标价板块。\n"
     "\n"
     "【排版规范】同日报：关键主体 **加粗**；🔥✅⚠️📌❌ 标注程度；- 项目符号、空行分段、手机端友好；"
-    "不用 # 标题、不用 > 引用；客观不臆测，引用具体编号与名字；全文 1300-1600 字，"
-    "每条 50-70 字，一条只说一件事，禁写填充词与重复内容。\n"
+    "不用 # 标题、不用 > 引用；客观不臆测，引用具体编号与名字；"
+    "全文不超过 1400 字（**只有上限、没有下限**，内容少就短），"
+    "每条能一句话说完就一句话，禁写填充词与重复内容。\n"
     "【事实核查规则】同日报【事实核查与验证规则】：重大定性以最新官方澄清为准；"
     "排名/最高级必须落到具体 SN 编号与数据，原文未指明就标「（原文未指明）」或舍弃；数字/代号照抄，严禁脑补。"
 )
@@ -966,7 +976,7 @@ WEEKLY_VERIFY_PROMPT = (
     "不明确的改成「有人」或删掉人名。\n"
     "9. **「承认/自认/证实」**：必须有其本人原话；反讽、玩笑、俏皮回应不算承认，改写成「被指控…，本人以玩笑回应」。\n"
     "\n【输出要求】只输出修正后的五个小节：🔥 本周核心趋势 / 👥 重要人物观点 / ⚠️ 风险汇总 / "
-    "📎 其他细节 / 💡 一句话总结；篇幅 1300-1600 字，**不得比初稿更长**——纠错只能「改写或删除」，"
+    "📎 其他细节 / 💡 一句话总结；篇幅**不得超过 1400 字、且不得比初稿更长**（只有上限，没有下限；内容少就短）——纠错只能「改写或删除」，"
     "不许新增句子、不许补细节、不许加总结段；不要输出核对说明；**不确定的内容宁可删除，也不要保留猜测**。"
 )
 
@@ -976,7 +986,7 @@ DEEPEN_HINT = (
     "**不得新增「重点子网动向」「潜力观察」「布局建议」等任何额外小节**。"
     "在此结构内做更深入的分析：对「🔥 必读重点」补充更明确的判断与依据（谁说的、原文如何表述），"
     "把散落在各条消息里的同一事件合并成一条完整脉络；避免流水账式复述，聚焦结论与逻辑。"
-    "**长度仍受【篇幅与精炼】约束（1100-1400 字），不要因为「更深入」而写成 2000 字以上**。"
+    "**长度仍受【篇幅与精炼】约束（上限 1200 字，没有下限），不要因为「更深入」而写长**。"
 )
 
 FEEDBACK_HINT = (
@@ -1014,7 +1024,7 @@ VERIFY_PROMPT = (
     "7. **共现拼关联**：初稿把「某公司/某事件」和「某子网」绑成投资、加持、合作、因果的，"
     "回原文确认有没有一句话直接说明；只是同一天被提到，就改成并列陈述或删掉关联词。\n"
     "\n【输出要求】只输出修正后的四个小节：🔥 必读重点 / 👥 重要人物观点 / 📎 其他细节 / 💡 一句话总结；"
-    "篇幅 1100-1400 字，**不得比初稿更长**——纠错只能「改写或删除」，不许新增句子、不许补细节、不许加总结段；"
+    "篇幅**不得超过 1200 字、且不得比初稿更长**（只有上限，没有下限；内容少就短）——纠错只能「改写或删除」，不许新增句子、不许补细节、不许加总结段；"
     "不要输出核对说明、不要写「已修改」之类的话；**不确定的内容宁可删除，也不要保留猜测**。"
 )
 
@@ -1046,8 +1056,11 @@ def polish_digest(cfg, text_block, draft, verify_prompt=None, sanitize_fn=None):
         fixed = clean(fixed or "")
         n = len(re.sub(r"\s", "", fixed))
         base = len(re.sub(r"\s", "", draft))
-        if n < 500:
-            log("校对稿过短（%d 字），保留初稿" % n)
+        # 下限只防「校对把稿子删成残篇」，与「不设字数下限」不冲突：
+        # 用户要的是不注水，不是允许整篇丢内容。所以门槛设在初稿的 45%，
+        # 低于这个比例多半是模型砍掉了整节内容，属于失败而非精简。
+        if n < max(200, int(base * 0.45)):
+            log("校对稿大幅缩水（%d 字，初稿 %d 字），视为校对失败，保留初稿" % (n, base))
             return draft
         if base and n > base * 1.08:
             log("校对稿变成 %d 字（初稿 %d 字），超过 8%% 视为扩写跑偏，保留初稿" % (n, base))
@@ -1071,49 +1084,175 @@ COMPRESS_PROMPT = (
     "- 原有的全部小节标题，顺序不变，一个小节都不许删；\n"
     "- 事实性结论和风险提示，宁可压缩表述，不许整条砍掉。\n"
     "\n【输出要求】只输出压缩后的完整稿件：不写说明、不写「已压缩」、不加新句子、"
-    "不改写事实、不调整章节顺序。每条压到 40-60 字，一条只说一件事。"
+    "不改写事实、不调整章节顺序。每条能一句话说完就一句话，一条只说一件事；"
+    "**不许在正文里留下任何字数标注**（如「（45-60字）」），那是提示词痕迹，必须删。"
 )
 
 
 def compress_digest(cfg, digest, lo, hi, system_prompt=None, sanitize_fn=None, cut_hint=None,
                     rounds=2):
-    """字数硬闸门：超过 hi 就再来一轮纯删减（只删不增），压到 lo-hi 之间。
-    模型对「字数配额」经常不听话（Kimi K3 写周报能给到 2800 字），所以必须有代码层兜底；
-    单轮只能删掉 2% 的情况也见过，因此默认允许两轮（rounds 可调，投研内容多时用 3 轮）。
-    水聊侧记传自己的提示词/清洗函数/删除顺序（它的板块跟日报不一样）。"""
+    """字数上限闸门：**只限上限、不设下限**（用户明确要求）。
+
+    超过 hi 就再来一轮纯删减（只删不增）。lo 参数保留仅为兼容旧调用，
+    **不再用于「压到 lo-hi 之间」**，也不再因为「压得太短」而回退原稿——
+    内容少就该短，短而全是干货比长而稀好。
+    模型对上限经常不听话（Kimi K3 写周报能给到 2800 字），所以必须有代码层兜底；
+    单轮只能删掉 2% 的情况也见过，因此默认允许两轮（投研内容多时用 3 轮）。
+    两轮模型压缩后仍超限的，交给 trim_to_limit() 机械裁剪兜底——不依赖模型自觉。"""
     if not digest:
         return digest
     clean = sanitize_fn or sanitize_digest
     cut = cut_hint or ("先砍最次要的整条要点（优先 📎 其他细节 → ⚠️ 风险汇总 → 👥 人物观点），"
-                       "再把保留的每条压到 40 字以内；🔥 核心趋势、全部小节标题、"
+                       "再把保留的每条压到最短能说清的长度；🔥 核心趋势、全部小节标题、"
                        "所有 SN 编号/数字/人名必须保留。")
     cur = digest
     for _attempt in range(max(1, int(rounds))):
-        n = len(re.sub(r"\s", "", cur))
-        if n <= int(hi * 1.06):
+        n = _nchars(cur)
+        if n <= hi:
             return cur
+        if n <= int(hi * 1.06):
+            # 只超一点点，不必再花一次 LLM 调用，直接机械裁剪收到线内
+            log("篇幅略超（%d 字 > %d），机械裁剪收尾" % (n, hi))
+            return trim_to_limit(cur, hi, log_fn=log)
         try:
             fixed = call_llm(
                 cfg,
-                "【待压缩稿件，当前 %d 字】\n%s\n\n【硬性目标】压缩到 %d-%d 字，至少删掉 %d 字。"
-                "只删不增：%s"
-                % (n, cur, lo, hi, max(n - hi, int(n * 0.15)), cut),
+                "【待压缩稿件，当前 %d 字】\n%s\n\n【硬性目标】压到 %d 字以内，至少删掉 %d 字。"
+                "**只有上限、没有下限**：删到多短都可以，只要事实与来源标记还在，"
+                "宁短不长。不要为凑字数保留任何废话。只删不增：%s"
+                % (n, cur, hi, max(n - hi, int(n * 0.15)), cut),
                 system_prompt=system_prompt or COMPRESS_PROMPT,
             )
             fixed = clean(fixed or "")
             n2 = len(re.sub(r"\s", "", fixed))
-            if n2 < lo * 0.8:
-                log("压缩稿只剩 %d 字（低于下限 %d），保留原稿" % (n2, int(lo * 0.8)))
-                return cur
             if n2 >= n:
-                log("压缩稿未变短（%d → %d 字），保留原稿" % (n, n2))
-                return cur
+                log("压缩稿未变短（%d → %d 字），改用机械裁剪兜底" % (n, n2))
+                break
             log("篇幅超限（%d 字 > %d），已压缩到 %d 字" % (n, int(hi * 1.06), n2))
             cur = fixed
         except Exception as e:
             log("压缩失败（保留原稿）：%s" % e)
-            return cur
+            break
+    # 模型让步了但没到线，机械裁剪收尾（保证「不超上限」是确定结果而不是期望）
+    if _nchars(cur) > hi:
+        cur = trim_to_limit(cur, hi, log_fn=log)
     return cur
+
+
+def _nchars(s):
+    """计字数：去掉所有空白后的字符数（与日志口径一致）。"""
+    return len(re.sub(r"\s", "", s or ""))
+
+
+# 机械裁剪时「先砍谁」：越靠前越先被砍（越次要）
+_TRIM_ORDER = ("其他细节", "其他碎屑", "风险汇总", "跑题现场", "其他碎屑",
+               "重要人物观点", "谁在聊什么", "今日氛围")
+# 永不砍：「一句话总结」是全文结论；「必读重点」是主干
+_TRIM_KEEP = ("一句话总结", "一句话吐槽", "必读重点", "本周核心趋势")
+
+
+def trim_to_limit(digest, hi, log_fn=None):
+    """代码层硬兜底：模型不肯删时，按「次要板块 → 条数 → 句子」机械裁剪到上限以内。
+
+    存在原因：实测 compress_digest 让模型删两轮，它能把 1745 压到 1396 就停手
+    （第二轮直接原样返回），但上限是 1200。用户要的是「不超上限」，不是「尽量压」，
+    所以最后必须有一条不依赖模型的路径兜住。
+
+    裁剪顺序（尽量保住信息骨架）：
+      1) 整节省略最次要的板块（📎 其他细节 / ⚠️ 风险汇总 …），从列表最次要的第一个开始；
+         某节删完仍超限，接着删下一节；
+      2) 还没到限，就从「必读重点」和「人物观点」里从末尾往前整条删要点
+         （末尾的通常最琐碎），但至少各留 1 条；
+      3) 再不行就截断超长单条（按句末标点切，保留前几句）。
+    所有小节标题、SN 编号、`---` 之后的状态行一律不动。
+    """
+    log_fn = log_fn or (lambda m: None)
+    hi = int(hi)
+    if not digest or _nchars(digest) <= hi:
+        return digest
+
+    lines = digest.split("\n")
+    # 拆成 [("head", [...]) / ("sec", 标题, [...])] 结构，便于整节操作
+    blocks, cur_sec = [], None
+    for ln in lines:
+        t = _section_title(ln)
+        if t:
+            cur_sec = {"title": t, "lines": [ln]}
+            blocks.append(cur_sec)
+        elif cur_sec is None:
+            blocks.append({"title": None, "lines": [ln]})
+        else:
+            cur_sec["lines"].append(ln)
+
+    def rebuild():
+        out = []
+        for b in blocks:
+            out.extend(b["lines"])
+        return "\n".join(out)
+
+    def sec_of(name):
+        for b in blocks:
+            if b["title"] and name in b["title"]:
+                return b
+        return None
+
+    # ---- 1) 渐进裁剪：先删条目，删光才删整节；且只删到刚好不超限 ----
+    for name in _TRIM_ORDER:
+        if _nchars(rebuild()) <= hi:
+            break
+        b = sec_of(name)
+        if not b or any(k in b["title"] for k in _TRIM_KEEP):
+            continue
+        # 先逐条删（末尾的通常最琐碎），至少留 1 条
+        while _nchars(rebuild()) > hi:
+            idx = [i for i, ln in enumerate(b["lines"])
+                   if ln.strip().startswith(("-", "•", "*"))]
+            if len(idx) <= 1:
+                break
+            b["lines"].pop(idx[-1])
+            log_fn("机械裁剪：删「%s」末条 → %d 字" % (b["title"], _nchars(rebuild())))
+        # 只剩 1 条还超限，才整节省略
+        if _nchars(rebuild()) > hi:
+            blocks.remove(b)
+            log_fn("机械裁剪：整节省略「%s」→ %d 字" % (b["title"], _nchars(rebuild())))
+
+    # ---- 2) 仍超限，再动主干板块（必读重点），同样逐条删、至少留 1 条 ----
+    for name in ("必读重点", "本周核心趋势"):
+        if _nchars(rebuild()) <= hi:
+            break
+        b = sec_of(name)
+        if not b:
+            continue
+        while _nchars(rebuild()) > hi:
+            idx = [i for i, ln in enumerate(b["lines"])
+                   if ln.strip().startswith(("-", "•", "*"))]
+            if len(idx) <= 1:
+                break
+            b["lines"].pop(idx[-1])
+            log_fn("机械裁剪：删「%s」末条 → %d 字" % (b["title"], _nchars(rebuild())))
+
+    # ---- 3) 最后一招：截断超长单条（按句切，保住前几句） ----
+    if _nchars(rebuild()) > hi:
+        for b in blocks:
+            if _nchars(rebuild()) <= hi:
+                break
+            if not b["title"] or any(k in b["title"] for k in _TRIM_KEEP):
+                continue
+            for i in range(len(b["lines"]) - 1, -1, -1):
+                if _nchars(rebuild()) <= hi:
+                    break
+                ln = b["lines"][i]
+                if _nchars(ln) < 100:
+                    continue
+                parts = re.split(r"(?<=[。！？；])", ln)
+                while len(parts) > 1 and _nchars(rebuild()) > hi:
+                    parts.pop()
+                    b["lines"][i] = "".join(parts).rstrip()
+                if not b["lines"][i].strip():
+                    b["lines"].pop(i)
+                log_fn("机械裁剪：截断长条 → %d 字" % _nchars(rebuild()))
+
+    return rebuild()
 
 
 def _section_title(line):
@@ -1343,8 +1482,48 @@ def dedupe_bullets(text, threshold=0.45):
     return "\n".join(out)
 
 
+_SEC_EMOJI = "🔥👥📎💡📰🗓📊📌⚠️✅"
+
+
+def _unstick_sections(text):
+    """把小节标题从上一行要点里"抠"出来（模型偶尔会写成一整行）。
+
+    实测缺陷：`- **BROdin**答仍用**Talisman📎 其他细节**` ——
+    模型漏了换行，标题被包进上一条的加粗里；紧接着 _tidy_layout 又把列表项
+    之间的空行删掉，标题就彻底粘死在正文中间，手机上看是一坨乱码。
+
+    只匹配「emoji + 板块名」这种**标题专有形态**（正文里不会这么写），
+    命中就在前面断行，并把上一行被切断的加粗补齐成对。
+    """
+    if not text:
+        return text
+    words = "|".join(re.escape(w) for w in _SECTION_WORDS)
+    # 标题本身可能带加粗：`**📎 其他细节**`，开头这两个星号要一起吃掉
+    pat = re.compile(r"(\*{0,2}[%s])\s*(%s)" % (_SEC_EMOJI, words))
+    out = []
+    for ln in text.split("\n"):
+        m = pat.search(ln)
+        if not m or m.start() == 0 or not ln[:m.start()].strip():
+            out.append(ln)
+            continue
+        prefix = ln[:m.start()]
+        head = m.group(1)                     # 可能是 `📎` 或 `**📎`
+        rest = ln[m.end():]
+        if prefix.count("**") % 2 == 1:       # 上一行的加粗被这行截断了，补回来
+            prefix += "**"
+        if rest.startswith("**"):             # 标题的闭合星号被留在了后面
+            rest = rest[2:]
+        if not head.startswith("**"):         # 标题本来没加粗，这里统一补上
+            head = "**" + head
+        out.append(prefix.rstrip())
+        out.append("")
+        out.append("%s %s**%s" % (head, m.group(2), rest))
+    return "\n".join(out)
+
+
 def _tidy_layout(text):
     """美化：列表项之间不空行（模型常把每条要点之间都空一行，手机上会拉得很长）。"""
+    text = _unstick_sections(text)
     lines = [ln.rstrip() for ln in text.split("\n")]
     out = []
     for i, ln in enumerate(lines):
@@ -1360,6 +1539,62 @@ def _tidy_layout(text):
         out.append(ln)
     txt = "\n".join(out)
     return re.sub(r"\n{3,}", "\n\n", txt).strip()
+
+
+def strip_length_tags(text):
+    """删掉模型把「字数配额」写进正文的痕迹。
+
+    实测缺陷：提示词里「每条 45-60 字」这类配额，模型会直接抄进正文，
+    变成「**kτwτ**（45-60字）：详解…」——读者看到的是提示词，不是内容，
+    既占字数又像机器在凑字数。提示词里已经反复禁止，但模型不听话，
+    所以必须有一道代码闸门无脑删掉。
+
+    只处理明确的「字数标注」，不碰正文里的正常数字：
+      （45-60字）（约 50 字）（50字左右）[45-60字]（60-70 字）
+    """
+    if not text:
+        return text
+    s = text
+    # 括号内：可选「约/约莫/左右」+ 数字 + 可选连接符 + 数字 + 可选空格 + 字 + 可选「左右/以内/以下」
+    num = r"\d{1,4}"
+    pat_bracket = re.compile(
+        r"[（(\[【]\s*(?:约|大约|约莫|控制在)?\s*%s(?:\s*[-~～—至到]\s*%s)?\s*字"
+        r"(?:左右|以内|以下)?\s*[)）\]】]" % (num, num))
+    n = len(pat_bracket.findall(s))
+    s = pat_bracket.sub("", s)
+    # 行内裸写：「每条 45-60 字」「控制在 50 字左右」→ 整段删掉（它们只出现在元描述里）
+    pat_bare = re.compile(r"(?:每条|每条控制在|控制在|约|大约)\s*%s(?:\s*[-~～—至到]\s*%s)?\s*字"
+                          r"(?:左右|以内|以下)?" % (num, num))
+    n += len(pat_bare.findall(s))
+    s = pat_bare.sub("", s)
+    # 清掉删完留下的空括号/悬空标点与多余空格
+    s = re.sub(r"[（(]\s*[)）]", "", s)
+    s = re.sub(r"\*\*\s*\*\*", "", s)
+    # 🔥n 是**输入端**的表情回应热度标记（"🔥3 = 被回应 3 次"），不是给读者的内容。
+    # 模型偶尔会把它当引用写进正文：`…放话「arbos 迟早背叛主子 const」（🔥2）`。
+    # 括号里的直接连括号删；裸写的只删标记本身。
+    s = re.sub(r"[（(\[【]\s*🔥\s*\d{1,4}\s*[)）\]】]", "", s)
+    s = re.sub(r"(?<![^\s（(])🔥\s*\d{1,4}(?!\d)", "", s)
+    # 加粗标记内侧夹空格（`** 补记 **`）会把 markdown 打断，渲染成星号：一律贴齐
+    s = re.sub(r"\*\*[ \t]+([^\*\n]{1,80}?)\*\*", r"**\1**", s)
+    s = re.sub(r"\*\*([^\*\n]{1,80}?)[ \t]+\*\*", r"**\1**", s)
+    # **人名**后面补空格（只对「行首的加粗人名」生效；句中强调词加空格反而更糟）：
+    #   `- **SN8 Vanta**遭社区FUD` → `- **SN8 Vanta** 遭社区FUD`
+    #   `修复后**补记了这些交易**造成飙升` → 不动
+    s = re.sub(r"(?m)^([-•]\s+)\*\*([^\*\n]{1,40})\*\*(?=[\u4e00-\u9fa5])",
+               r"\1**\2** ", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"[（(]\s*[：:]\s*", "（", s)
+    s = re.sub(r"[，,]\s*[，,]", "，", s)
+    s = re.sub(r"：\s*：", "：", s)
+    s = re.sub(r"^([-•]\s*)\s*[：:]\s*", r"\1", s, flags=re.M)
+    s = re.sub(r"[ \t]+([，。；：！？、])", r"\1", s)
+    # 整行被删空的列表项（只剩 `- ` 或 `- **x**`）一并删掉，否则会留下空项目符号
+    s = re.sub(r"(?m)^\s*[-•]\s*\**\s*\**\s*$", "", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    if n:
+        log("字数标注清除：%d 处「（45-60字）」这类提示词痕迹已删" % n)
+    return s
 
 
 def sanitize_digest(text):
@@ -1380,6 +1615,7 @@ def sanitize_digest(text):
         out.append(line)
     txt = re.sub(r"\n[ \t]+\n", "\n\n", "\n".join(out))
     txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    txt = strip_length_tags(txt)
     txt = reduce_english(txt)
     txt = dedupe_bullets(txt)
     txt = _tidy_layout(txt)
@@ -1406,6 +1642,7 @@ def sanitize_chat(text):
         out.append(line)
     txt = re.sub(r"\n[ \t]+\n", "\n\n", "\n".join(out))
     txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    txt = strip_length_tags(txt)
     txt = dedupe_bullets(txt)
     return _tidy_layout(txt)
 
@@ -1793,13 +2030,13 @@ def generate_digest(cfg_i, text_block, system_prompt, items, tag=""):
     digest = call_deepseek(cfg_i, text_block, system_prompt=system_prompt)
     digest = sanitize_digest(digest)
     digest = polish_digest(cfg_i, text_block, digest)
-    digest = compress_digest(cfg_i, digest, 1100, 1400)
+    digest = compress_digest(cfg_i, digest, 0, 1200)
     digest, _ = scrub_unsupported_links(digest, items)
     n = len(re.sub(r"\s", "", digest or ""))
-    if n > 1700:
-        log("%s⚠️ 篇幅偏长：%d 字（目标 1100-1400）" % (tag, n))
+    if n > 1450:
+        log("%s⚠️ 篇幅偏长：%d 字（上限 1200）" % (tag, n))
     else:
-        log("%s篇幅：%d 字（目标 1100-1400）" % (tag, n))
+        log("%s篇幅：%d 字（上限 1200，不设下限）" % (tag, n))
     return digest
 
 
@@ -2634,7 +2871,7 @@ def run_topic_summary(cfg, day_str, feedback, targets=None):
     digest = call_deepseek(cfg, text_block, system_prompt=TOPIC_SYSTEM_PROMPT)
     digest = sanitize_digest(digest)
     digest = polish_digest(cfg, text_block, digest, verify_prompt=TOPIC_VERIFY_PROMPT)
-    digest = compress_digest(cfg, digest, 1200, 2000)
+    digest = compress_digest(cfg, digest, 0, 1400)
     digest, _n = scrub_unsupported_links(digest, all_items)
     log("专题篇幅：%d 字" % len(re.sub(r"\s", "", digest or "")))
     title = "🔍 DTAO price-talk 专题总结 · %s" % day_str
@@ -2727,7 +2964,7 @@ def run_chat_summary(cfg, day_str, days_back=1, targets=None):
     if nf:
         log("提示：%d 处引语未在原文逐字找到（多为翻译转述，已记录）：%s"
             % (len(nf), "；".join(q for _l, q in nf[:3])))
-    digest = compress_digest(cfg, digest, 650, 1000, system_prompt=CHAT_COMPRESS_PROMPT,
+    digest = compress_digest(cfg, digest, 0, 1000, system_prompt=CHAT_COMPRESS_PROMPT,
                              sanitize_fn=sanitize_chat,
                              cut_hint="每条要点压到 50 字以内，一条只说一件事；"
                                       "🗣 谁在聊什么最多留 5 条、🔥 最佳梗最多 2 条、🎲 跑题现场最多 2 条；"
@@ -2794,6 +3031,8 @@ def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
     digest = call_deepseek(cfg, text_block, system_prompt=sys_p)
     digest = sanitize_digest(digest)
     digest = polish_digest(cfg, text_block, digest)
+    digest = compress_digest(cfg, digest, 0, 1200,
+                             sanitize_fn=lambda s: strip_length_tags(s))
     digest, _ = scrub_unsupported_links(digest, items)
 
     max_per_day, _ = _throttle_cfg(cfg)
@@ -2964,7 +3203,7 @@ def run_weekly(cfg):
         digest = call_deepseek(cfg, text_block, system_prompt=WEEKLY_SYSTEM_PROMPT)
         digest = sanitize_digest(digest)
         digest = polish_digest(cfg, text_block, digest, verify_prompt=WEEKLY_VERIFY_PROMPT)
-        digest = compress_digest(cfg, digest, 1300, 1600)
+        digest = compress_digest(cfg, digest, 0, 1400)
         digest, _n = scrub_unsupported_links(digest, all_items)
     else:
         digest = "本期无与 Bittensor 子网/重要成员相关的实质讨论。"

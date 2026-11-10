@@ -8,9 +8,67 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.13.1** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.14.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.14.0 — 2026-11-11
+
+**X 链接抓取能力重做：给了链接就必须读出来，官推找不到不再是结论**
+
+用户反馈「X 链接无法访问、子网官推都找不到、我给了链接还抓不到内容」。
+排查发现根因有三层，且都不是「网络不通」：
+
+1. **账号主页链接被整条丢掉**。用户实际发的是 `/retry 24官推https://x.com/ms_computer`，
+   而旧 `x_links_in()` 只认 `/status/数字` 的帖子链接，账号主页链接一个字符都没进素材。
+2. **零贴文被误判成抓取失败**。`fxtwitter` 的 `/2/profile/{h}/statuses` 对
+   `@ms_computer` 返回空数组（该号确实累计 0 条贴文），旧代码直接 `continue`，
+   整条 X 源判失败 → 报告写「官推找不到」。
+3. **账号身份没有独立核实通道**。只要时间线为空，就没有任何办法证明账号存在。
+
+### 改动
+
+- 新增 `x_targets_in()`：统一归一化 **帖子链接 / 账号主页链接 / `twitter.com` /
+  `/i/status/` / fxtwitter 镜像 / 带查询参数** 的链接，`x_links_in()` 保留作兼容。
+  帖子统一改写为 `https://x.com/{handle}/status/{id}`，保留字（`home` / `hashtag` 等）不当账号。
+- 新增 `x_profile()`：读 `fxtwitter /2/profile/{h}` 拿 **名称 / 简介 / 官网 / 注册时间 /
+  粉丝 / 关注 / 累计贴文数 / 认证**，兜底读 `x.com` 主页 `og/twitter` meta。
+  零贴文账号也算**已核实的事实**，不再判成 X 源失败。
+- `x_tweet()` 改三层兜底：**fxtwitter → publish.twitter.com/oEmbed → X 页面 meta**。
+  oEmbed 无时间戳时如实标注，不编造日期。多条用户链接改为并发抓（3 线程），
+  避免单条在代理抖动时拖满墙钟上限把整个 X 源丢掉。
+- `src_x()` 新增 `extra_handles` / `authority_handles`：**用户反馈里给的账号**排在所有猜测
+  候选之前，并作为官方身份的权威证据；零贴文时直接产出「官方账号已核实、累计 0 条贴文」
+  的完整记录并停止瞎猜其它号。官网挂出的 X 号仍是权威，群聊里翻出的账号只作候选。
+- 新增 `x_official_from_archive()`：从**历史投研报告**里找回此前已确认过的官推
+  （只认紧邻「官方 X / 官推 / 官方账号」的链接），下次不带反馈重查同一子网也能定位。
+- 报告 `[X]` 段在「账号已核实但零贴文」时输出完整账号资料 + 明确禁止写
+  「官推找不到 / 链接不可访问」、禁止编造推文；`用户反馈` 段按
+  「帖子已抓到 / 账号已核实 / 帖子失败 / 账号未核实」四种情况分别给模型不同措辞。
+- 修一处自己引入的引用污染：`extra_handles` 原直接引用 `_tg["handles"]`，
+  群聊账号 append 后会混进「用户指定官推」权威列表，可能把路人号误定成官方。
+  现复制列表并拆出独立的 `auth_handles`。
+
+### 通道实测（本机代理环境）
+
+| 通道 | 结果 |
+|---|---|
+| `api.fxtwitter.com` 单帖 | ✅ 1.2~7.6 秒，拿到原文 |
+| `fxtwitter /2/profile/{h}` | ✅ 账号资料，零贴文也有 |
+| `publish.twitter.com/oEmbed` | ✅ 兜底可用（无时间戳） |
+| `x.com` 页面 meta | ✅ 最后一层兜底 |
+| `r.jina.ai` | ❌ HTTP 401（现需 API key） |
+| `xcancel.com` / `nitter.poast.org` 等镜像 | ❌ 超时 / 502 |
+| `cdn.syndication.twimg.com` | ⚠️ 部分帖子返回 `{}` |
+
+### 验证
+
+`py_compile` / `git diff --check` 通过；X 能力回归 **25 项全绿**，
+`run_research` 端到端（用真实指令 `24官推https://x.com/ms_computer`、mock 模型与推送）
+**9 项全绿**。实测 `@ms_computer` → 名称 `ms.computer`、简介 `coming soon`、
+官网 `ms.computer`、2026-10-24 注册、121 粉丝、累计 0 条贴文，报告素材正常产出。
 
 ---
 

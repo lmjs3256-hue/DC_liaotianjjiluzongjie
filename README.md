@@ -4,7 +4,7 @@
 > 用 AI 总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.13.1** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.14.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 **当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
@@ -389,7 +389,7 @@ bot 立刻开始做 SN29 的重要事件跟踪报告。这五种写法等价：
 发出去之后走的是**闭环四步**：
 
 1. **① 调取本地 `SN29` 档案**——群聊原话（近 `research_days` 天、谁说过什么）＋ 档案里存着的**此前投研报告全文**，一起作为起点；
-2. **② 全网抓取增补最新资讯**——链上数据站（bittensor.ai / taostats / dtaoscan）、官网、GitHub releases+commits、Google News、全网检索、**X 官方账号 + 生态广播号（@opentensor / @taostats / @bittensor）**；重点是找**上次报告之后的新变化**。X 走 `api.fxtwitter.com`（免鉴权、结构化 JSON），官方账号优先从**官网页面的 `x.com/` 链接**里捞（最可靠），官网没挂才用 Bing 兜底检索；你在 `/retry` 里贴的 X 帖链接会被 `x_links_in()` 抽出并**无条件抓取**；
+2. **② 全网抓取增补最新资讯**——链上数据站（bittensor.ai / taostats / dtaoscan）、官网、GitHub releases+commits、Google News、全网检索、**X 官方账号 + 生态广播号（@opentensor / @taostats / @bittensor）**；重点是找**上次报告之后的新变化**。X 走 `api.fxtwitter.com`（免鉴权、结构化 JSON），官方账号优先从**你在 `/retry` 里直接给的链接**和**官网页面的 `x.com/` 链接**里捞（最可靠），官网没挂才用 Bing 兜底检索；`/retry` 里贴的 **X 帖子链接和账号主页链接都会被识别**（v1.14.0 起，如「`/retry 24官推 https://x.com/ms_computer`」），帖子原文无条件抓取，账号即使一条推文都没发也会读资料核实并在报告里写「官方账号已确认、目前未发布内容」，不再误报「官推找不到」。单帖走 **fxtwitter → oEmbed → X 页面 meta** 三层转换兜底；Jina Reader 现需 API key、各类 Nitter 镜像已失效，故未采用。历史报告里确认过的官推会被记住，下次不重贴链接也能找到；
 3. **③ 交叉验证后出报告**，飞书 + TG 双推；
 4. **④ 档案增量更新**——报告**全文**写进 `archive.json` 的 `reports[].body`（`SN29/research_YYYY-MM-DD.md` 是同内容副本，`archive.md` 里可展开看全文），下次投研直接拿它做对比基线。
 

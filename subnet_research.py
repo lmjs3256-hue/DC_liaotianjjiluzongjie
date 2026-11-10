@@ -1276,16 +1276,25 @@ def src_web_search(meta, sn, limit=8):
 #   ② syndication / nitter 系保底（多数已 403/429，仅作兜底，不指望）
 FX_PROFILE = "https://api.fxtwitter.com/2/profile/%s/statuses"
 FX_TWEET = "https://api.fxtwitter.com/%s/status/%s"
+FX_USER = "https://api.fxtwitter.com/2/profile/%s"
 X_RESERVED = {"i", "intent", "share", "home", "search", "hashtag", "status",
-              "explore", "settings", "login", "signup", "tos", "privacy", "compose"}
+              "explore", "settings", "login", "signup", "tos", "privacy", "compose",
+              "messages", "notifications", "bookmarks", "lists", "topics", "article",
+              "account", "download", "communities", "followers", "following", "likes",
+              "media", "with_replies", "analytics", "jobs", "spaces"}
+# 用户贴链接时可能出现的 host：官方站、移动站、以及常见的 fx/vx 镜像站。
+# 一律归一化回 x.com，再交给 fxtwitter API 读取（x.com 本身有登录墙，正文抓不到）。
+X_HOSTS = r"(?:x|twitter|mobile\.twitter|www\.twitter|fxtwitter|vxtwitter|fixupx|fixvx|nitter)\.com"
 
 
-def _fx_json(url, timeout=25):
-    """取 fxtwitter JSON。它偶尔 404/SSL 抖动，固定重试 2 次（1.5s 退避）。"""
-    import time as _t
+def _fx_json(url, timeout=25, tries=3):
+    """取 fxtwitter JSON。它偶尔 404/SSL 抖动，重试并做短退避。"""
     last = ""
-    for i in range(3):
-        ok, txt = fetch(url, timeout=timeout, retries=1)
+    for i in range(max(1, tries)):
+        # 首次用短超时快速探一下：代理节点抖动时与其干等 16 秒，
+        # 不如 8 秒内失败后立刻换一条连接重试（实测重试常在 1 秒内返回）。
+        t = min(timeout, 8) if (i == 0 and tries > 1) else timeout
+        ok, txt = fetch(url, timeout=t, retries=1)
         if ok and txt.strip().startswith("{"):
             try:
                 return True, json.loads(txt)
@@ -1293,8 +1302,8 @@ def _fx_json(url, timeout=25):
                 last = "JSON 解析失败：%s" % str(e)[:80]
         else:
             last = (txt or "")[:100]
-        if i < 2:
-            _t.sleep(1.5 * (i + 1))
+        if i < tries - 1:
+            time.sleep(1.0 + i)
     return False, last
 
 
@@ -1331,9 +1340,14 @@ def _x_candidates(meta, site_html=""):
     if not _x_handles_from_html(site_html):
         for it in _web_search_items('site:x.com "%s" bittensor'
                                    % (base or "subnet %d" % meta.get("sn", 0)), limit=8):
-            mm = re.search(r"x\.com/([A-Za-z0-9_]{2,20})", it.get("url", ""))
-            if mm and mm.group(1).lower() not in X_RESERVED and "/status/" in it.get("url", ""):
-                cands.append(mm.group(1))
+            blob = " ".join([it.get("url") or "", it.get("snip") or "", it.get("title") or ""])
+            for mm in re.finditer(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,20})", blob, re.I):
+                hd = _x_clean_handle(mm.group(1))
+                # 以前要求 URL 必须含 /status/ 才采纳，但 site: 搜索命中的大多是
+                # 账号主页，官推因此被整批过滤掉。相关性交给后面的 X_TOPIC /
+                # 名称校验把关，这里只排除保留字。
+                if hd and hd not in cands:
+                    cands.append(hd)
     if base and re.fullmatch(r"[A-Za-z0-9_]{3,20}", base):
         cands += [base, base + "_ai", base + "ai"]
     gh = meta.get("github") or ""
@@ -1374,15 +1388,31 @@ def _x_post_from_fx(it):
             "lang": it.get("lang") or ""}
 
 
-def x_user_posts(handle, pages=2, log=None):
+def x_user_posts(handle, pages=2, log=None, want_profile=True):
     """取某账号最近贴文（fxtwitter，可按 bottom 游标翻页）。
-    返回 (profile_dict, [post...])；账号不存在/取不到时 profile 为 None。"""
-    hd = (handle or "").lstrip("@").strip()
+    返回 (profile_dict, [post...])；账号不存在/取不到时 profile 为 None。
+
+    v1.14.0：时间线返回空数组**不等于账号不存在**。以前直接伪造一个
+    `{"handle": h, "name": "", "bio": ""}` 的 prof，src_x 看到 posts 为空就
+    记「无公开贴文」并把整条 X 源判成失败，用户于是看到「官推找不到」。
+    现在零贴文时补读 /2/profile/{h} 拿真实资料，让报告能写「账号已核实、
+    累计 0 条贴文」而不是「链接不可访问」。
+    """
+    hd = _x_clean_handle(handle)
     if not hd:
         return None, []
-    ok, d = _fx_json(FX_PROFILE % hd)
+    prof0 = None
+    if want_profile:
+        prof0 = x_profile(hd)
+        # 账号明确 0 条公开贴文时，时间线端点注定返回空数组，而它实测要
+        # 14~28 秒才回（2026-11-11 ms_computer）。先问资料就能 1 秒结束。
+        if prof0 and int(prof0.get("statuses") or 0) == 0:
+            if log:
+                log("    X @%s：账号累计 0 条公开贴文，跳过时间线" % hd)
+            return prof0, []
+    ok, d = _fx_json(FX_PROFILE % hd, timeout=18, tries=2)
     if not ok or not isinstance(d, dict):
-        return None, []
+        d = {}
     prof = None
     posts = []
     for it in d.get("results") or []:
@@ -1392,10 +1422,16 @@ def x_user_posts(handle, pages=2, log=None):
         if not p["text"]:
             continue
         if prof is None and p["author"].lower() == hd.lower():
-            prof = {"handle": p["author"], "name": p["author_name"], "bio": p["bio"]}
+            # statuses=-1 =「时间线没给出累计贴文数」，不能被报告误写成 0 条
+            prof = {"handle": p["author"], "name": p["author_name"], "bio": p["bio"],
+                    "statuses": -1, "followers": 0, "following": 0,
+                    "joined": "", "website": "", "url": "https://x.com/" + hd,
+                    "via": "timeline"}
         posts.append(p)
     if prof is None:
-        prof = {"handle": hd, "name": "", "bio": ""}
+        prof = prof0 or (x_profile(hd) if want_profile else None)
+    if prof is None:
+        return None, []
     cur = (d.get("cursor") or {}).get("bottom")
     for _ in range(max(0, pages - 1)):
         if not cur:
@@ -1414,47 +1450,194 @@ def x_user_posts(handle, pages=2, log=None):
             break
         cur = nxt
     if log:
-        log("    X @%s：%d 条贴文（含转推）" % (hd, len(posts)))
+        log("    X @%s：%d 条贴文（含转推），账号累计 %s 条"
+            % (hd, len(posts), prof.get("statuses", "?")))
     return prof, posts
 
 
+def _x_basic_post(tid, url, text, author, author_name, via):
+    """兜底通道（oEmbed / 页面 meta）拿不到时间戳和互动数，字段补齐并如实标注。"""
+    return {"id": tid, "url": url, "text": text, "at": "", "ts": 0,
+            "author": author, "author_name": author_name, "bio": "",
+            "likes": 0, "replies": 0, "reposts": 0, "views": 0,
+            "media": False, "is_rt": False, "rt_by": "", "lang": "", "via": via}
+
+
 def x_tweet(url_or_id, log=None):
-    """按链接/ID 抓单条 X 帖（用户在反馈里贴的链接必须能读出来，不能只写「未获取」）。"""
-    m = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]{2,20})/status/(\d+)", url_or_id or "")
-    if m:
-        hd, tid = m.group(1), m.group(2)
-    else:
-        m2 = re.search(r"\b(\d{15,25})\b", url_or_id or "")
-        if not m2:
-            return None
-        hd, tid = "_", m2.group(1)
-    ok, d = _fx_json(FX_TWEET % (hd, tid) if hd != "_" else
-                     "https://api.fxtwitter.com/status/%s" % tid)
-    if not ok or not isinstance(d, dict):
+    """按链接/ID 抓单条 X 帖：fxtwitter → oEmbed → x.com 页面 meta 三级兜底。
+
+    x.com 本身有登录墙，直接打开只能拿到壳页面，所以先转成
+    api.fxtwitter.com/status/{id}（实测 0.9~1.2 秒返回结构化 JSON）；
+    该 API 抖动/删帖时再走 publish.twitter.com/oembed 和 x.com 的
+    og/twitter description，两条都无需登录。
+    """
+    s = url_or_id or ""
+    m2 = re.search(r"/status/(\d{15,25})", s) or re.search(r"\b(\d{15,25})\b", s)
+    if not m2:
         return None
-    t = d.get("tweet") or {}
-    if not t:
-        return None
-    p = _x_post_from_fx(t)
-    # 顶层 tweet 可能不含 author 详情，补一次
-    if not p["bio"]:
-        p["bio"] = ((t.get("author") or {}).get("description") or "").strip()
-    if log:
-        log("    X 单帖已读取：@%s %s「%s…」" % (p["author"], p["at"], p["text"][:40]))
-    return p
+    tid = m2.group(1)
+    hm = re.search(X_HOSTS + r"/([A-Za-z0-9_]{1,20})/status/", s, re.I)
+    hd = _x_clean_handle(hm.group(1)) if hm else ""
+
+    # ① fxtwitter 结构化 JSON（首选：带准确 UTC+8 时间与互动数）
+    urls = ["https://api.fxtwitter.com/status/%s" % tid]
+    if hd:
+        urls.append(FX_TWEET % (hd, tid))
+    for u in urls:
+        ok, d = _fx_json(u, timeout=12, tries=2)
+        if ok and isinstance(d, dict) and (d.get("tweet") or {}):
+            t = d["tweet"]
+            p = _x_post_from_fx(t)
+            if not p["bio"]:
+                p["bio"] = ((t.get("author") or {}).get("description") or "").strip()
+            p["via"] = "fxtwitter"
+            if log:
+                log("    X 单帖已读取（fxtwitter）：@%s %s「%s…」"
+                    % (p["author"], p["at"], p["text"][:40]))
+            return p
+
+    canon = "https://x.com/%s/status/%s" % (hd or "i", tid)
+    # ② oEmbed：实测必须传**带账号名的完整 URL**，且不能把 url= 整体 percent-encode；
+    #    `x.com/i/status/ID` 和编码后的参数都会被服务端挂到超时。
+    #    该通道能拿正文和作者，但没有时间戳，必须如实标注。
+    ok, txt = fetch("https://publish.twitter.com/oembed?url=" + canon,
+                    timeout=16, retries=1)
+    if ok and txt.strip().startswith("{"):
+        try:
+            od = json.loads(txt)
+            body = re.search(r"<p[^>]*>(.*?)</p>", od.get("html") or "", re.S | re.I)
+            if body:
+                clean = re.sub(r"\s+", " ", html.unescape(
+                    re.sub(r"<[^>]+>", "", body.group(1)))).strip()
+                if clean:
+                    au = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,20})/",
+                                   od.get("html") or "")
+                    p = _x_basic_post(tid, canon, clean,
+                                      (au.group(1) if au else hd),
+                                      od.get("author_name") or "", "oEmbed（无时间戳）")
+                    if log:
+                        log("    X 单帖已读取（oEmbed）：「%s…」" % clean[:40])
+                    return p
+        except Exception:
+            pass
+
+    # ③ x.com 页面 meta：登录墙不影响 og:description，可当最后一道兜底
+    ok, h = fetch(canon, timeout=16, retries=1)
+    if ok and h:
+        b = re.search(r'<meta[^>]+(?:property|name)="(?:og:description|twitter:description)"'
+                      r'[^>]+content="([^"]*)"', h, re.I)
+        if b:
+            clean = re.sub(r"\s+", " ", html.unescape(b.group(1))).strip()
+            if clean and not re.match(r"(?i)^(x \(formerly|login|sign up|just a moment)", clean):
+                p = _x_basic_post(tid, canon, clean, hd, "", "x.com 页面摘要（无时间戳）")
+                if log:
+                    log("    X 单帖已读取（页面摘要）：「%s…」" % clean[:40])
+                return p
+    return None
+
+
+def _x_clean_handle(h):
+    h = (h or "").lstrip("@").strip()
+    if not h or h.lower() in X_RESERVED or not re.fullmatch(r"[A-Za-z0-9_]{1,20}", h):
+        return ""
+    return h
+
+
+def x_targets_in(text):
+    """把任意文本里的 X 链接归一化，分成「帖子」和「账号主页」两类。
+
+    2026-11-11 事故：用户发 `/retry 24官推https://x.com/ms_computer`，
+    旧 x_links_in 只认 `/status/数字`，账号主页链接被整条丢掉，
+    报告于是写「未抓取到内容」——其实账号真实存在，只是 0 条贴文。
+    现在兼容 twitter.com / 移动站 / x.com/i/status / fx、vx 镜像 / ?s=20 参数。
+    """
+    posts, handles = [], []
+    # 只收 URL 合法字符：中文（如「官推」）紧贴链接时会被自然截断，不会吞进 path。
+    pat = re.compile(r"(?:https?://)?(?:www\.)?" + X_HOSTS +
+                     r"/[A-Za-z0-9_/%?=&#.~:+$,;!'\-]*", re.I)
+    for m in pat.finditer(text or ""):
+        raw = m.group(0).rstrip(".,;:!?/")
+        pm = re.search(r"/(?:i/)?status/(\d{15,25})", raw)
+        if pm:
+            tid = pm.group(1)
+            hm = re.search(X_HOSTS + r"/([A-Za-z0-9_]{1,20})/status/", raw, re.I)
+            hd = _x_clean_handle(hm.group(1)) if hm else ""
+            u = "https://x.com/%s/status/%s" % (hd or "i", tid)
+            if u not in posts:
+                posts.append(u)
+            continue
+        hm = re.search(X_HOSTS + r"/([A-Za-z0-9_]{1,20})(?:[/?#]|$)", raw, re.I)
+        if hm:
+            hd = _x_clean_handle(hm.group(1))
+            if hd and hd not in handles:
+                handles.append(hd)
+    return {"posts": posts, "handles": handles}
 
 
 def x_links_in(text):
-    """从任意文本（群聊、用户反馈）里抽出 X 帖链接，去重保序。"""
+    """兼容旧调用：只取帖子链接（已归一化到 x.com）。"""
+    return x_targets_in(text)["posts"]
+
+
+def x_official_from_archive(arc):
+    """从历史投研结论里找回此前已确认的官方 X 账号。
+
+    用户可能只在某一次 `/retry 24官推 https://x.com/ms_computer` 里给过链接；
+    之后不带反馈再查同一子网时，不该又写成「官推找不到」。
+    只认紧邻「官方 X / 官推 / 官方账号」的账号链接，避免把报告里引用的
+    路人账号当权威。
+    """
+    if not arc:
+        return []
+    blob = "\n".join(str(r.get(k) or "")
+                     for r in (arc.get("reports") or []) if isinstance(r, dict)
+                     for k in ("events", "body", "title", "conclusion"))
     out = []
-    for m in re.finditer(r"(?:https?://)?(?:www\.)?(?:x|twitter)\.com/[A-Za-z0-9_]{2,20}/status/\d+",
-                         text or ""):
-        u = m.group(0)
-        if not u.startswith("http"):
-            u = "https://" + u
-        if u not in out:
-            out.append(u)
+    for m in re.finditer(r"(?:官方\s*X|官推|官方账号)[^\n。；]{0,60}?"
+                         r"(?:https?://)?(?:x|twitter)\.com/([A-Za-z0-9_]{1,20})",
+                         blob, re.I):
+        hd = _x_clean_handle(m.group(1))
+        if hd and hd not in out:
+            out.append(hd)
     return out
+
+
+def x_profile(handle, timeout=12):
+    """读 X 账号资料（不依赖时间线）。
+
+    fxtwitter 的 /2/profile/{h} 返回 name/bio/followers/statuses/joined/website，
+    即使账号一条贴文都没发也能拿到 —— 这才是判断「官推到底存不存在」的依据。
+    兜底读 x.com 主页的 og/twitter meta（登录墙不影响 meta）。
+    """
+    hd = _x_clean_handle(handle)
+    if not hd:
+        return None
+    ok, d = _fx_json(FX_USER % hd, timeout=timeout, tries=2)
+    if ok and isinstance(d, dict) and isinstance(d.get("user"), dict):
+        u = d["user"]
+        web = u.get("website") or {}
+        ver = u.get("verification") or {}
+        return {"handle": u.get("screen_name") or hd,
+                "name": u.get("name") or "", "bio": (u.get("description") or "").strip(),
+                "followers": int(u.get("followers") or 0),
+                "following": int(u.get("following") or 0),
+                "statuses": int(u.get("statuses") or 0),
+                "joined": (u.get("joined") or "")[:16],
+                "website": web.get("display_url") or web.get("url") or "",
+                "avatar": u.get("avatar_url") or "", "protected": bool(u.get("protected")),
+                "verified": bool(ver.get("verified")),
+                "url": u.get("url") or ("https://x.com/" + hd), "via": "fxtwitter"}
+    ok, h = fetch("https://x.com/" + hd, timeout=timeout, retries=1)
+    if ok and h:
+        t = re.search(r'<meta[^>]+(?:property|name)="(?:og:title|twitter:title)"[^>]+content="([^"]*)"', h, re.I)
+        b = re.search(r'<meta[^>]+(?:property|name)="(?:og:description|twitter:description|description)"[^>]+content="([^"]*)"', h, re.I)
+        if t or b:
+            return {"handle": hd, "name": html.unescape(t.group(1)) if t else hd,
+                    "bio": html.unescape(b.group(1)) if b else "",
+                    "followers": 0, "following": 0, "statuses": -1,
+                    "joined": "", "website": "", "avatar": "", "protected": False,
+                    "verified": False, "url": "https://x.com/" + hd, "via": "x.com meta"}
+    return None
 
 
 # Bittensor 生态圈的几个「广播站」账号：它们发的是全生态资讯，
@@ -1485,7 +1668,7 @@ def x_eco_posts(meta, days=14, log=None, skip_handles=None):
 
     def _grab(h):
         try:
-            return x_user_posts(h, pages=1)[1]
+            return x_user_posts(h, pages=1, want_profile=False)[1]
         except Exception:
             return []
 
@@ -1522,31 +1705,74 @@ def x_eco_posts(meta, days=14, log=None, skip_handles=None):
     return hits
 
 
-def src_x(meta, site_html="", extra_links=None, days=14, log=None):
+def src_x(meta, site_html="", extra_links=None, days=14, log=None,
+          extra_handles=None, authority_handles=None):
     """X（推特）：读官方账号时间线 + 用户在群里/反馈里贴出的具体帖子。
 
     身份分级（报告里必须按级别标注，不能用 KOL 的话冒充官方表态）：
-      official  = 账号名/简介里出现该子网名，或该号就是官网自己挂的 X 链接
+      official  = 用户直接提供的官推链接 / 官网自己挂的 X 链接 / 账号名或简介含子网名
       thirdparty= 账号本身不是项目方，但贴文点名了该子网（只能标「第三方提及」）
     其余一律丢弃，不把同名路人和泛 Bittensor 大 V 当官方。
+
+    v1.14.0：extra_handles 接收用户贴的**账号主页链接**（例如
+    「24官推https://x.com/ms_computer」）。这类链接以前被 x_links_in 整条丢掉，
+    导致用户明明给了官推却看到「找不到」。现在它排在所有猜测候选之前，
+    并且账号零贴文也算「已核实」，不再判成 X 源失败。
     """
     extra_links = list(extra_links or [])
+    def _uniq(seq):
+        out = []
+        for h in (seq or []):
+            hd = _x_clean_handle(h)
+            if hd and hd not in out:
+                out.append(hd)
+        return out
+
+    _uh = _uniq(extra_handles)
+    # 只有用户**反馈里直接给出**的账号才算权威证据；群聊档案里翻出来的账号
+    # 只是社区提到的候选，仍要过相关性校验，不能凭 is_user 直接定成官方号。
+    _auth_src = extra_handles if authority_handles is None else authority_handles
+    user_handles = {h.lower() for h in _uniq(_auth_src)}
     base = (A.ascii_name(meta.get("name")) or "").lower()
     sn = meta.get("sn", 0)
     hi, lo = _x_candidates(meta, site_html=site_html)
+    hi = [h for h in _uh if h not in hi] + hi      # 用户指定 > 官网 > 搜索/猜测
     site_handles = {h.lower() for h in _x_handles_from_html(site_html)}
+    authority = site_handles | user_handles
     tried, third, best = [], None, None
     all_posts, official = [], None
-    # 官网挂出来的 X 号优先试：命中就不用再看后面的候选（实测每次翻页约 4 秒，
-    # 逐个试完 5-6 个候选要 50 秒以上，投研整体会超时）。
-    pri = sorted(hi, key=lambda h: 0 if h.lower() in site_handles else 1)
+    # 用户指定 / 官网挂出的 X 号优先试：命中就不用再看后面的候选（实测每次翻页
+    # 约 4 秒，逐个试完 5-6 个候选要 50 秒以上，投研整体会超时）。
+    pri = sorted(hi, key=lambda h: 0 if h.lower() in authority else 1)
     for h in pri + [x for x in lo if x]:
         trusted = h not in lo
-        prof, posts = x_user_posts(h, pages=2, log=log)
+        prof, posts = x_user_posts(h, pages=2, log=log,
+                                   want_profile=(h.lower() in authority))
         if not prof:
             tried.append("%s:不可达" % h)
             continue
+        is_site = h.lower() in site_handles
+        is_user = h.lower() in user_handles
         if not posts:
+            # 账号真实存在但没有公开贴文 = 已核实的事实，不是「抓不到」。
+            # 用户/官网指定的账号直接认定为官方，并停止再猜别的号。
+            if trusted and (is_site or is_user or (base and base in h.lower())):
+                st = int(prof.get("statuses") or 0)
+                rec = {"src": "X", "ok": True, "handle": prof.get("handle") or h,
+                       "bio": prof.get("bio") or "", "nposts": "0", "posts": [],
+                       "items": [], "recent": [], "linked": [], "links": [],
+                       "level": "official", "topic_hits": 0, "via": "fxtwitter",
+                       "note": ("用户直接提供的官方账号链接" if is_user else
+                                "官网挂出的 X 账号" if is_site else
+                                "账号名含子网名，认定为项目方账号"),
+                       "profile": prof,
+                       "empty_reason": ("账号累计 %d 条公开贴文" % st if st >= 0
+                                        else "页面可见资料，未取到累计贴文数")}
+                if official is None:
+                    official = rec
+                if log:
+                    log("    X @%s：账号已核实（%s），无公开贴文" % (h, rec["empty_reason"]))
+                break
             tried.append("%s:无公开贴文" % h)
             continue
         own = [p for p in posts if p["author"].lower() == h.lower() and not p["is_rt"]]
@@ -1554,16 +1780,17 @@ def src_x(meta, site_html="", extra_links=None, days=14, log=None):
         topic_hits = len(X_TOPIC.findall(blob))
         name_in_id = bool(base) and (base in h.lower() or base in (prof.get("bio") or "").lower())
         name_in_posts = bool(base) and base in " ".join(p["text"] for p in own).lower()
-        is_site = h.lower() in site_handles
+        is_authority = is_site or is_user
         rec = {"src": "X", "ok": True, "handle": prof.get("handle") or h,
                "bio": prof.get("bio") or "", "nposts": str(len(posts)),
                "posts": [p["text"] for p in own[:10]], "items": posts,
                "links": [p["url"] for p in own[:10]],
-               "topic_hits": topic_hits, "via": "fxtwitter"}
-        if trusted and (is_site or name_in_id) and (topic_hits >= 1 or is_site):
+               "topic_hits": topic_hits, "via": "fxtwitter", "profile": prof}
+        if trusted and (is_authority or name_in_id) and (topic_hits >= 1 or is_authority):
             rec["level"] = "official"
-            rec["note"] = ("官网挂出的 X 账号" if is_site
-                           else "账号名/简介含子网名，认定为项目方账号")
+            rec["note"] = ("用户直接提供的官方账号链接" if is_user else
+                           "官网挂出的 X 账号" if is_site else
+                           "账号名/简介含子网名，认定为项目方账号")
             if official is None:
                 official = rec
                 all_posts += own
@@ -1578,13 +1805,31 @@ def src_x(meta, site_html="", extra_links=None, days=14, log=None):
         if best is None and topic_hits >= 2:
             best = rec
 
-    # 用户直接给的帖子链接：优先级最高，哪怕不是官方号也一定读出来（这是用户明确要看的）
+    # 用户直接给的帖子链接：优先级最高，哪怕不是官方号也一定读出来。
+    # 并发抓：单条帖子在代理抖动时要 10~15 秒，串行 6 条能拖到 90 秒，
+    # 而投研整体有墙钟上限，超时会把 X 源整个丢掉。
     linked = []
-    for u in extra_links[:6]:
-        p = x_tweet(u, log=log)
-        if p:
-            p["from"] = "用户提供链接"
-            linked.append(p)
+    todo = extra_links[:6]
+    if todo:
+        import concurrent.futures as cf
+        pool = cf.ThreadPoolExecutor(max_workers=min(3, len(todo)))
+        futs = [pool.submit(x_tweet, u) for u in todo]
+        try:
+            for fut in cf.as_completed(futs, timeout=35):
+                try:
+                    p = fut.result()
+                except Exception:
+                    p = None
+                if p:
+                    p["from"] = "用户提供链接"
+                    linked.append(p)
+                    if log:
+                        log("    X 单帖已读取：@%s「%s…」"
+                            % (p.get("author") or "?", (p.get("text") or "")[:40]))
+        except cf.TimeoutError:
+            pass
+        pool.shutdown(wait=False)
+        linked.sort(key=lambda x: -int(x.get("ts") or 0))
 
     rec = official or third or best
     if rec is None and linked:
@@ -1621,7 +1866,8 @@ def src_x(meta, site_html="", extra_links=None, days=14, log=None):
             "posts": [], "items": [], "recent": []}
 
 
-def collect(meta, sn, log=print, extra_x_links=None, days=14):
+def collect(meta, sn, log=print, extra_x_links=None, days=14,
+            extra_x_handles=None, authority_x_handles=None):
     """并发抓取全网素材，整体设一个墙钟上限。
 
     为什么从串行改成并发（2026-11-10 实测）：9 个源串行跑，网络一抖动就累加成
@@ -1682,7 +1928,8 @@ def collect(meta, sn, log=print, extra_x_links=None, days=14):
     site_html = (res.get("官网") or {}).get("html") or ""
     try:
         r = src_x(meta, site_html=site_html, extra_links=extra_x_links,
-                  days=days, log=log)
+                  extra_handles=extra_x_handles,
+                  authority_handles=authority_x_handles, days=days, log=log)
     except Exception as e:
         r = {"src": "X", "ok": False, "err": str(e)[:160], "posts": [], "recent": []}
     res["X"] = r
@@ -2341,8 +2588,29 @@ def _ext_block(sources, meta):
                 lines.append("    ↳ %s" % p["url"])
         blocks.append(head + "\n" + "\n".join(lines))
     elif x.get("ok"):
-        blocks.append("[X @%s] 账号可达但时间窗内无新贴文（简介：%s）"
-                      % (x.get("handle", ""), (x.get("bio") or "")[:140]))
+        prof = x.get("profile") or {}
+        if prof:
+            st = int(prof.get("statuses") or 0)
+            lvl = ("项目方官方账号（可作官方表态）" if x.get("level") == "official"
+                   else "第三方账号（**只能作第三方提及**）")
+            blocks.append("\n  ".join([
+                "[X @%s] 身份：%s（%s）" % (x.get("handle", ""), lvl,
+                                        x.get("note") or x.get("via") or ""),
+                "账号资料（已核实，来源 %s）：名称 %s；简介 %s；官网 %s；加入 %s；"
+                "粉丝 %s；关注 %s；累计 %s 条公开贴文；链接 %s"
+                % (prof.get("via") or "fxtwitter", prof.get("name") or "-",
+                   (prof.get("bio") or "-")[:160].replace("\n", " "),
+                   prof.get("website") or "-", prof.get("joined") or "-",
+                   prof.get("followers", 0), prof.get("following", 0),
+                   ("未知" if st < 0 else st), prof.get("url") or "-"),
+                "%s；本次时间窗内 %d 条新贴文。"
+                % (x.get("empty_reason") or "账号可达但时间窗内无新贴文", len(recent)),
+                "✅ 这是**已核实的账号状态**，不是抓取失败：报告应写「官方账号已确认、"
+                "目前未发布内容」，不得写「官推找不到 / 链接不可访问」，也不得编造推文。",
+            ]))
+        else:
+            blocks.append("[X @%s] 账号可达但时间窗内无新贴文（简介：%s）"
+                          % (x.get("handle", ""), (x.get("bio") or "")[:140]))
     else:
         blocks.append("[X] 未获取（%s）——不得据此推断官方态度" % x.get("err", ""))
     # 生态广播号（opentensor / taostats / bittensor）里点名本子网的贴文：
@@ -2918,20 +3186,44 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     if feedback:
         log("   本次带用户反馈（将作为权威修正写入输入）：%s" % feedback[:100])
     # 群里/用户反馈里贴出的 X 链接：用户既然给了链接，就必须真去读出来。
-    # 这是「明明知道有新资讯却什么都没提供」的最直接来源。
-    extra_links = x_links_in(feedback)
+    # 2026-11-11：链接分两类 —— 帖子（/status/ID）和**账号主页**（/handle）。
+    # 用户说「24官推 https://x.com/ms_computer」给的是后者，以前整条被丢掉。
+    _tg = x_targets_in(feedback)
+    # 必须复制：下面会把群聊档案里翻出来的账号 append 进 extra_handles，
+    # 若直接引用 _tg["handles"]，群聊路人号会一起变成「用户指定的官推」权威证据。
+    extra_links, extra_handles = list(_tg["posts"]), list(_tg["handles"])
+    auth_handles = list(_tg["handles"])
     # 群聊档案里出现过的 X 链接同样是「社区看到的最新资讯」，一并读（近期的优先）
     if arc:
         _chat_txt = "\n".join(e.get("text") or ""
                               for ents in (arc.get("days") or {}).values() for e in ents)
-        for u in x_links_in(_chat_txt):
+        _ct = x_targets_in(_chat_txt)
+        for u in _ct["posts"]:
             if u not in extra_links:
                 extra_links.append(u)
+        for h in _ct["handles"]:
+            if h not in extra_handles:
+                extra_handles.append(h)
     extra_links = extra_links[:8]
+    extra_handles = extra_handles[:6]
+    if arc:
+        # 历史报告里已经写明的官推，下次不带链接也要能接着用
+        for h in x_official_from_archive(arc):
+            if h not in extra_handles:
+                extra_handles.append(h)
+            if h not in auth_handles:
+                auth_handles.append(h)
     if extra_links:
         log("   待读取的 X 帖链接：%d 条（来自反馈/群聊）" % len(extra_links))
+    if extra_handles:
+        log("   待核实的 X 账号：%s（来自反馈/群聊，按官方账号候选处理）"
+            % "、".join("@" + h for h in extra_handles))
     log("② 全网抓取增补最新资讯（链上数据站 / 官网 / GitHub / 新闻 / 搜索 / X）…")
-    sources = collect(meta, sn, log=log, extra_x_links=extra_links, days=days)
+    # auth_handles = 本次反馈给的官推 + 历史报告里已确认过的官推；
+    # 群聊里翻出来的账号只作候选，不算权威（避免把路人号直接定成官方）。
+    sources = collect(meta, sn, log=log, extra_x_links=extra_links,
+                      extra_x_handles=extra_handles,
+                      authority_x_handles=auth_handles, days=days)
     # 知识库缺名称/官网时，用数据站页面反查补齐，再补抓依赖这些字段的源（官网/GitHub/搜索/X）
     before = (meta.get("name"), meta.get("url"), meta.get("github"))
     meta = enrich_meta(meta, sources, log=log)
@@ -2950,7 +3242,8 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         if not (sources.get("X") or {}).get("ok"):
             try:
                 r = src_x(meta, site_html=(sources.get("官网") or {}).get("html") or "",
-                          extra_links=extra_links, days=days, log=log)
+                          extra_links=extra_links, extra_handles=extra_handles,
+                          authority_handles=auth_handles, days=days, log=log)
             except Exception as e:
                 r = {"src": "X", "ok": False, "err": str(e)[:120], "recent": []}
             sources["X"] = r
@@ -2961,15 +3254,31 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     if feedback:
         # 用户反馈单独成段，且明确标「权威修正」：模型很吃这一套，
         # 只把反馈混在正文里它常常当成又一条群聊传闻，改不动已经写下的判断。
-        _xr = (sources.get("X") or {}).get("linked") or []
+        _xsrc = sources.get("X") or {}
+        _xr = _xsrc.get("linked") or []
+        _xprof = _xsrc.get("profile") or {}
         _xnote = ""
         if extra_links and _xr:
             _xnote = ("\n【重要】反馈里的 X 链接已真实抓取到原文，正文在上面的 [X] 段里（标注了"
                       "「用户提供」）。**必须**把这些内容写进时间线并注明日期与发布者；"
                       "**禁止**再写「帖子内容未获取/待确认」这类话——原文就在输入里。\n")
+            if _xprof:
+                _xnote += ("\n【补充】同时核实了账号 @%s（%s），资料见 [X] 段。\n"
+                           % (_xprof.get("handle") or "?", _xprof.get("name") or ""))
+        elif (extra_links or extra_handles) and _xprof:
+            _xnote = ("\n【重要】反馈里给出的 X 账号已**真实核实**：@%s（%s；%s），"
+                      "完整资料在上面的 [X] 段。报告**必须**写成「已核实官方账号存在，"
+                      "目前无公开贴文」，**禁止**再写「官推找不到 / 链接不可访问 / 待确认」，"
+                      "也**禁止**编造任何推文内容。\n"
+                      % (_xprof.get("handle") or "?", _xprof.get("name") or "",
+                         _xsrc.get("empty_reason") or "本次时间窗内无新贴文"))
         elif extra_links and not _xr:
-            _xnote = ("\n【说明】反馈里的 X 链接本次抓取失败（可能已被删除或设为私密），"
+            _xnote = ("\n【说明】反馈里的 X 帖子链接本次抓取失败（可能已被删除或设为私密），"
                       "如需提及只能写「链接不可访问」，不得编造其内容。\n")
+        elif extra_handles:
+            _xnote = ("\n【说明】反馈里给出的 X 账号（%s）本次未能核实（可能不存在或接口暂不可用），"
+                      "只能写「链接不可访问/未核实」，不得编造账号资料或推文。\n"
+                      % "、".join("@" + h for h in extra_handles))
         text_block += (
             "\n\n===== 用户反馈（最高优先级，必须据此修正）=====\n"
             "%s\n"

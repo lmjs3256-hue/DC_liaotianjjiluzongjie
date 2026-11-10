@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -877,6 +877,12 @@ SYSTEM_PROMPT = (
     "**背景日发生的事一律不得写成总结日（当天）的新闻**；如果当天消息明确延续背景日的话题，"
     "可以写「延续前几日的话题」，但每件事实必须归属其真实发生的日期，不得把日期混写、"
     "也不得把背景日的内容单独扩成一条。总结对象永远只有【当日消息】。\n"
+    "24b. **子网档案只用来认人，不用来叙事**：输入里可能附有【本次聊到的子网 —— 本地档案摘要】，"
+    "它给的是每个子网的名称、业务定位、历史讨论和此前投研结论。用它的方式只有两种："
+    "① 当天消息里提到某子网时，写清它**是什么**（例：SN41 Almanac 是做预测市场情报的），"
+    "不要只写「某子网」「该子网」；② 当天讨论明显延续此前投研关注点时，知道上下文，避免把结论写反。"
+    "**不得把档案里的历史讨论当成本次总结对象**（那是前几天的原话，不要重抄一遍、也不要当成今天发生的事）；"
+    "**不得把档案里的旧数据当成今天的行情数据**（价格/收入/回购只认当日或最近一次抓取，并标时间）。\n"
     "25. **「次日」消息是今晨补录**：总结「昨天」时，导出范围延伸到当下，"
     "时间带「次日」前缀的消息发生在**总结日的下一天（今天凌晨到现在）**。"
     "这些消息可以写进日报，但必须标注「今晨」，不得当成总结日当天的事件，"
@@ -2525,6 +2531,164 @@ def build_context_block(cfg, focus_day_str, max_per_day=160):
         % (n_days, "、".join(counts) if counts else "全部无记录", len(ctx_items)))
     return "\n\n".join(b for b in blocks if b), ctx_items
 
+
+def _clip_flat(s, n):
+    """压成单行并截断（档案里的原文带换行，直接拼进 bullet 会把版式搞乱）。"""
+    s = re.sub(r"\s+", " ", (s or "")).strip()
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _research_brief(body, max_items=3):
+    """从一份投研报告正文里抽「最该被日报引用」的结论行。
+
+    为什么不直接截前 N 字：报告以「📰 最新资讯」开头，截前 N 字拿到的是一堆资讯标题，
+    对「这子网是谁、现在什么状况」几乎没用。收入/回购与预期跟踪才是结论所在。
+    """
+    out, txt = [], (body or "")
+    for emoji, label in (("💰", "收入/回购"), ("📌", "上次跟踪"), ("💡", "要点")):
+        m = re.search(r"\*\*%s[^\*]*\*\*[^\n]*\n((?:[-•].+\n?)+)" % emoji, txt)
+        if not m:
+            continue
+        for ln in m.group(1).strip().splitlines():
+            ln = re.sub(r"^[-•]\s*", "", ln)
+            ln = re.sub(r"</?font[^>]*>", "", ln, flags=re.I)
+            ln = ln.replace("**", "").strip()
+            if ln:
+                out.append("%s：%s" % (label, _clip_flat(ln, 100)))
+            if len(out) >= max_items:
+                return out
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def build_subnet_context_block(cfg, items, day_str=None, max_sn=8, max_chars=2000):
+    """把「当日消息里提到的子网」按本地档案摘要注入，补一层全局理解。
+
+    为什么需要：日报输入原本只有原始聊天记录，模型不知道 SN64 是 Chutes、
+    做什么业务、前几次投研得出过什么结论，只能从零散对话里猜 —— 于是写出
+    「某子网」这种模糊表述，或者把改名/换业务的子网背景搞错。
+    与「背景资料」的分工：背景资料是前几天的**聊天记录**（还没沉淀），
+    这里是**已沉淀的档案**（名称/业务/历史讨论/投研结论），两者互补不重复。
+
+    两条自我约束（都是为了不白占字数）：
+      · 档案讨论只取 **day_str 之前**的条目 —— 当天消息正文里已经有了，
+        再注入一遍等于让模型看两遍同样的东西；
+      · 同一条原话只出现一次 —— 泛论类发言会同时命中多个子网，
+        重复投递对理解任何一个子网都没帮助。
+    块内明写「不是总结对象」，避免模型把档案里的旧事当今天的新事件重写。
+    """
+    if not items:
+        return ""
+    try:
+        import subnet_archive as SA
+    except Exception:
+        return ""
+    try:
+        arc_dir = SA.get_arc_dir(cfg)
+        kb = SA.load_kb()
+        nidx = SA.name_index(kb)
+    except Exception as e:
+        log("子网档案：初始化失败（%s），本次不注入" % e)
+        return ""
+
+    # 1) 逐条消息认子网，累计「今天被提到几次」——只收强命中，
+    #    弱命中（裸数字/通用词）误报太多，宁可不注入也不要张冠李戴。
+    cnt = {}
+    for _r, _t, _a, c in items:
+        try:
+            hits = SA.classify(c or "", nidx) or {}
+        except Exception:
+            continue
+        for sn, (kind, _via) in hits.items():
+            if kind == "strong":
+                cnt[sn] = cnt.get(sn, 0) + 1
+    if not cnt:
+        return ""
+
+    # 2) 聊得多的排前面；同次数则编号小的在前，保证输出稳定（可复现）
+    ranked = sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:max_sn]
+
+    seen_txt = set()          # 已引用的原话，跨子网去重
+    lines, used, n_hit = [], 0, 0
+    for sn, times in ranked:
+        try:
+            arc = SA.load_archive(arc_dir, sn)
+        except Exception:
+            arc = None
+        if not arc:
+            continue                     # 没建档的子网不编背景，留给正文自己说
+        name = (arc.get("name") or "").strip() or "（知识库未收录）"
+        biz = _clip_flat(arc.get("biz") or "", 44)
+        head = "- **SN%d %s**" % (sn, name)
+        if biz:
+            head += "（%s）" % biz
+        head += "｜今日提到 %d 次" % times
+
+        days = arc.get("days") or {}
+        n_ent = sum(len(v or []) for v in days.values())
+        if days:
+            head += "｜档案覆盖 %d 天 / %d 条" % (len(days), n_ent)
+
+        detail = []
+        # 最近一份投研的结论（这部分最值钱，是已经交叉验证过的判断）
+        reps = arc.get("reports") or []
+        if reps:
+            last = reps[-1]
+            detail.append("· 最近投研（%s）：" % (last.get("date") or "?"))
+            brief = _research_brief(last.get("body") or "")
+            if brief:
+                detail.extend("  " + b for b in brief)
+            else:
+                detail.append("  （该次报告无结论段可摘）")
+        # 历史语境：只取 day_str 之前的最近一条，当天内容正文已有
+        cand = []
+        for d in sorted(days.keys()):
+            if day_str and d >= day_str:
+                continue                 # 当天及以后的不要
+            for e in (days.get(d) or []):
+                t = _clip_flat(e.get("zh") or e.get("text") or "", 70)
+                if t:
+                    cand.append((d, e.get("author") or "?", t))
+        for d, who, t in reversed(cand):
+            if t in seen_txt:
+                continue                 # 泛论类发言会被多个子网命中，只引用一次
+            seen_txt.add(t)
+            detail.append("· 档案 %s %s：「%s」" % (d[5:], who, t))
+            break                        # 每个子网只给一条历史语境
+
+        block = head + ("\n" + "\n".join(detail) if detail else "")
+        if used + len(block) > max_chars:
+            break
+        lines.append(block)
+        used += len(block)
+        n_hit += 1
+
+    if not lines:
+        return ""
+    log("子网档案：当日提到 %d 个子网，注入档案摘要 %d 个（%d 字）"
+        % (len(cnt), n_hit, used))
+    return ("【本次聊到的子网 —— 本地档案摘要】下面是这些子网的沉淀档案（业务定位、"
+            "历史讨论、此前投研结论）。**仅供理解背景，不是本次总结对象**：不要把档案里的"
+            "旧事当成今天的新事件重写一遍；只用来避免把子网搞混、写清「哪个子网是什么」。\n"
+            + "\n".join(lines))
+
+
+def _build_full_text_block(cfg, channel_name, day_str, items):
+    """组装完整的输入文本块：当日记录 + 前几天聊天记录 + 聊到的子网档案。
+
+    集中成一处，是因为 resummarize 与日常总结两条路径都要用同一套背景，
+    分开写容易只改一处、另一处悄悄少一层上下文。
+    """
+    ctx_block, ctx_items = build_context_block(cfg, day_str)
+    text_block = build_text_block(channel_name, day_str, items, extra_hint_items=ctx_items)
+    if ctx_block:
+        text_block += "\n\n" + ctx_block
+    sn_block = build_subnet_context_block(cfg, items, day_str=day_str)
+    if sn_block:
+        text_block += "\n\n" + sn_block
+    return text_block
+
 def _audit_names(digest, items, tag=""):
     """人名保真核对：把日报「人物观点」里出现的名字与当日真实发言者名单比对。
     不在名单里的只写日志提示（不阻断推送、不改内容），便于人工复核是否被模型改写或编造。"""
@@ -2602,12 +2766,9 @@ def run_one_day(cfg, after_dt, before_dt):
     text_block = ""
     ctx_block, ctx_items = "", []
     if items:
-        # 背景资料：总结日之前 N 天（config.context_days，默认 2）的导出记录，
-        # 帮模型接上跨天话题；只作理解用，不算总结对象
-        ctx_block, ctx_items = build_context_block(cfg, day_str)
-        text_block = build_text_block(channel_name, day_str, items, extra_hint_items=ctx_items)
-        if ctx_block:
-            text_block += "\n\n" + ctx_block
+        # 背景：总结日之前 N 天（config.context_days，默认 2）的导出记录，帮模型接上跨天话题；
+        # 加上当日提到的子网的本地档案摘要（名称/业务/此前投研结论）。两者都只作理解用。
+        text_block = _build_full_text_block(cfg, channel_name, day_str, items)
     sys_p = SYSTEM_PROMPT
     if action in ("resummarize", "merge"):
         sys_p = SYSTEM_PROMPT + DEEPEN_HINT
@@ -3057,10 +3218,8 @@ def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
         raise RuntimeError("%s 的导出记录里没有实质消息" % day_str)
 
     channel_name = cfg.get("channel_name", "price-talk")
-    ctx_block, ctx_items = build_context_block(cfg, day_str)
-    text_block = build_text_block(channel_name, day_str, items, extra_hint_items=ctx_items)
-    if ctx_block:
-        text_block += "\n\n" + ctx_block
+    # 与日常总结走同一套背景（前几天聊天 + 聊到的子网档案），避免两条路径上下文不一致
+    text_block = _build_full_text_block(cfg, channel_name, day_str, items)
     sys_p = SYSTEM_PROMPT + (FEEDBACK_HINT % feedback)
     log("按用户反馈重总结（%s，%d 条消息）：%s" % (day_str, len(items), feedback[:80]))
     digest = call_deepseek(cfg, text_block, system_prompt=sys_p)

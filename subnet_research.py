@@ -522,7 +522,346 @@ def src_website(meta):
             "html": h[:400000]}
 
 
-def src_github(meta, days=120):
+# ---------------------------------------------------------------- GitHub 摘要
+# 用户要求：GitHub 那条必须说清「提交几次 + 主要更新了什么」，而且**不要英文**。
+# 模型只要看得到英文 commit 标题就一定会抄（实测输出过
+# 「最近提交集中在当日（arena observation / owner provision 相关 fix）」
+# 以及整屏的 `Merge pull request #1177 from…`）。所以在**素材层**就把提交压成中文，
+# 英文原文根本不进入模型的输入——这比在提示词里劝阻有效得多。
+_GH_MERGE_RE = re.compile(r"^\s*merge\b", re.I)
+
+# 提交意图分类（按动词/关键词判定，取命中最多的两类写成「以…为主」）
+_GH_KINDS = (
+    ("修复", r"\b(fix|fixes|fixed|fixing|bug|bugs|hotfix|patch|patches|resolve|resolves|resolved|correct|corrects)\b"),
+    ("新增", r"\b(add|adds|added|adding|implement|implements|implemented|introduce|introduces|support|supports|new|create|creates|enable|enables)\b"),
+    ("优化", r"\b(update|updates|updated|improve|improves|improved|enhance|enhances|refine|refines|adjust|adjusts|tune|tunes|tweak|tweaks|polish)\b"),
+    ("重构整理", r"\b(refactor|refactors|refactoring|rename|renames|move|moves|clean|cleanup|reorganize|simplify|simplifies|extract|extracts|split)\b"),
+    ("测试", r"\b(test|tests|testing|spec|specs|coverage|fixture|fixtures)\b"),
+    ("文档", r"\b(docs?|readme|comment|comments|changelog|docstring)\b"),
+    ("性能", r"\b(perf|performance|optimi[sz]e|optimi[sz]ation|speed|faster|cache|caching)\b"),
+    ("依赖与配置", r"\b(bump|bumps|deps?|dependenc\w*|workflow|workflows|ci|lint|linter|chore|config|release|releases|version|versions)\b"),
+)
+
+# 业务主题（命中即计入；一个标题可命中多个，按频次取前三个）
+_GH_TOPICS = (
+    ("竞技场", r"\barena\b"),
+    ("观测数据回执", r"\bobservation|acknowledg\w*|\back\b"),
+    ("评审判定", r"\bjudge|judging|judgement\b"),
+    ("引用校验", r"\bcitation|citations|cite|cites\b"),
+    ("证据与溯源", r"\bevidence|grounded|excerpt|excerpts|provenance\b"),
+    ("验证器", r"\bverif\w*|validator|validators\b"),
+    ("供应方", r"\bprovider|providers\b"),
+    ("租约与到期回收", r"\blease|leases|expire|expires|expired|expiry|recover|recovery\b"),
+    ("所有者", r"\bowner|owners\b"),
+    ("预算与额度", r"\bbudget|budgets|spend|spending|quota|cost|costs\b"),
+    ("意图识别", r"\bintent|intents|icp\b"),
+    ("矿池与槽位", r"\bpool|pools|slot|slots\b"),
+    ("做市与费率", r"\bmarket making|maker|fee|fees|spread|quote|quotes\b"),
+    ("模拟与回测", r"\bsimulat\w*|backtest|backtesting\b"),
+    ("注册与质押", r"\bregist\w*|stake|stakes|staking|burn\b"),
+    ("接口与网关", r"\bapi|apis|mcp|endpoint|endpoints|client|clients|gateway\b"),
+    ("前端界面", r"\bui|frontend|dashboard|page|pages|component|components\b"),
+    ("数据库", r"\bdb|database|migration|migrations|schema|query|queries\b"),
+    ("模型推理", r"\bllm|llms|model|models|inference|prompt|prompts|embedding|embeddings\b"),
+)
+
+
+_GH_EMBED = re.compile(
+    r'<script type="application/json" data-target="react-app\.embeddedData">(.*?)</script>', re.S)
+
+
+def _gh_embedded(html_text):
+    """从 commits 页面 HTML 里取出内嵌 JSON 的 commits 路由对象。
+
+    为什么不用 commits.atom（2026-11-10 实测）：
+    atom 一页**固定 20 条**，SN71 这种一天 35 次提交的仓库，一页只覆盖大半天，
+    会把「近 14 天提交次数」低报成 20；而 HTML 页面内嵌的 JSON 一页给 35 条，
+    还带 `hasNextPage` 与 `endCursor`，能真正翻到窗口起点。
+
+    两个 URL 的内嵌 key 不一样，必须都认（一开始只认后者，导致第 2 页起全空）：
+      · `/owner/repo/commits`        → payload.commitsRoute
+      · `/owner/repo/commits/main`   → payload.commitsRefRoute
+    """
+    m = _GH_EMBED.search(html_text or "")
+    if not m:
+        return None
+    try:
+        d = json.loads(m.group(1))
+    except Exception:
+        return None
+    p = d.get("payload") or {}
+    for k in ("commitsRefRoute", "commitsRoute", "commits"):
+        r = p.get(k)
+        if isinstance(r, dict):
+            return r
+    return None
+
+
+def _gh_parse_route(route):
+    """commitsRefRoute → [{title, at}]，按 committedDate 取日期。"""
+    out = []
+    for g in route.get("commitGroups") or []:
+        for c in g.get("commits") or []:
+            at = (c.get("committedDate") or c.get("authoredDate") or "")[:10]
+            title = (c.get("shortMessage") or "").strip()
+            if title:
+                out.append({"title": title, "at": at})
+    return out
+
+
+def _gh_get(url, tries=3, sleep=2):
+    """取 GitHub 页面，容忍 502/代理抖动。
+
+    实测（2026-11-10）：本机直连 github.com 会间歇性 502 Bad Gateway 或
+    IncompleteRead，同一个 URL 隔几秒重试就能过。单次失败就放弃会把
+    「提交次数」统计成 0 或严重低估，所以这里单独给一条短重试。
+    """
+    last = ""
+    for i in range(max(1, tries)):
+        ok, x = fetch(url, timeout=20, retries=1)
+        if ok and len(x) > 20000 and _GH_EMBED.search(x):
+            return True, x
+        last = x if not ok else "页面无内嵌数据"
+        if i + 1 < tries:
+            time.sleep(sleep * (i + 1))
+    return False, last
+
+
+def _gh_pages(owner, repo, pages=3, today=None, days=14):
+    """抓 commits 列表，翻到时间窗起点就停。
+
+    两条路径互补：① HTML 内嵌 JSON（一页 35 条 + cursor，首选）；
+    ② commits.atom（一页 20 条，HTML 拿不到时兜底）。
+    合并去重后返回，下游按日期过滤，所以多抓不会污染结果。
+
+    页数上限 3：实测 4 页要 98 秒（每页 20-25 秒），而 3 页已覆盖
+    SN71 近 14 天全部提交（129 次）。再多翻只是把旧提交也拉进来。
+    """
+    base = "https://github.com/%s/%s/commits" % (owner, repo)
+    out, seen = [], set()
+    cut = ""
+    if today:
+        cut = (today - datetime.timedelta(days=int(days or 14) + 7)).strftime("%Y-%m-%d")
+    url = base
+    more = False        # 还有下一页没翻完（说明统计值只是下限）
+    for _p in range(max(1, int(pages))):
+        ok, x = _gh_get(url, tries=2)
+        if not ok:
+            break
+        route = _gh_embedded(x)
+        rows = _gh_parse_route(route) if route else []
+        if not rows:
+            break
+        new = 0
+        for c in rows:
+            k = (c["at"], c["title"])
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(c)
+            new += 1
+        pg = ((route.get("filters") or {}).get("pagination") or {})
+        cur = pg.get("endCursor") or ""
+        more = bool(pg.get("hasNextPage") and cur)
+        if not more or new == 0:
+            break
+        if cut:
+            # 本页已翻到窗口之前 → 没必要再翻（省时间，也少触发 GitHub 限流）
+            got = [c["at"] for c in rows if c["at"]]
+            if got and min(got) < cut:
+                more = False        # 是主动停的，不是没翻完
+                break
+        url = base + "?after=" + urllib.parse.quote(cur, safe="")
+    if out:
+        return out, more
+    # 兜底一：atom（一页 20 条）。翻页全失败时，这 20 条里最新的那条
+    # 就是「最后一次更新」，哪怕一个月内的次数统计不出来，这一条也必须在。
+    for uu in ("https://github.com/%s/%s/commits.atom" % (owner, repo),
+               "https://github.com/%s/%s/commits/main.atom" % (owner, repo)):
+        ok, x = fetch(uu, timeout=15, retries=2)
+        if not ok:
+            continue
+        for it in re.findall(r"<entry>(.*?)</entry>", x, re.S):
+            ti = re.search(r"<title>(.*?)</title>", it, re.S)
+            up = re.search(r"<updated>(.*?)</updated>", it)
+            title = html.unescape(re.sub(r"<.*?>", "", ti.group(1))).strip() if ti else ""
+            at = (up.group(1) if up else "")[:10]
+            if title and (at, title) not in seen:
+                seen.add((at, title))
+                out.append({"title": title, "at": at})
+        if out:
+            return out, True        # atom 只有 20 条，一定是被截断的
+    # 兜底二：连 atom 都不通时，如果手里有 release，就把发版日当最后一次更新。
+    # 这样「最后一次更新」永远不会因为翻页异常而整个消失。
+    return out, False
+
+
+def gh_summary(commits, releases=None, days=30, today=None, truncated=False, shown=None):
+    """把提交列表压成「最后一次更新什么时候 / 近一个月几次 / 最后一次改了什么」。
+
+    用户明确指定的三条口径（2026-11-10）：
+      「翻页有限制，就统计最后一次更新什么时候，近一个月更新几次，最后一次更新什么内容」
+    所以摘要的主语是**最后一次提交**，不是「提交集中在哪天」——
+    翻页拿到多少算多少，拿到的是下限，就老实写「至少 N 次」，绝不假装是全量。
+
+    返回 dict，含 sentence（可直接写进报告的一句中文）。
+    """
+    if today is None:
+        today = datetime.datetime.now(TZ).date()
+    if not isinstance(today, datetime.date):
+        today = datetime.datetime.now(TZ).date()
+    days = int(days or 30)
+    lo = today - datetime.timedelta(days=days)
+    rel = releases or []
+    sm = {"ok": True, "days": days, "total": 0, "merge": 0, "slim": 0, "shown": shown or 0,
+          "per_day": {}, "first": "", "last": "", "peak_day": "", "peak_n": 0,
+          "kinds": [], "topics": [], "last_commit": "", "truncated": bool(truncated),
+          "last_detail": "", "active_days": 0, "releases": [], "sentence": "", "line": ""}
+    rows = []
+    for c in commits or []:
+        at = (c.get("at") or "")[:10]
+        try:
+            d = datetime.datetime.strptime(at, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        rows.append((d, c.get("title") or ""))
+    rows.sort(key=lambda r: r[0])
+    if rows:
+        sm["last_commit"] = rows[-1][0].strftime("%m-%d")
+    inwin = [(d, t) for d, t in rows if lo <= d <= today]
+    sm["total"] = len(inwin)
+    merge_n = sum(1 for _d, t in inwin if _GH_MERGE_RE.match(t))
+    sm["merge"] = merge_n
+    sm["slim"] = len(inwin) - merge_n
+    per = {}
+    for d, _t in inwin:
+        per[d] = per.get(d, 0) + 1
+    sm["per_day"] = {k.strftime("%m-%d"): v for k, v in sorted(per.items())}
+    sm["active_days"] = len(per)
+    if per:
+        pk = max(per.items(), key=lambda kv: (kv[1], kv[0]))
+        sm["peak_day"], sm["peak_n"] = pk[0].strftime("%m-%d"), pk[1]
+        sm["first"] = min(per).strftime("%m-%d")
+        sm["last"] = max(per).strftime("%m-%d")
+    # 最后一次真实改动（跳过纯合并提交，它们没有独立语义）
+    real_all = [(d, t) for d, t in rows if not _GH_MERGE_RE.match(t)]
+    if real_all:
+        ld, lt = real_all[-1]
+        ph = _gh_topic_phrase([lt])
+        sm["last_detail_at"] = ld.strftime("%m-%d")
+        if ph:
+            sm["last_detail"] = "、".join(k for k, _n in ph[:2]) + "相关改动"
+        else:
+            kp = _gh_kind_phrase([lt])
+            sm["last_detail"] = ("%s类改动" % kp[0][0]) if kp else ""
+    # 统计口径用窗口内的真实改动
+    real = [t for _d, t in inwin if not _GH_MERGE_RE.match(t)]
+    sm["kinds"] = _gh_kind_phrase(real)
+    sm["topics"] = _gh_topic_phrase(real)
+    rl = []
+    for r in rel[:6]:
+        at = (r.get("at") or "")[:10]
+        try:
+            d = datetime.datetime.strptime(at, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if d < lo:
+            continue
+        ver = re.search(r"v?\d+\.\d+(?:\.\d+)?", r.get("title") or "")
+        rl.append({"at": d.strftime("%m-%d"),
+                   "ver": ver.group(0) if ver else "",
+                   "is_date_tag": bool(re.match(r"^\d{8}\b", (r.get("title") or "").strip()))})
+    sm["releases"] = rl
+    sm["sentence"] = gh_sentence(sm)
+    return sm
+
+
+def _gh_topic_phrase(real):
+    """从提交标题里抽出业务主题（返回「涉及A、B、C」式的中文短语，或列表）。"""
+    if not real:
+        return []
+    n = len(real)
+    got = []
+    for label, pat in _GH_TOPICS:
+        c = sum(1 for t in real if re.search(pat, t, re.I))
+        if c:
+            got.append((label, c))
+    got = [kv for kv in sorted(got, key=lambda kv: -kv[1]) if kv[1] >= max(1, n // 10)]
+    return got[:3]
+
+
+def _gh_kind_phrase(real):
+    """改动类型（修复/新增/优化…）。要求过 1/3 才算「为主」，否则宁可不说。
+
+    80 次改动里 6 次测试也会被写成「以测试为主」，读起来像这期只在写测试，
+    与事实相反，所以设了占比门槛。
+    """
+    if not real:
+        return []
+    n = max(1, len(real))
+    got = []
+    for label, pat in _GH_KINDS:
+        c = sum(1 for t in real if re.search(pat, t, re.I))
+        if c and c / n >= (1 / 3.0):
+            got.append((label, c))
+    return sorted(got, key=lambda kv: -kv[1])[:2]
+
+
+def gh_sentence(sm):
+    """一句直接进报告的中文：最后一次什么时候 + 近一个月几次 + 最后一次改了什么。"""
+    if not sm:
+        return ""
+    days = sm.get("days") or 30
+    total = sm.get("total") or 0
+    last = sm.get("last_commit") or ""
+    detail = sm.get("last_detail") or ""
+    topics = [k for k, _n in (sm.get("topics") or [])]
+    kinds = [k for k, _n in (sm.get("kinds") or [])]
+    if not total:
+        if last:
+            return "近 %d 天无提交，最后一次更新在 %s" % (days, last)
+        return "近 %d 天无提交记录" % days
+    # ① 最后一次更新什么时候 + 改了什么（这是用户要的主句）
+    out = "最后一次更新：%s" % (sm.get("last_detail_at") or last)
+    if detail:
+        out += "，改的是" + detail
+    elif topics:
+        out += "，涉及" + "、".join(topics)
+    # ② 近一个月几次（翻页受限时明确写「至少」）
+    cnt = "近 %d 天%s %d 次提交" % (days, "至少" if sm.get("truncated") else "共", total)
+    if sm.get("merge"):
+        cnt += "（含合并 %d 次，实际改动 %d 次）" % (sm["merge"], sm["slim"])
+    out += "；" + cnt
+    # ③ 节奏（只在真正有参考价值时给：活跃天数少、或某天特别集中）
+    # 翻页受限时样本只覆盖最近几天，说「只有 N 天有提交」会被读成「这项目一个月没动静」，
+    # 属于把抓取局限误写成事实 —— 这种情况下一个字节的节奏描述都不给。
+    if not sm.get("truncated"):
+        if sm.get("active_days") and sm["active_days"] <= 5 and sm.get("first") and sm.get("last") \
+                and sm["first"] != sm["last"]:
+            out += "，只有 %d 天有提交（%s 至 %s）" % (sm["active_days"], sm["first"], sm["last"])
+        elif sm.get("peak_n") and total and sm["peak_n"] * 2 >= total and sm.get("active_days", 0) > 1:
+            out += "，其中 %s 当天 %d 次" % (sm["peak_day"], sm["peak_n"])
+    # ④ 主体改动方向（占比达标才写；主题已在「最后一次」那句出现过就不再重复）
+    if kinds:
+        out += "，以%s为主" % "、".join(kinds)
+    rest = [t for t in topics if t not in (detail or "")]
+    if rest and not detail:
+        out += "，涉及" + "、".join(rest)
+    elif rest and detail:
+        out += "，整体涉及" + "、".join(rest)
+    # ⑤ 发版
+    if sm.get("releases"):
+        r = sm["releases"][0]
+        ver = (" " + r["ver"]) if r.get("ver") else ""
+        out += "；近 %d 天发版 %d 次（最新%s，%s）" % (days, len(sm["releases"]), ver, r["at"])
+    else:
+        out += "；本期无新版本"
+    if sm.get("truncated"):
+        out += "（翻页受限，实际次数更多）"
+    return out
+
+
+def src_github(meta, days=14):
     """GitHub releases + commits（Atom 源，无需 token）。"""
     gh = meta.get("github") or ""
     m = re.search(r"github\.com/([^/]+)/([^/?#]+)", gh)
@@ -530,7 +869,7 @@ def src_github(meta, days=120):
         return {"src": "GitHub", "ok": False, "err": "知识库无仓库地址"}
     owner, repo = m.group(1), re.sub(r"\.git$", "", m.group(2))
     out = {"src": "GitHub", "ok": True, "repo": "%s/%s" % (owner, repo),
-           "releases": [], "commits": [], "err": ""}
+           "releases": [], "commits": [], "summary": None, "err": ""}
     ok, x = fetch("https://github.com/%s/%s/releases.atom" % (owner, repo),
                   timeout=15, retries=1)
     if ok:
@@ -540,22 +879,205 @@ def src_github(meta, days=120):
             out["releases"].append({
                 "title": html.unescape(re.sub(r"<.*?>", "", ti.group(1))).strip() if ti else "",
                 "at": (up.group(1) if up else "")[:10]})
-    ok, x = fetch("https://github.com/%s/%s/commits.atom" % (owner, repo),
-                  timeout=15, retries=1)
-    if not ok:
-        ok, x = fetch("https://github.com/%s/%s/commits/main.atom" % (owner, repo),
-                      timeout=15, retries=1)
-    if ok:
-        for it in re.findall(r"<entry>(.*?)</entry>", x, re.S)[:15]:
-            ti = re.search(r"<title>(.*?)</title>", it, re.S)
-            up = re.search(r"<updated>(.*?)</updated>", it)
-            out["commits"].append({
-                "title": html.unescape(re.sub(r"<.*?>", "", ti.group(1))).strip() if ti else "",
-                "at": (up.group(1) if up else "")[:10]})
-    if not out["releases"] and not out["commits"]:
+    # 统计窗口固定看近一个月（用户口径：「近一个月更新几次」），
+    # 与报告时间线的 14 天窗口解耦 —— 开发节奏按月看才有意义。
+    commits, more = _gh_pages(owner, repo, pages=3,
+                              today=datetime.datetime.now(TZ).date(), days=30)
+    out["commits"] = commits
+    sm = None
+    if commits or out["releases"]:
+        sm = gh_summary(commits, out["releases"], days=30,
+                        truncated=more, shown=len(commits))
+    # 兜底：提交列表全空、或最后一次全是合并提交（没有内容可说）时，
+    # 从**仓库主页**取最后一次提交的时间与中文内容摘要。
+    # 用户明确要求：「兜底时仓库主页提取最后一次提交时间和内容摘要」。
+    need_fb = (not commits) or (sm is not None and not sm.get("last_detail"))
+    fb = _gh_repo_last_push(owner, repo) if need_fb else None
+    if fb:
+        # 只留中文字段进 sources，英文标题/路径不外泄到素材或档案
+        out["homepage"] = {"at": fb["at"], "detail": fb["detail"],
+                           "source": fb["source"], "oid": fb["oid"]}
+    if not commits and fb:
+        at = fb["at"] or ""
+        short = at[5:] if len(at) == 10 else at
+        sm = {"ok": True, "fallback": True, "homepage": True, "days": 30,
+              "total": 0, "truncated": False, "last_commit": short,
+              "last_detail_at": short, "last_detail": fb["detail"],
+              "kinds": [], "topics": [], "releases": [], "sentence": ""}
+        sm["sentence"] = (
+            "最后一次更新：%s，改的是%s；近 30 天提交次数未取到（翻页异常，已由%s兜底）"
+            % (short or "日期未取到", fb["detail"] or "内容未取到", fb["source"]))
+    elif not commits and out["releases"]:
+        # 连仓库主页都不通时，至少还有发版日期（内容摘要确实拿不到，如实写明）
+        r = out["releases"][0]
+        ver = re.search(r"v?\d+\.\d+(?:\.\d+)?", r.get("title") or "")
+        sm = gh_summary([], out["releases"], days=30)
+        sm["fallback"] = True
+        sm["sentence"] = ("提交列表与仓库主页均未取到（翻页异常），仅知最后一次发版在 %s%s，内容未取到"
+                          % ((r.get("at") or "日期未取到")[:10],
+                             ("（版本 " + ver.group(0) + "）") if ver else ""))
+    elif sm is not None and fb and not sm.get("last_detail"):
+        # 正常抓到了提交列表，但最后一次是纯合并提交 → 用主页内容补「改了什么」
+        at = fb["at"] or ""
+        sm["last_detail"] = fb["detail"]
+        sm["last_detail_at"] = (at[5:] if len(at) == 10 else at) or sm.get("last_commit") or ""
+        sm["homepage"] = True
+        sm["sentence"] = gh_sentence(sm)
+    out["summary"] = sm
+    if not out["releases"] and not commits and not fb:
         out["ok"] = False
-        out["err"] = "仓库不存在或无公开动态"
+        out["err"] = "仓库不存在、无公开动态，且仓库主页兜底失败"
     return out
+
+
+def _gh_norm(s):
+    """把提交标题/路径里的 _ - / . 换成空格，让词表的 \\b 边界能命中。
+
+    实测 `training_observation_ack_window_test.py` 直接用 \\bobservation\\b
+    是匹配不到的（下划线属于单词字符），必须先把分隔符打散。
+    """
+    return re.sub(r"[^A-Za-z0-9]+", " ", s or "")
+
+
+# 路径专用主题词表：提交标题常常只有「Merge pull request #…」，
+# 但改动文件列表能说明改的是哪个模块，这是兜底时最主要的内容线索。
+_GH_PATH_TOPICS = (
+    ("测试", r"(?:^|/)(?:tests?|specs?)\b|\btest_|_test\b|\.test\b"),
+    ("文档", r"(?:^|/)docs?\b|readme|changelog|\.md\b"),
+    ("接口与网关", r"gateway|proxy|endpoint|\bapis?\b"),
+    ("数据库", r"postgres|\bsql\b|migration|\bschema\b|\bdb\b"),
+    ("前端界面", r"frontend|dashboard|\bui\b|components?"),
+    ("依赖与配置", r"\.github|workflow|requirements|pyproject|docker|\.ya?ml\b|\.toml\b"),
+    ("模型推理", r"\bllm\b|inference|prompt|embedding"),
+    ("验证器", r"validator|miner|neuron|weight|score"),
+    ("竞技场", r"arena"),
+)
+
+
+def _gh_zh_detail(titles, paths=None):
+    """英文提交标题 + 变更文件 → 一句中文内容摘要（英文绝不外泄）。
+
+    兜底场景样本量只有 1~3 条，所以不套 gh_summary 的「占比过 1/3」门槛，
+    命中了就说命中了；命中不到也要给一句中文，不能把英文标题丢给模型。
+    """
+    titles = [t for t in (titles or []) if t]
+    paths = [p for p in (paths or []) if p]
+    if not titles and not paths:
+        return ""
+    blob = " ".join(_gh_norm(t) for t in titles)
+    alltext = blob + " " + " ".join(_gh_norm(p) for p in paths)
+    praw = " ".join(paths)
+    topics, seen = [], set()
+    for label, pat in _GH_TOPICS:
+        if label not in seen and re.search(pat, alltext, re.I):
+            seen.add(label)
+            topics.append(label)
+    for label, pat in _GH_PATH_TOPICS:
+        # 「测试」由下面的 kinds 表达，不占主题位，否则会写出
+        # 「测试相关的测试改动」这种重复。
+        if label != "测试" and label not in seen and re.search(pat, praw, re.I):
+            seen.add(label)
+            topics.append(label)
+    topics = topics[:3]
+    kinds = []
+    for label, pat in _GH_KINDS:
+        n = len(re.findall(pat, blob, re.I))
+        if n:
+            kinds.append((label, n))
+    kinds = [k for k, _n in sorted(kinds, key=lambda kv: -kv[1])[:2]]
+    # 同一个词既当主题又当意图时只留主题（例：「文档相关的优化改动」）
+    kinds = [k for k in kinds if k not in topics]
+    # 标题没写「test」但改的全是 tests/ 下的文件时，也要说清是测试改动
+    if re.search(r"(?:^|/)(?:tests?|specs?)\b|\btest_|_test\b|\.test\b", praw, re.I):
+        if "测试" not in kinds:
+            kinds.append("测试")
+    kinds = kinds[:2]
+    if topics and kinds:
+        return "%s相关的%s改动" % ("、".join(topics), "与".join(kinds))
+    if topics:
+        return "%s相关改动" % "、".join(topics)
+    if kinds:
+        return "%s类改动" % "与".join(kinds)
+    return "代码逻辑调整"
+
+
+def _gh_repo_last_push(owner, repo):
+    """兜底：从仓库主页出发，取「最后一次提交时间 + 中文内容摘要」。
+
+    用户口径（2026-11-10）：「兜底时仓库主页提取最后一次提交时间和内容摘要」。
+    翻页异常时不能只回一句「抓取失败」，必须至少说清最后一次更新是什么时候、改了什么。
+
+    路径：主页内嵌 JSON → currentOid / 默认分支 / 累计提交数
+          → /commit/{oid}.patch（几十 KB，比近 1MB 的提交详情页稳得多）
+          → Date + Subject + diff 文件列表 → 中文摘要。
+    主页不通再退到 commits.atom 第一条，同样给时间 + 标题。
+    """
+    home = "https://github.com/%s/%s" % (owner, repo)
+    oid, branch, at, total = "", "", "", ""
+    ok, h = fetch(home, timeout=20, retries=2)
+    if ok:
+        m = _GH_EMBED.search(h)
+        if m:
+            try:
+                p = json.loads(m.group(1)).get("payload") or {}
+                cv = p.get("codeViewRepoRoute") or {}
+                ref = cv.get("refInfo") or {}
+                oid = ref.get("currentOid") or ""
+                branch = ref.get("name") or ""
+                total = str((cv.get("overview") or {}).get("commitCount") or "").replace(",", "")
+                # listCacheKey 形如 v0:1794305385.0，是默认分支最后推送的 epoch 秒
+                mt = re.search(r"(\d{10})(?:\.\d+)?", str(ref.get("listCacheKey") or ""))
+                if mt:
+                    at = datetime.datetime.fromtimestamp(
+                        int(mt.group(1)), TZ).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+        rt = re.search(r'<relative-time[^>]*datetime="(\d{4}-\d{2}-\d{2})', h)
+        if rt:
+            at = rt.group(1)
+    titles, paths = [], []
+    if oid:
+        ok2, patch = fetch("%s/commit/%s.patch" % (home, oid), timeout=20, retries=2)
+        if ok2:
+            for line in re.findall(r"(?m)^Subject:\s*([^\n]+)", patch):
+                t = re.sub(r"^\[PATCH[^\]]*\]\s*", "", line).strip()
+                t = re.sub(r"\s+", " ", t)
+                if t:
+                    titles.append(t)
+            titles = titles[:3]
+            paths = re.findall(r"(?m)^diff --git a/(\S+)", patch)[:20]
+            dt = re.search(r"(?m)^Date:\s*([^\n]+)", patch)
+            if dt:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    at = parsedate_to_datetime(dt.group(1).strip()).astimezone(TZ).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+    if not titles:
+        # 最后一道保险：atom 第一条即最新提交（标题 + 日期都有）
+        for uu in ("%s/commits.atom" % home,
+                   "%s/commits/%s.atom" % (home, branch or "main")):
+            ok3, a = fetch(uu, timeout=15, retries=1)
+            if not ok3:
+                continue
+            ent = re.search(r"<entry>(.*?)</entry>", a, re.S)
+            if not ent:
+                continue
+            ti = re.search(r"<title>(.*?)</title>", ent.group(1), re.S)
+            up = re.search(r"<updated>([^<]+)</updated>", ent.group(1))
+            if ti:
+                t = html.unescape(re.sub(r"<.*?>", "", ti.group(1))).strip()
+                if t:
+                    titles = [re.sub(r"\s+", " ", t)[:120]]
+            if up and not at:
+                at = up.group(1)[:10]
+            if titles:
+                break
+    if not at and not titles:
+        return None
+    return {"at": at or "", "oid": oid[:8], "branch": branch, "total": total,
+            "detail": _gh_zh_detail(titles, paths), "nfiles": len(paths),
+            "source": "仓库主页" if oid else "提交订阅源"}
 
 
 def _rss_date(s):
@@ -1117,7 +1639,7 @@ def collect(meta, sn, log=print, extra_x_links=None, days=14):
         # 和上面的常规指标解析路径不同（不能合并，否则一边失败会拖累另一边）
         ("收入/回购", lambda: src_income(sn), 75),
         ("官网", lambda: src_website(meta), 45),
-        ("GitHub", lambda: src_github(meta), 45),
+        ("GitHub", lambda: src_github(meta, days=days), 45),
         ("Google News", lambda: src_news(meta, sn), 45),
         ("DuckDuckGo", lambda: src_web_search(meta, sn), 45),
     ]
@@ -1267,6 +1789,77 @@ _UNIT_NUM = re.compile(
     r"(τ|TAO|alpha|USD|%|blocks?|commits?|/30d|/day|天|日|倍|万|亿|K\b|M\b|B\b)")
 # 这些是模型写分析时的正常量词，不算事实数字
 _SAFE_NUMS = {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "30", "60", "90", "100"}
+
+
+_GH_LINE_RE = re.compile(r"^\s*[-*•]\s*.*(GitHub|代码仓库|仓库提交)", re.I)
+# 判断「只说了时间、没说内容」的半句话：出现这些词但没有任何内容关键词
+_GH_VAGUE_ONLY = re.compile(r"提交集中|集中在(当日|今日|当天)|集中在\s*\d{1,2}-\d{1,2}")
+# 英文残留：连续两个及以上英文单词、或 PR/branch 痕迹
+_EN_CHUNK = re.compile(r"[A-Za-z][A-Za-z'\-]{1,}(?:\s+[A-Za-z][A-Za-z'\-]{1,}){1,}")
+_EN_NOISE = re.compile(r"merge pull request|merge branch|merge remote|#\d{2,}|\b(?:fix|feat|chore|refactor)/", re.I)
+
+
+def tidy_github_line(digest, gh_sum=None, log=print):
+    """GitHub 那条事件的代码层兜底：保证「次数 + 中文内容」，清掉英文残留。
+
+    为什么要代码层兜底：提示词里已经写得很死（不许只写「提交集中在当日」、
+    不许出现英文分支名/PR 编号），但实测模型仍会照抄——因为它看得到英文原文。
+    现在素材层已经不给英文了，这里再兜一道，防止模型自己编出英文词。
+    """
+    if not digest:
+        return digest, 0
+    gh_sum = gh_sum or {}
+    fix_n = 0
+    out = []
+    for ln in digest.split("\n"):
+        if not _GH_LINE_RE.search(ln):
+            out.append(ln)
+            continue
+        s = ln
+        # ① 删掉英文残留片段（保留仓库名 a/b 形式与子网名）
+        def _kill_en(m):
+            seg = m.group(0)
+            if "/" in seg and len(seg.split()) == 1:
+                return seg                       # owner/repo 形态，保留
+            if re.match(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$", seg) and len(seg.split()) <= 3:
+                return seg                       # 人名形态，保留
+            return ""
+        if _EN_NOISE.search(s) or len(_EN_CHUNK.findall(s)) >= 1:
+            s2 = _EN_NOISE.sub("", s)
+            s2 = _EN_CHUNK.sub(_kill_en, s2)
+            s2 = re.sub(r"[（(]\s*[)）]", "", s2)
+            s2 = re.sub(r"\s{2,}", " ", s2).strip()
+            s2 = re.sub(r"·\s*·", "·", s2)
+            if s2.rstrip(" ·，,、") != s.rstrip(" ·，,、"):
+                s = s2
+                fix_n += 1
+        # ② 没写「最后一次更新」或没给次数、没给内容 → 换成摘要完整句
+        core = re.sub(r"[（(][^)）]*[)）]", "", s)
+        has_num = bool(re.search(r"\d+\s*次", core))
+        has_last = bool(re.search(r"最后一次|最近一次", core))
+        has_content = bool(re.search(
+            r"修复|新增|优化|重构|测试|文档|性能|涉及|模块|以.{1,6}为主|改的是", core))
+        vague = bool(_GH_VAGUE_ONLY.search(core))
+        fb = bool(gh_sum.get("fallback"))
+        # 兜底场景：次数本来就取不到，正确写法是「次数未取到」；
+        # 这时既不能因为缺 N 次而反复改写，更不能容忍模型编一个次数出来。
+        has_missing = bool(re.search(r"未取到|取不到|无法统计", core))
+        bad = (vague or (not has_content) or (not has_last)
+               or (not (has_num or (fb and has_missing)))
+               or (fb and has_num))
+        if bad and gh_sum.get("sentence"):
+            tail = ""
+            mstat = re.search(r"[·|]\s*((?:✅|⚠️)[^·|]*)$", s)
+            if mstat:
+                tail = " · " + mstat.group(1).strip()
+            date_m = re.match(r"^\s*([-*•]\s*)?((?:\d{4}-)?\d{2}-\d{2})\s*·\s*", s)
+            head = (date_m.group(1) or "- ") + (date_m.group(2) + " · ") if date_m else "- "
+            s = head + gh_sum["sentence"] + tail
+            fix_n += 1
+        out.append(s)
+    if fix_n:
+        log("GitHub 条目改写：%d 处（补「最后一次更新+次数+内容」、清英文残留）" % fix_n)
+    return "\n".join(out), fix_n
 
 
 def tidy_dates(digest, log=print):
@@ -1540,7 +2133,19 @@ _RESEARCH_PROMPT_TMPL = (
     "- **只写真实发生的事**：不要写「与上次相比无变化」「延续上次判断」这种元评估条目——"
     "没有新事就少写一条，不要在时间线里塞占位行。\n"
     "- **GitHub 的逐条 commit 不算事件**——数据站「N commits/30d」与 GitHub「最近提交日期」"
-    "是同一事实的两种表述，不得判为冲突；开发节奏最多合并成一条。\n"
+    "是同一事实的两种表述，不得判为冲突；开发节奏**只写一条**。\n"
+    "- **GitHub 这条必须回答三件事（用户明确要求）**："
+    "① **最后一次更新是什么时候**（给日期，如「最后一次更新 11-10」）"
+    "② **近一个月更新了几次**（照抄输入里的次数，翻页受限时写「至少 N 次」）"
+    "③ **最后一次更新的是什么内容**（用中文说清改的是哪个模块、什么方向）。\n"
+    "  写法示例：`- 11-10 · 代码仓库最后一次更新在 11-10，改的是竞技场观测数据回执；近一个月至少 65 次提交（含合并 21 次），以修复为主，涉及矿池与验证器 · ✅已验证（GitHub）`\n"
+    "  **严禁**写成「提交集中在当日」「最近提交集中在 10-14~10-29」这种只有时间、没有内容、"
+    "也没给次数的半句话——**时间和次数都是附带信息，最后一次改了什么才是正文**。\n"
+    "  **抓取兜底例外**：若素材里写明「提交次数未取到（翻页异常）」，就照写这句，"
+    "只给「最后一次更新在X日 + 改了什么」，**绝不许凭空补一个次数**；"
+    "这条仍然要写成一条事件，不要因为缺次数就整条删掉。\n"
+    "- **GitHub 这条通篇用中文**：不许出现提交标题原文、英文分支名、英文函数名、"
+    "PR/issue 编号（如 `Merge pull request #1177 from…`）。只有仓库名、子网名、人名可保留英文。\n"
     "- **时间线不止群聊**：官方 X 帖、生态账号提及、新闻、官网更新、GitHub release 都要按真实日期进时间线，"
     "不要只写群里说过什么。\n"
     "\n**📊 当前数据**（只保留**当前价格**，一行即可；不要市值/池子/emission/tempo/epoch 等任何其它指标。"
@@ -1648,15 +2253,38 @@ def _ext_block(sources, meta):
         blocks.append("[官网] 未获取（%s）" % w.get("err", ""))
     g = sources.get("GitHub") or {}
     if g.get("ok"):
-        ls = ["releases：" + ("；".join("%s（%s）" % (x["at"], x["title"][:70])
-                                       for x in g.get("releases", [])[:5]) or "无")]
-        ls.append("recent commits：" + ("；".join("%s（%s）" % (x["at"], x["title"][:60])
-                                                  for x in g.get("commits", [])[:5]) or "无"))
-        # commits 只是「技术是否在动」的证据，不是子网大事件。
-        # 不点明的话，模型会把 10 条 commit 逐条搬进「重要事件时间线」，把真正的事件挤掉。
-        blocks.append("[GitHub] %s\n  %s\n  （commits 仅用于判断开发是否活跃，"
-                      "**不得逐条列入事件时间线**；最多合并成一句「最近提交集中在 X~Y」）"
-                      % (g.get("repo", ""), "\n  ".join(ls)))
+        # 只给中文摘要，**不给英文 commit 原文**：给了就会被整段抄进报告。
+        # 用户明确要求「说明提交次数 + 主要更新内容，英文能不要就不要」。
+        sm = g.get("summary") or {}
+        if sm:
+            lines = [sm.get("sentence") or "未获取提交摘要"]
+            if sm.get("last_detail_at"):
+                lines.append("最后一次提交：%s，内容：%s"
+                             % (sm["last_detail_at"], sm.get("last_detail") or "未获取"))
+            if sm.get("kinds"):
+                lines.append("改动类型分布：" + "、".join("%s %d 次" % (k, n) for k, n in sm["kinds"]))
+            if sm.get("topics"):
+                lines.append("涉及模块：" + "、".join("%s %d 次" % (k, n) for k, n in sm["topics"]))
+            per = sm.get("per_day") or {}
+            if 1 < len(per) <= 10:
+                lines.append("逐日提交数：" + "、".join("%s %d 次" % (k, v) for k, v in per.items()))
+            if sm.get("fallback"):
+                note = ("（以上为**仓库主页兜底**的中文摘要：照抄「最后一次更新」的日期与内容；"
+                        "**本次提交次数确实没取到，必须如实写「提交次数未取到」，不许编一个数字**；"
+                        "不得写任何英文；仓库名可保留）")
+            else:
+                note = ("（以上已是**中文摘要**，"
+                        "必须按「最后一次更新在X日、近一个月N次、最后一次改的是Y」来写；"
+                        "不得改写次数；**不得写任何英文**：不写提交标题原文、英文分支名、"
+                        "英文函数名、PR 编号；仓库名可保留）")
+            blocks.append("[GitHub] 仓库 %s\n  %s\n  %s"
+                          % (g.get("repo", ""), "\n  ".join(lines), note))
+        else:
+            blocks.append("[GitHub] %s\n  releases：%s\n  （commits 仅用于判断开发是否活跃，"
+                          "**不得逐条列入事件时间线**）"
+                          % (g.get("repo", ""),
+                             "；".join("%s（%s）" % (x["at"], x["title"][:70])
+                                       for x in g.get("releases", [])[:5]) or "无"))
     else:
         blocks.append("[GitHub] 未获取（%s）" % g.get("err", ""))
     n = sources.get("Google News") or {}
@@ -2301,7 +2929,7 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     meta = enrich_meta(meta, sources, log=log)
     if (meta.get("name"), meta.get("url"), meta.get("github")) != before:
         for name, fn in (("官网", lambda: src_website(meta)),
-                         ("GitHub", lambda: src_github(meta)),
+                         ("GitHub", lambda: src_github(meta, days=days)),
                          ("DuckDuckGo", lambda: src_web_search(meta, sn))):
             if sources.get(name, {}).get("ok"):
                 continue
@@ -2400,6 +3028,12 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         digest, _ = tidy_dates(digest, log=log)
     except Exception as e:
         log("日期整理跳过（%s）" % e)
+    # GitHub 条目兜底：必须有「提交次数 + 中文更新内容」，不许只写「提交集中在当日」，清英文残留
+    try:
+        digest, _ = tidy_github_line(
+            digest, gh_sum=(sources.get("GitHub") or {}).get("summary"), log=log)
+    except Exception as e:
+        log("GitHub 条目整理跳过（%s）" % e)
     # 数字硬校验：报告里每个带单位的数字都必须能在素材里逐字找到，
     # 找不到的降级为「（数值未核实）」—— 宁可难看，也不放编造数字流出
     try:
@@ -2438,6 +3072,10 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         if k == "收入/回购":
             return "%s✓" % k if (v.get("owner_tao") or v.get("ob")
                                  or v.get("protocol_buy")) else "%s✓（本期无内容）" % k
+        # GitHub 翻页全挂但仓库主页兜底成功时，提交列表是空的；
+        # 若按通用规则标「本期无内容」会误导读者以为什么都没抓到。
+        if k == "GitHub" and (v.get("summary") or {}).get("fallback"):
+            return "%s✓（翻页受限，已由仓库主页兜底）" % k
         if not (v.get("items") or v.get("recent") or v.get("facts") or v.get("posts")):
             return "%s✓（本期无内容）" % k
         return "%s✓" % k

@@ -36,6 +36,7 @@ import subprocess
 import datetime
 import time
 import random
+import socket
 import hashlib
 import base64
 
@@ -61,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -2192,7 +2193,7 @@ def push_telegram(cfg, title, digest):
             log("Telegram 分片 %d Markdown 解析失败，已纯文本兜底：%s" % (i, e))
         log("Telegram 推送分片 %d 完成" % i)
 
-_TG_LINK = {"mode": None, "ts": 0.0}
+_TG_LINK = {"mode": None, "ts": 0.0, "fail": 0}
 
 
 def tg_open(req, timeout=30):
@@ -2204,16 +2205,38 @@ def tg_open(req, timeout=30):
     回执也要卡 9 秒；而实测**直连 api.telegram.org 只要 1.6 秒**。
     反过来，直连被墙、代理能通的情况也存在。所以不能写死一边：
     记住上次成功的通道，先用它；切换成功就更新记忆。
+
+    2026-11-10 二次修正（修「触发异常」假故障时发现的真问题）：
+    记忆是好机制，但**记错了会自伤**。当天实况是：监听进程启动时直连还能通
+    （20:36:53 记住「直连」），几分钟后直连死了、代理还活着（子进程 20:37:44 记住「代理」）。
+    于是监听侧每次请求都先拿**完整超时（30-40 秒）**去撞已经死掉的直连，
+    撞完才碰兜底通道，而兜底只给 10 秒 —— 一次 sendMessage 就这么超时了。
+    因此补三条：
+      ① 记忆通道失败一次就**降低它的优先级**（下次请求先试另一条，不再白等 30 秒；
+         连续失败到 2 次直接清空记忆，下次从直连重新探测）；
+      ② 兜底通道不再固定 10 秒：主通道是「超时」而非「拒绝」时，说明网络只是慢，
+         兜底给足时间（min(timeout, 20)），否则永远是「两条都不通」；
+      ③ 记录失败计数，供日志区分「偶发抖动」和「通道已死」。
     """
     order = ["direct", "proxy"]
     cur = _TG_LINK.get("mode")
-    if cur:
+    fails = int(_TG_LINK.get("fail") or 0)
+    if cur and fails >= 1:
+        # 记忆里的通道刚失败过：下一次请求先试另一条，别再拿完整超时撞死路。
+        # 实测光「连续 2 次才清空」不够 —— 中间那一次仍会白等 30 秒。
+        order = [m for m in order if m != cur] + [cur]
+    elif cur:
         order = [cur] + [m for m in order if m != cur]
 
     last = None
-    for mode in order:
-        # 记忆命中时给它完整超时；陌生通道只给 10 秒试探，别让死通道拖时间
-        t = timeout if (cur and mode == cur) else min(timeout, 10)
+    slow = False            # 首个通道是「超时」（慢）还是「拒绝」（快失败）
+    for i, mode in enumerate(order):
+        if i == 0:
+            t = timeout                 # 首个尝试的通道给足时间
+        elif slow:
+            t = min(timeout, 20)        # 网络整体慢，兜底也要给足
+        else:
+            t = min(timeout, 10)        # 备用通道快速试探
         try:
             op = (urllib.request.build_opener(urllib.request.ProxyHandler({}))
                   if mode == "direct" else _opener())
@@ -2221,10 +2244,19 @@ def tg_open(req, timeout=30):
                 data = resp.read()
             if cur != mode:
                 log("网络通道：%s 可用（已记住）" % ("直连" if mode == "direct" else "代理"))
-                _TG_LINK.update(mode=mode, ts=time.time())
+            _TG_LINK.update(mode=mode, ts=time.time(), fail=0)
             return data
         except Exception as e:
             last = e
+            if mode == cur:
+                _TG_LINK["fail"] = int(_TG_LINK.get("fail") or 0) + 1
+                # 记忆通道连续失败 → 清空记忆，下次从直连重新探测，避免一直撞死路
+                if _TG_LINK["fail"] >= 2:
+                    _TG_LINK.update(mode=None, fail=0)
+                    log("记忆通道（%s）连续失败，已清空记忆，下次重新探测"
+                        % ("直连" if mode == "direct" else "代理"))
+            if isinstance(e, (TimeoutError, socket.timeout)) or "timed out" in str(e).lower():
+                slow = True
             continue
     raise last if last else RuntimeError("Telegram 请求失败")
 

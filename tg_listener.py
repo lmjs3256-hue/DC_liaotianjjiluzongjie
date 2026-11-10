@@ -423,6 +423,29 @@ def send_async(chat_id, text, markup=None):
     threading.Thread(target=_go, daemon=True).start()
 
 
+def safe_send(chat_id, text, markup=None, retries=2):
+    """发回执专用：失败只记日志，**绝不向上抛**，并短退避重试。
+
+    为什么必须单独包一层（2026-11-10 实测的假故障）：
+    用户发 71，投研 20:40:09 **已经全部跑完并推送成功**，监听却在 20:40:40
+    记「流水线线程异常：<urlopen error timed out>」并给用户发了「❌ 触发异常」——
+    失败的根本不是投研，而是跑完以后那条「✅ 已生成」的**收尾回执**超时。
+    回执挂在 try 里一路抛到 _pipeline_worker，被当成整条流水线失败，用户白担心。
+
+    回执没有下游依赖，正确语义是「尽力发，发不出去就算了」。
+    """
+    for i in range(max(1, int(retries))):
+        try:
+            send(chat_id, text, markup)
+            return True
+        except Exception as e:
+            if i + 1 >= max(1, int(retries)):
+                log("回执发送失败（已忽略，不影响任务本身）：%s" % str(e)[:120])
+                return False
+            time.sleep(2 * (i + 1))
+    return False
+
+
 def _tg_bold(s):
     # 把 lark_md 的 **加粗** 转成 TG 旧版 Markdown 的 *加粗*
     return re.sub(r"\*\*(.+?)\*\*", r"*\1*", s)
@@ -492,7 +515,7 @@ def _run_pipeline_sync(args, chat_id):
             out = ""
         log("流水线超时（>%ds），已终止子进程树：%s" % (timeout, " ".join(args)))
         try:
-            send(chat_id, "⏱ 执行超时（>%d 分钟），已强制终止并清理子进程，请查 run.log"
+            safe_send(chat_id, "⏱ 执行超时（>%d 分钟），已强制终止并清理子进程，请查 run.log"
                  % (timeout // 60))
         except Exception:
             pass
@@ -501,14 +524,14 @@ def _run_pipeline_sync(args, chat_id):
     if rc == 0:
         # 成功：日报已由 pipeline 自行推送到飞书+TG，这里只回简洁确认，不回传大段日志
         if args and args[0] == "chat":
-            send(chat_id, "✅ 水聊侧记已生成并推送（飞书 + TG）\n"
+            safe_send(chat_id, "✅ 水聊侧记已生成并推送（飞书 + TG）\n"
                           "只取被日报过滤掉的闲聊，不写投研；全程未重新导出聊天记录。")
             return
         if args and args[0] == "archive":
             # 从日志里抓建档统计（persistent 归档了多少子网、新增多少条）
             m = re.search(r"子网建档完成：\d+ 个子网有档案，本次新增 (\d+) 条（累计 (\d+) 条）", out)
             detail = ("\n📊 本次新增 %s 条，档案累计 %s 条" % (m.group(1), m.group(2))) if m else ""
-            send(chat_id, "✅ 子网建档完成%s\n"
+            safe_send(chat_id, "✅ 子网建档完成%s\n"
                           "按 SN 编号逐个存放于 subnet_archive/SNxx/（archive.json + archive.md，"
                           "含原文与中文译文、按时间排序的人物观点索引）。\n"
                           "发 /档案 看清单，发 /投研 29 做单子网跟踪报告。" % detail)
@@ -516,7 +539,7 @@ def _run_pipeline_sync(args, chat_id):
         if args and args[0] == "research":
             m = re.search(r"报告已存：(.+?)（(\d+) 字）", out)
             detail = ("\n📄 %s\n📝 %s 字" % (m.group(1), m.group(2))) if m else ""
-            send(chat_id, "✅ 子网投研报告已生成并推送（飞书 + TG）%s\n"
+            safe_send(chat_id, "✅ 子网投研报告已生成并推送（飞书 + TG）%s\n"
                           "已归档到 subnet_archive/（下次同子网可直接复用档案）。" % detail)
             return
         stat = ""
@@ -532,11 +555,11 @@ def _run_pipeline_sync(args, chat_id):
         mm = re.search(r"节流模式：\s*\S+\s*（(.+?)）", out)
         if mm:
             mode = "\n🔧 %s" % mm.group(1)
-        send(chat_id, "✅ 已完成：%s%s%s" % (" ".join(args), stat, mode))
+        safe_send(chat_id, "✅ 已完成：%s%s%s" % (" ".join(args), stat, mode))
     else:
         # 失败才回传错误尾部（清洗乱码、只留最后几行有意义的）
         tail = _clean_tail(out)
-        send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail or "（无输出，详见 run.log）"))
+        safe_send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail or "（无输出，详见 run.log）"))
 
 
 def _pipeline_worker(args, chat_id):
@@ -545,11 +568,10 @@ def _pipeline_worker(args, chat_id):
     try:
         _run_pipeline_sync(args, chat_id)
     except Exception as e:
+        # 走到这里说明**流水线本身**真的出错了（子进程崩溃/启动失败等）。
+        # 回执发送已由 safe_send 兜住，不会再拿网络超时冒充任务失败。
         log("流水线线程异常：%s" % e)
-        try:
-            send(chat_id, "❌ 触发异常：%s" % e)
-        except Exception:
-            pass
+        safe_send(chat_id, "❌ 触发异常：%s" % e)
     finally:
         with _BUSY_LOCK:
             _BUSY = False
@@ -567,14 +589,14 @@ def run_pipeline(args, chat_id, quiet=False):
     with _BUSY_LOCK:
         if _BUSY:
             try:
-                send(chat_id, "⏳ 上一个任务仍在执行中，请稍候再试（避免并发导出浪费 token）")
+                safe_send(chat_id, "⏳ 上一个任务仍在执行中，请稍候再试（避免并发导出浪费 token）")
             except Exception:
                 pass
             return
         _BUSY = True
     if not quiet:
         try:
-            send(chat_id, "⏳ 开始执行：%s" % " ".join(args))
+            safe_send(chat_id, "⏳ 开始执行：%s" % " ".join(args))
         except Exception as e:
             log("发送开始提示失败（忽略）：%s" % e)
     t = threading.Thread(target=_pipeline_worker, args=(args, chat_id), daemon=True)
@@ -591,14 +613,14 @@ def _kb_worker(chat_id):
     """后台线程：立即跑一次知识库校对（同步档案），结果推给发指令的会话。"""
     try:
         import kb_weekly as K
-        res = K.run_now(P._CFG, notify=lambda t: send(chat_id, t),
+        res = K.run_now(P._CFG, notify=lambda t: safe_send(chat_id, t),
                         log=log, reason="TG 手动触发")
         if not res.get("ok"):
-            send(chat_id, "❌ 更新失败：%s" % (res.get("error") or "未知错误"))
+            safe_send(chat_id, "❌ 更新失败：%s" % (res.get("error") or "未知错误"))
     except Exception as e:
         log("知识库手动更新线程异常：%s" % e)
         try:
-            send(chat_id, "❌ 更新异常：%s" % e)
+            safe_send(chat_id, "❌ 更新异常：%s" % e)
         except Exception:
             pass
     finally:
@@ -613,13 +635,13 @@ def run_kb_update(chat_id):
     with _BUSY_LOCK:
         if _BUSY:
             try:
-                send(chat_id, "⏳ 有任务正在执行，请稍后再试（避免并发写档案）")
+                safe_send(chat_id, "⏳ 有任务正在执行，请稍后再试（避免并发写档案）")
             except Exception:
                 pass
             return
         _BUSY = True
     try:
-        send(chat_id, "📚 开始校对子网知识库（拉链上身份 + 同步已建档案），约 1-2 分钟…")
+        safe_send(chat_id, "📚 开始校对子网知识库（拉链上身份 + 同步已建档案），约 1-2 分钟…")
     except Exception:
         pass
     threading.Thread(target=_kb_worker, args=(chat_id,), daemon=True).start()
@@ -676,12 +698,12 @@ def _feedback_worker(day, feedback, chat_id):
     把日报里已删除的「重点子网动向」「潜力观察」板块又写了回来。
     """
     try:
-        send(chat_id, "🧠 正在按你的反馈重总结 %s（独立进程，使用最新提示词）…" % day)
+        safe_send(chat_id, "🧠 正在按你的反馈重总结 %s（独立进程，使用最新提示词）…" % day)
         _run_pipeline_sync(["resummarize", day, feedback], chat_id)
     except Exception as e:
         log("反馈重总结失败：%s" % e)
         try:
-            send(chat_id, "❌ 重总结失败：%s" % e)
+            safe_send(chat_id, "❌ 重总结失败：%s" % e)
         except Exception:
             pass
 
@@ -777,7 +799,7 @@ def _start_research(sn_arg, days_n, chat_id, feedback=""):
     cfg = P._CFG or P.load_config()
     sn = SA.resolve_sn(sn_arg, cfg)
     if sn is None:
-        send(chat_id, "❌ 认不出子网：%s\n"
+        safe_send(chat_id, "❌ 认不出子网：%s\n"
                       "可以直接写编号：/投研 29\n"
                       "也可以发 /档案 看全部已建档子网（含编号）。" % sn_arg)
         return
@@ -842,20 +864,20 @@ def handle(text, chat_id):
             _start_research(str(sn), days_n, chat_id)
             return
     if cmd in ("help", "start"):
-        send(chat_id, HELP)
+        safe_send(chat_id, HELP)
     elif cmd in ("keyboard", "按钮"):
         # 重新唤出底部按钮栏（平时随回复自动收起）
-        send(chat_id, "⌨️ 按钮栏已恢复（bot 回复后会自动收起；发 /keyboard 可再次唤出）",
+        safe_send(chat_id, "⌨️ 按钮栏已恢复（bot 回复后会自动收起；发 /keyboard 可再次唤出）",
              markup=_KEYBOARD)
     elif cmd in ("hidekeyboard", "收起", "关闭按钮", "nokeyboard"):
         # 显式收起底部按钮栏（等价于任何一个后续回复，但立刻生效、不用等）
-        send(chat_id, "⌨️ 按钮栏已收起。需要时发 /keyboard 唤出。",
+        safe_send(chat_id, "⌨️ 按钮栏已收起。需要时发 /keyboard 唤出。",
              markup=_REMOVE_KB)
     elif cmd == "digest":
         run_pipeline(["daily"] + parts[1:], chat_id)
     elif cmd in ("today", "jinri"):
         # 总结今天的聊天记录（北京时间今天 00:00 -> 现在）
-        send(chat_id, "☀️ 收到，正在导出并总结今天的聊天记录，稍等…")
+        safe_send(chat_id, "☀️ 收到，正在导出并总结今天的聊天记录，稍等…")
         run_pipeline(["daily", "今日"], chat_id)
     elif cmd == "weekly":
         run_pipeline(["weekly"], chat_id)
@@ -875,13 +897,13 @@ def handle(text, chat_id):
         if rest and rest[0].isdigit():
             days_back = max(1, min(14, int(rest[0])))
         args = ["chat"] + ([day] if day else []) + [str(days_back)]
-        send(chat_id, "💬 收到，正在整理%s的水聊侧记（只读已有导出记录，不重新导出）…"
+        safe_send(chat_id, "💬 收到，正在整理%s的水聊侧记（只读已有导出记录，不重新导出）…"
              % (day or "最近一次导出"))
         run_pipeline(args, chat_id)
     elif cmd in ("archive", "建档", "存档", "archive_subnets"):
         # 建档不再作为日常指令（导出时已自动增量建档，见 pipeline.run_one_day）。
         # 保留这个入口只做一件事：**全量重建**（换机器 / 清过档案 / 想补历史）。
-        send(chat_id, "ℹ️ 建档已自动化：每次导出日报时会自动把提到的子网写进档案"
+        safe_send(chat_id, "ℹ️ 建档已自动化：每次导出日报时会自动把提到的子网写进档案"
                       "（已建档的增量补充，未建档的自动新建），无需手动触发。\n"
                       "如需用现有全部导出记录**全量重建**一次，请执行：\n"
                       "python pipeline.py archive\n"
@@ -891,7 +913,7 @@ def handle(text, chat_id):
         # 数据链：本地档案 + 链上数据站 + 官网/GitHub/新闻/搜索/X 交叉验证
         rest = parts[1:]
         if not rest:
-            send(chat_id, "用法：直接给我一个子网编号就行 ——\n"
+            safe_send(chat_id, "用法：直接给我一个子网编号就行 ——\n"
                           "  29　　　（不带斜杠也可以，我认得出这是 SN29）\n"
                           "  /投研 29　/投研 SN29　/投研 hotfloat（子网名）\n"
                           "  /投研 29 30　第二个数字 = 回看多少天档案（默认 14）\n"
@@ -911,11 +933,11 @@ def handle(text, chat_id):
         if len(parts) > 1:
             sn = SA.resolve_sn(parts[1], cfg)
             if sn is None:
-                send(chat_id, "❌ 无法识别子网：%s" % parts[1])
+                safe_send(chat_id, "❌ 无法识别子网：%s" % parts[1])
                 return
             arc = SA.load_archive(arc_dir, sn)
             if not arc:
-                send(chat_id, "SN%d 还没有档案。建档是自动的——跑一次 /digest 就会把它建起来；"
+                safe_send(chat_id, "SN%d 还没有档案。建档是自动的——跑一次 /digest 就会把它建起来；"
                               "也可以直接发 /投研 %d 出报告，报告会自动新建档案。" % (sn, sn))
                 return
             st = SA.stats_of(arc)
@@ -940,12 +962,12 @@ def handle(text, chat_id):
             lines += recent or ["（暂无群聊归档，可用 /投研 出报告）"]
             lines += ["", "发 /投研 %d 可生成跟踪报告" % sn]
             for ch in P.chunk_text("\n".join(lines), 3800):
-                send(chat_id, _tg_bold(ch))
+                safe_send(chat_id, _tg_bold(ch))
             return
         idx = SA.load_all_index(arc_dir)
         subs = idx.get("subnets") or {}
         if not subs:
-            send(chat_id, "还没有任何子网档案。建档是自动的——跑一次 /digest 就会建起来。")
+            safe_send(chat_id, "还没有任何子网档案。建档是自动的——跑一次 /digest 就会建起来。")
             return
         # 只有「疑似提及（weak）」或「只有投研报告」的档案单独归一组：
         # 只看条数容易误以为它在群里被认真讨论过，实际只是同名英文词擦到。
@@ -968,7 +990,7 @@ def handle(text, chat_id):
                       + ("…" if len(faint) > 30 else "")]
         lines += ["", "查看单个：/档案 29　　生成投研：/投研 29"]
         for ch in P.chunk_text("\n".join(lines), 3800):
-            send(chat_id, ch)
+            safe_send(chat_id, ch)
     elif cmd == "watch":
         n = None
         if len(parts) > 1:
@@ -980,17 +1002,17 @@ def handle(text, chat_id):
         if n is None:
             files = sorted(glob.glob(os.path.join(HERE, "exports", "watchlist_*.txt")))
             if not files:
-                send(chat_id, "（还没有潜力观察记录，先发 /digest 跑几天日报）")
+                safe_send(chat_id, "（还没有潜力观察记录，先发 /digest 跑几天日报）")
                 return
             txt = open(files[-1], encoding="utf-8").read()
-            send(chat_id, "📊 最新潜力观察\n" + _tg_bold(txt))
+            safe_send(chat_id, "📊 最新潜力观察\n" + _tg_bold(txt))
             _feishu_watch(P._CFG, "📊 DTAO 潜力观察 · 最新", txt)
         else:
             head, merged = P.watch_summary(n)
             full = _tg_bold(head + "\n\n" + merged)
             chunks = P.chunk_text(full, 3800)
             for i, ch in enumerate(chunks, 1):
-                send(chat_id, (("【%d/%d】\n" % (i, len(chunks))) if len(chunks) > 1 else "") + ch)
+                safe_send(chat_id, (("【%d/%d】\n" % (i, len(chunks))) if len(chunks) > 1 else "") + ch)
             # 飞书：跨日汇总较长，只推「热点统计」核心信号（完整明细已在 TG）
             _feishu_watch(P._CFG, "📊 DTAO 潜力观察 · 近%d天热点" % n, head)
     elif cmd in ("retry", "fix", "resummarize", "重总结", "修正"):
@@ -1007,7 +1029,7 @@ def handle(text, chat_id):
             rest = rest[1:]
         feedback = " ".join(rest).strip()
         if not feedback:
-            send(chat_id, "用法：/retry 反馈或要补充的事实\n"
+            safe_send(chat_id, "用法：/retry 反馈或要补充的事实\n"
                           "例：/retry SN34 是团队宣布转型，不是跑路\n"
                           "    /retry 127 已改名为 Zils   ← 127 刚做过投研时，会重做投研报告\n"
                           "也可指定日期：/retry 2026-10-30 反馈内容")
@@ -1022,7 +1044,7 @@ def handle(text, chat_id):
         if not day:
             day = _latest_digest_date()
         if not day:
-            send(chat_id, "还没有可修订的日报，请先发 /digest 生成一次。")
+            safe_send(chat_id, "还没有可修订的日报，请先发 /digest 生成一次。")
             return
         run_feedback(day, feedback, chat_id)
     elif cmd in ("kb", "知识库", "子网表"):
@@ -1032,15 +1054,15 @@ def handle(text, chat_id):
         if arg in ("update", "now", "run", "更新", "立即"):
             run_kb_update(chat_id)
         elif arg in ("off", "关"):
-            send(chat_id, "周更开关在 config.json：kb_auto_update=false 即关闭"
+            safe_send(chat_id, "周更开关在 config.json：kb_auto_update=false 即关闭"
                           "（改完需重启监听）。本次仍可通过 /kb update 手动更新。")
         else:
             try:
                 import kb_weekly as K
-                send(chat_id, K.status_text(P._CFG))
+                safe_send(chat_id, K.status_text(P._CFG))
             except Exception as e:
                 log("读取知识库状态失败：%s" % e)
-                send(chat_id, "读取状态失败：%s" % e)
+                safe_send(chat_id, "读取状态失败：%s" % e)
     elif cmd == "repush":
         day = None
         targets = []
@@ -1052,11 +1074,11 @@ def handle(text, chat_id):
         if not day:
             day = _latest_digest_date()
         if not day:
-            send(chat_id, "没有可用的日报文件，请先发 /digest 生成一次。")
+            safe_send(chat_id, "没有可用的日报文件，请先发 /digest 生成一次。")
             return
         run_pipeline(["repush", day] + targets, chat_id)
     else:
-        send(chat_id, "未知指令：%s\n%s" % (text, HELP))
+        safe_send(chat_id, "未知指令：%s\n%s" % (text, HELP))
 
 
 def main():

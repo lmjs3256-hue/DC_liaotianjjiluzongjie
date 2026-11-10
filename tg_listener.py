@@ -44,12 +44,16 @@ sys.path.insert(0, HERE)
 import pipeline as P
 
 def log(msg):
+    """只写文件，不 print。
+
+    与 tg_guard 同理：给带控制台的解释器留着 print，一旦窗口进入「快速编辑」
+    标记状态就会把整个监听冻死在日志语句上。监听是后台服务，日志落盘即可。
+    """
     try:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         line = "[%s] %s\n" % (ts, msg)
         with open(os.path.join(HERE, "tg_listener.log"), "a", encoding="utf-8") as f:
             f.write(line)
-        print(line, end="", flush=True)
     except Exception:
         pass
 
@@ -273,6 +277,29 @@ def _cleanup_state():
                 os.remove(_STATE_FILE)
     except Exception:
         pass
+
+
+def _respawn_on_exit(my_pid):
+    """热重载的「独立接管进程」——不把身家性命全押在守护上。
+
+    2026-11-10 事故：监听正确检测到新版本并以 75 退出，但守护卡在控制台
+    print 上，13 分钟没把新版本拉起来，用户看到进程面板一直是 v1.11.0。
+    现在退出前先拉一个完全独立的短命进程：等本进程死透 → 让守护先试
+    2~3 秒 → 若仍没有监听，就由它直接用新代码拉起。正常情况下守护先得手，
+    接管进程发现已有监听便安静退出，不会造成双实例。
+    """
+    try:
+        exe = sys.executable
+        pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        pyw = pyw if os.path.exists(pyw) else exe
+        flags = (0x00000008 | 0x08000000) if os.name == "nt" else 0
+        subprocess.Popen(
+            [pyw, os.path.join(HERE, "tgctl.py"), "respawn", str(my_pid)],
+            cwd=HERE, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+        log("已安排独立接管进程（守护无响应时由它拉起新版本）")
+    except Exception as e:
+        log("安排独立接管进程失败（仍依赖守护）：%s" % e)
 
 
 def acquire_single_instance(retries=6, delay=0.8):
@@ -1154,6 +1181,10 @@ def main():
                     log("检测到代码已更新：内存 v%s → 磁盘 v%s，退出并请求热重载"
                         % (_mine, _disk))
                     release_single_instance()
+                    # os._exit 不走 atexit，状态文件必须手工清掉，否则面板会把
+                    # 已经死掉的旧进程版本当成「运行版本」一直显示（本次事故现象之一）
+                    _cleanup_state()
+                    _respawn_on_exit(os.getpid())
                     # 75 是给守护的暗号：别等 20 秒，立刻拉起
                     os._exit(EXIT_RELOAD)
 

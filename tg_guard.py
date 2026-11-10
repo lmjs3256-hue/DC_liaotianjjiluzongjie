@@ -23,6 +23,7 @@
 
 import atexit
 import ctypes
+import json
 import os
 import subprocess
 import sys
@@ -96,13 +97,58 @@ def _running_listener_pid():
 
 
 def log(msg):
+    """只写文件，绝不 print。
+
+    2026-11-10 事故：守护由 Guard.bat 用带控制台的 python.exe 启动，
+    老版本这里先 `print(line, flush=True)` 再写文件。Windows 控制台一旦被
+    鼠标点选进入「快速编辑/标记」状态（用户看窗口时极易触发），所有往该
+    控制台写入的线程都会被**永久冻结**。当天 22:33:35 监听以 75 退出请求
+    热重载，守护正好卡在这句 print 上：日志停在 20:36:51，进程 CPU 0.03、
+    单线程、Responding=True，于是「拉起新版本」永远没执行，用户看到进程
+    停在旧版本。守护是后台服务，本来也没人看控制台输出，直接去掉 print。
+    """
     line = "[%s] %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg)
-    print(line, flush=True)
     try:
         with open(GUARD_LOG, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
         pass
+
+
+def _disk_version():
+    """读磁盘上 pipeline.py 的版本号（守护不 import 业务模块，避免固化在内存）。"""
+    try:
+        import re
+        with open(os.path.join(HERE, "pipeline.py"), "r", encoding="utf-8") as f:
+            m = re.search(r'^__version__\s*=\s*["\']([^"\']+)', f.read(), re.M)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _state_info():
+    """读监听自己写的运行状态：{pid, version, started_at}。"""
+    try:
+        with open(os.path.join(HERE, "tg_listener.state.json"), "r",
+                  encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _force_kill(pid):
+    """监听热重载失效时，守护强制终止它（下一轮循环会拉起新版本）。"""
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        h = k32.OpenProcess(0x0001, False, int(pid))     # PROCESS_TERMINATE
+        if not h:
+            return False
+        try:
+            return bool(k32.TerminateProcess(h, EXIT_RELOAD))
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return False
 
 
 def acquire_guard_mutex():
@@ -161,13 +207,50 @@ def main():
         (os.getpid(), RESTART_DELAY))
 
     fast_exits = 0
+    last_hb = time.time()
+    last_disk = _disk_version()
+    pending_ver, pending_since = None, 0.0
+    log("守护循环已启动（pid=%d），磁盘版本 v%s，每 %d 秒检查一次" %
+        (os.getpid(), last_disk or "?", RESTART_DELAY))
+
+    def _watch_version():
+        """版本变更的「第二保险」：监听自己每 60 秒比对磁盘版本并热重载，
+        但万一它卡在网络请求、或守护上一次卡死过，就会一直停在旧版本。
+        给 150 秒宽限期，之后守护直接终止监听并在下一轮拉起新代码。
+        """
+        nonlocal last_disk, pending_ver, pending_since
+        disk = _disk_version()
+        if disk and disk != last_disk:
+            last_disk = disk
+            pending_ver, pending_since = disk, time.time()
+            log("检测到磁盘版本变为 v%s，等待监听自行热重载" % disk)
+        if pending_ver and time.time() - pending_since > 150:
+            cur = (_state_info().get("version") or "")
+            alive = _running_listener_pid()
+            if alive and cur and cur != pending_ver:
+                log("宽限期已过，监听仍是 v%s（磁盘 v%s），守护强制接管" % (cur, pending_ver))
+                if _force_kill(alive):
+                    log("已终止旧监听 pid=%d，准备拉起 v%s" % (alive, pending_ver))
+            pending_ver = None
+
+    def _heartbeat(pid):
+        nonlocal last_hb
+        if time.time() - last_hb > 600:
+            last_hb = time.time()
+            log("💓 守护心跳：监听 pid=%d 存活中，磁盘版本 v%s"
+                % (pid, _disk_version() or "?"))
+
     while True:
+        _watch_version()
+
         # 已有监听在跑 → 接管它，只做存活监控，不再另起一个
         existing = _running_listener_pid()
         if existing:
             log("检测到监听已在运行（pid=%d），守护只做存活监控，不重复拉起" % existing)
             while _running_listener_pid():
-                time.sleep(RESTART_DELAY)
+                time.sleep(2)
+                _watch_version()
+                _heartbeat(existing)
             log("监听从外部退出，%d 秒后拉起" % RESTART_DELAY)
             time.sleep(RESTART_DELAY)
             continue
@@ -181,7 +264,13 @@ def main():
                 [_pythonw(), LISTENER], cwd=HERE,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
-            code = proc.wait()
+            log("已拉起监听 pid=%d（磁盘版本 v%s）" % (proc.pid, _disk_version() or "?"))
+            # 不用 proc.wait() 长时间阻塞：每 2 秒醒一次写心跳，守护状态可观测
+            while proc.poll() is None:
+                time.sleep(2)
+                _watch_version()
+                _heartbeat(proc.pid)
+            code = proc.returncode
         except KeyboardInterrupt:
             log("守护收到 Ctrl+C，停止")
             return 0
@@ -196,6 +285,7 @@ def main():
         if code == EXIT_RELOAD:
             log("收到热重载请求（代码已更新），%d 秒后拉起新版本" % RELOAD_DELAY)
             fast_exits = 0
+            pending_ver = None
             time.sleep(RELOAD_DELAY)
             continue
 

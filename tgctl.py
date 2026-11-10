@@ -22,6 +22,11 @@ bat 只负责调用它并在结尾 pause，窗口永远不会自己消失。
     python tgctl.py stop        # 先停守护（否则它会把监听再拉起来），再停监听
     python tgctl.py restart     # 等价 stop + start，改完代码用它
     python tgctl.py logs        # 打印最近 30 行日志
+    python tgctl.py version     # 磁盘版本 / 实际运行版本
+
+内部命令 `respawn <旧pid>` 由监听热重载退出前自行拉起，不要手动调用：
+它等旧进程死透、让守护先试 3 秒，守护若卡住就直接用磁盘新代码拉起监听，
+保证「改完版本一定生效」；守护正常时它会发现已有监听并安静退出。
 """
 
 import json
@@ -157,8 +162,11 @@ def _listener_info():
             pid = sorted(found)[0]
             alive = True
     st = _read_json(STATE)
-    ver = st.get("version") if st.get("pid") == pid else None
-    return pid, alive, ver, st.get("started_at")
+    # 进程已经不在时，状态文件里的版本是「尸体数据」，绝不能当运行版本报出去。
+    # 2026-11-10 事故：监听 os._exit(75) 绕过 atexit 没清状态文件，
+    # 于是 `tgctl version` 一直显示「运行版本 v1.11.0」，用户以为热重载没发生。
+    ver = (st.get("version") if (alive and st.get("pid") == pid) else None)
+    return pid, alive, ver, (st.get("started_at") if alive else None)
 
 
 def _guard_pid():
@@ -199,6 +207,8 @@ def cmd_status(quiet=False):
             print("⚠️  代码已更新到 v%s，但进程里还是 v%s —— 需要重启才生效" % (disk, ver))
     else:
         print("监听进程：❌ 未运行")
+        if gpid:
+            print("⚠️  守护在跑但监听不在 —— 守护可能卡住，执行 `python tgctl.py restart` 恢复")
     print("守护进程：%s" % ("✅ 运行中（pid=%d）" % gpid if gpid else "❌ 未运行"))
     print("-" * 56)
     t = _tail(LOG_LISTENER, 3)
@@ -310,6 +320,59 @@ def cmd_version():
     return 0
 
 
+def _ctl_log(msg):
+    """接管进程没有控制台，日志统一落 tgctl.log，方便事后查「谁把监听拉起来的」。"""
+    try:
+        with open(os.path.join(HERE, "tgctl.log"), "a", encoding="utf-8") as f:
+            f.write("[%s] %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
+
+
+def _spawn_listener_direct():
+    """绕过守护，直接用磁盘上的新代码拉起监听（守护卡死时的最后一道保险）。"""
+    flags = (DETACHED | NO_WINDOW) if os.name == "nt" else 0
+    subprocess.Popen(
+        [_pythonw(), LISTENER], cwd=HERE,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        p, ok, v, _ = _listener_info()
+        if ok:
+            _ctl_log("respawn 成功：监听 pid=%d 版本 v%s（守护未响应，已直接拉起）"
+                     % (p, v or _disk_version()))
+            return 0
+        time.sleep(0.5)
+    _ctl_log("respawn 失败：25 秒内没等到监听起来，请手工执行 tgctl.py restart")
+    return 3
+
+
+def cmd_respawn(argv):
+    """由正在热重载退出的监听调用：respawn <旧pid>。
+
+    先等旧进程死透，再留 3 秒给守护（RELOAD_DELAY=2）先拉起；
+    若守护卡住/被杀，则由本进程直接拉起，保证「改完版本一定生效」。
+    """
+    try:
+        old = int(argv[2]) if len(argv) > 2 else 0
+    except Exception:
+        old = 0
+    _ctl_log("respawn 启动，等待旧监听 pid=%s 退出" % (old or "?"))
+    deadline = time.time() + 15
+    while old and time.time() < deadline and _alive(old):
+        time.sleep(0.5)
+    time.sleep(3)                       # 让守护先得手，避免双实例
+    p, alive, ver, _ = _listener_info()
+    if alive:
+        _ctl_log("respawn 跳过：守护已拉起监听 pid=%d 版本 v%s"
+                 % (p, ver or _disk_version()))
+        return 0
+    _ctl_log("respawn 接管：守护未拉起监听，直接用磁盘 v%s 启动"
+             % _disk_version())
+    return _spawn_listener_direct()
+
+
 def main(argv):
     sub = (argv[1] if len(argv) > 1 else "status").lower()
     if sub in ("status", "st", "状态"):
@@ -326,6 +389,8 @@ def main(argv):
         return 0
     if sub in ("version", "ver", "版本"):
         return cmd_version()
+    if sub == "respawn":               # 内部使用：热重载的独立接管进程
+        return cmd_respawn(argv)
     print(__doc__)
     return 0
 

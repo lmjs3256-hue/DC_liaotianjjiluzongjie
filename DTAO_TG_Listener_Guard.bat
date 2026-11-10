@@ -38,10 +38,17 @@ echo ============================================================
 echo.
 echo 正在启动/确认守护（本窗口可以最小化，关掉也不影响后台监听）...
 echo.
-"%PYEXE%" "%~dp0tg_guard.py"
-echo.
-echo 守护已退出。若上面提示「已有守护循环在运行」，
+REM 2026-11-10 二次修复：守护以前用带控制台的 python.exe 前台跑。
+REM 用户只要用鼠标点一下这个窗口，Windows 就进入「快速编辑/标记」状态，
+REM 守护下一次写控制台时会被永久冻结 —— 当天监听以 75 退出请求热重载，
+REM 守护正好卡死，13 分钟没拉起新版本。现在一律用 pythonw 无窗口后台启动，
+REM 守护日志只写 tg_guard.log，彻底没有可被冻结的控制台。
+set "PYW=C:\Users\Administrator\.workbuddy\binaries\python\versions\3.13.12\pythonw.exe"
+if not exist "%PYW%" set "PYW=pythonw.exe"
+start "" "%PYW%" "%~dp0tg_guard.py"
+echo 守护已在无窗口后台启动。若日志提示「已有守护循环在运行」，
 echo 说明后台已经有一个守护在跑，属正常，不必重复启动。
+echo 查看状态：python tgctl.py status ；查看守护日志：tg_guard.log
 echo.
 pause
 exit /b 0

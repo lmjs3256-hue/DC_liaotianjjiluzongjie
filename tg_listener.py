@@ -396,7 +396,18 @@ def release_single_instance():
     _cleanup_state()
 
 
-def tg_api(token, method, params=None, timeout=40):
+def tg_api(token, method, params=None, timeout=None):
+    """Telegram API 单次调用。
+
+    2026-11-10 修「发指令后很久没回执」：以前所有方法一律 timeout=40
+    （那是给 getUpdates 长轮询留的），结果 sendMessage 也拿 40 秒去撞一条
+    死通道，撞完才切到 2 秒就能通的代理 —— 实测一条即时回执要 **35.54 秒**
+    才发出去。现在按方法分层：长轮询 40 秒，其余短请求 10 秒。
+    """
+    if timeout is None:
+        # 短请求给 8 秒：境外请求统一代理优先（pipeline.net_open），
+        # 代理正常时 1-2 秒返回；给太长只会把「正在生成」这条回执拖成半分钟。
+        timeout = 40 if method == "getUpdates" else 8
     url = "https://api.telegram.org/bot%s/%s" % (token, method)
     params = dict(params or {})
     # 通道还没定（刚启动 / 两条都不通）时不要长轮询：长轮询要 30 秒，
@@ -408,9 +419,9 @@ def tg_api(token, method, params=None, timeout=40):
     data = json.dumps(params).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    # 走 pipeline 的双通道 opener：直连/代理哪个通用哪个，并记住结果。
-    # 以前固定走代理，代理一挂就整片 getUpdates 失败（实测连挂 90 次），
-    # 指令只能等偶然成功的那一次才被收到。
+    # 走 pipeline.net_open：境外请求固定「代理优先 → 直连兜底」。
+    # v1.13.0 前用通道记忆动态排序，实测直连/代理反复翻转，getUpdates 连挂十几次；
+    # 现在顺序确定，代理地址由 proxy_url() 自动发现并定期复检。
     return json.loads(P.tg_open(req, timeout=timeout).decode("utf-8"))
 
 
@@ -450,7 +461,7 @@ def send_async(chat_id, text, markup=None):
     threading.Thread(target=_go, daemon=True).start()
 
 
-def safe_send(chat_id, text, markup=None, retries=2):
+def safe_send(chat_id, text, markup=None, retries=1):
     """发回执专用：失败只记日志，**绝不向上抛**，并短退避重试。
 
     为什么必须单独包一层（2026-11-10 实测的假故障）：

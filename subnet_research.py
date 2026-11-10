@@ -51,7 +51,7 @@ def _cfg():
 
 
 def _opener(url):
-    """复用 pipeline 的代理分流（国内直连、境外走系统代理），失败则用默认 opener。"""
+    """兼容旧调用：只取代理通道；新代码请直接用 pipeline.net_open。"""
     try:
         import pipeline
         return pipeline._opener_for(url)
@@ -60,13 +60,21 @@ def _opener(url):
 
 
 def fetch(url, timeout=25, limit=3_000_000, retries=2):
-    """抓取 URL，返回 (ok, text_or_err)。任何异常都不抛出，交给上层降级。"""
+    """抓取 URL，返回 (ok, text_or_err)。任何异常都不抛出，交给上层降级。
+
+    v1.13.0：境外站点（taostats / GitHub / X / Google News 等）统一走
+    pipeline.net_open 的「代理优先、直连兜底」，不再单通道硬撞。
+    """
     last = ""
     for i in range(max(1, retries)):
         try:
+            import pipeline
             req = urllib.request.Request(url, headers=UA)
-            with _opener(url).open(req, timeout=timeout) as r:
-                raw = r.read(limit)
+            if pipeline._is_direct_host(pipeline._host_of(url)):
+                with _opener(url).open(req, timeout=timeout) as r:
+                    raw = r.read(limit)
+            else:
+                raw = pipeline.net_open(req, timeout=timeout, url=url, limit=limit)
             for enc in ("utf-8", "gb18030", "latin-1"):
                 try:
                     return True, raw.decode(enc)

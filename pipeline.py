@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.12.1"
+__version__ = "1.13.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -75,29 +75,25 @@ LOG_PATH = os.path.join(HERE, "run.log")
 _CFG = None
 
 def _opener():
-    """按 config.proxy 构造 urllib opener。
-    proxy=""            -> 系统默认（沿用环境变量）
-    proxy="direct"      -> 完全不走代理（本机已开系统级 VPN 时用）
-    proxy="http://h:p"  -> 强制走该代理（填自己的 VPN/Clash 代理地址）
+    """构造「代理通道」的 urllib opener（v1.13.0 起境外请求统一先走这里）。
+
+    代理地址由 proxy_url() 统一解析：config.proxy → Windows 系统代理 →
+    环境变量 → 本机代理软件监听端口自动发现。找不到代理时返回直连 opener，
+    由 net_open() 负责跳过重复的代理尝试。
     """
-    if _CFG is None:
-        return urllib.request.build_opener()
-    p = _CFG.get("proxy", "")
-    if p == "direct":
+    p = proxy_url()
+    if not p:
         return urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    if p:
-        return urllib.request.build_opener(urllib.request.ProxyHandler({"http": p, "https": p}))
-    # proxy="" 系统默认：若本机开了 Clash/V2Ray 系统代理，自动继承，免填端口
-    sp = _windows_system_proxy()
-    if sp:
-        http, https = sp
-        return urllib.request.build_opener(urllib.request.ProxyHandler({"http": http, "https": https}))
-    return urllib.request.build_opener()
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": p, "https": p}))
 
 
-# 国内大模型 API 直连白名单：这些服务不需要翻墙，走 Clash 反而会被节点 502 掐断。
+# 境内服务直连白名单：这些服务不需要翻墙，走代理反而会被节点 502 掐断。
+# v1.13.0 起「境外请求一律代理优先」，所以境内域名必须在这里列全，
+# 尤其飞书 webhook —— _post_json 与 Telegram 共用，之前漏列会被塞进代理。
 # 可用 config.json 的 no_proxy_hosts 追加（例如自建的 OpenAI 兼容网关）。
 _DIRECT_HOSTS = (
+    "open.feishu.cn",
     "api.deepseek.com",
     "api.moonshot.cn",
     "api.moonshot.ai",
@@ -125,10 +121,11 @@ def _is_direct_host(host):
 
 
 def _opener_for(url):
-    """按目标域名选 opener：国内 LLM 直连，其余（Discord/Telegram）走代理。
+    """按目标域名选 opener：境内服务直连，其余一律走代理（v1.13.0 代理优先）。
 
-    代理抖动时，国内 API 请求被硬塞进 Clash 会出现 502，导致「总结失败」，
-    而它其实根本不需要代理。这里按域名分流，能消掉一大半莫名失败。
+    代理抖动时，境内 API 请求被硬塞进代理会出现 502，导致「总结失败」，
+    而它其实根本不需要代理。GET/短请求请优先用 net_open（带直连兜底），
+    这里留给不希望重复发送的长 POST（如大模型 chat/completions）。
     """
     host = _host_of(url)
     if _is_direct_host(host) and not (_CFG and _CFG.get("llm_direct") is False):
@@ -168,6 +165,244 @@ def _windows_system_proxy():
         return http, https
     except Exception:
         return None
+
+
+# ----------------------------------------------------------------------------
+# v1.13.0 网络策略：所有「境外」网络请求统一代理优先
+# ----------------------------------------------------------------------------
+# 背景（2026-11-10 实测）：直连 api.telegram.org 12 秒超时、完全不通；
+# 本机代理端口 127.0.0.1:63278 走 CONNECT 只要 1.19 秒。老代码用
+# 「记住上次成功的通道」在直连/代理之间来回翻转，日志里
+# 「网络通道：直连 可用 → 代理 可用 → 直连 …」刷屏，getUpdates 连挂十几次，
+# 用户发指令后回执也时快时慢。现在改成确定性策略：
+#   境外域名  -> 代理优先，代理不通才直连兜底（不再由通道记忆改顺序）
+#   境内域名  -> 直连（飞书 / 国内大模型，走代理反而会被节点 502）
+# 代理地址解析顺序：config.proxy → Windows 系统代理 → 环境变量 → 本机代理端口自动发现。
+# ----------------------------------------------------------------------------
+_PROXY_CACHE = {"url": "", "ts": 0.0, "source": "", "recheck": 0.0}
+_PROXY_TTL = 300.0                 # 5 分钟复检一次（v2rayN 重启会换随机端口）
+_PROXY_COMMON_PORTS = (7890, 7897, 7891, 10809, 10808, 1080, 1081,
+                       2080, 33210, 20171, 8889, 10814, 63278, 63277)
+_PROXY_PROC_HINTS = ("xray", "sing-box", "v2ray", "clash", "mihomo",
+                     "verge", "nekoray", "shadow", "hysteria")
+
+
+def _norm_proxy(p):
+    """补上 scheme：urllib 的 ProxyHandler 需要 http:// 前缀。"""
+    p = str(p or "").strip()
+    if not p or p.lower() == "direct":
+        return ""
+    if "://" not in p:
+        p = "http://" + p
+    return p
+
+
+def _proxy_fixed():
+    """返回 (代理 URL, 来源)；不含自动发现。"""
+    cfg = _CFG or {}
+    raw = str(cfg.get("proxy", "") or "").strip()
+    if raw and _norm_proxy(raw):
+        return _norm_proxy(raw), "config.json"
+    sp = _windows_system_proxy()
+    if sp and sp[0] and _norm_proxy(sp[0]):
+        return _norm_proxy(sp[0]), "Windows 系统代理"
+    try:
+        env = urllib.request.getproxies()
+    except Exception:
+        env = {}
+    ep = _norm_proxy(env.get("https") or env.get("http") or "")
+    if ep:
+        return ep, "环境变量"
+    return "", ""
+
+
+def _proxy_reachable(url, timeout=0.6):
+    """只做 TCP 可达性检查，避免把失效的环境变量代理当成可用通道。"""
+    try:
+        u = urllib.parse.urlsplit(url)
+        s = socket.create_connection((u.hostname or "127.0.0.1", u.port or 80), timeout)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def _listening_ports():
+    """返回本机 127.0.0.1 上处于监听状态的 (端口, PID) 列表。"""
+    try:
+        cp = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=6)
+        out = cp.stdout.decode("utf-8", "replace")
+    except Exception:
+        return []
+    ports = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        local, remote, pid = parts[1], parts[2], parts[4]
+        if not (remote.endswith(":0") or remote.endswith("]")):
+            continue
+        if not any(x in local for x in ("127.0.0.1:", "0.0.0.0:", "[::]:", "[::1]:")):
+            continue
+        try:
+            port = int(local.rsplit(":", 1)[1])
+        except Exception:
+            continue
+        if port > 1024:
+            ports.append((port, pid))
+    return ports
+
+
+def _pid_names():
+    try:
+        cp = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=6)
+        out = cp.stdout.decode("utf-8", "replace")
+    except Exception:
+        return {}
+    d = {}
+    for line in out.splitlines():
+        m = re.match(r'\s*"([^"]+)","(\d+)"', line)
+        if m:
+            d[m.group(2)] = m.group(1).lower()
+    return d
+
+
+def _probe_http_proxy(port, timeout=0.8):
+    """给本机端口发一个 CONNECT，只有返回 200 才认定是能用的 HTTP 代理。"""
+    try:
+        s = socket.create_connection(("127.0.0.1", port), 0.35)
+        s.settimeout(timeout)
+        s.sendall(b"CONNECT api.telegram.org:443 HTTP/1.1\r\n"
+                  b"Host: api.telegram.org:443\r\n\r\n")
+        head = s.recv(128).split(b"\r\n", 1)[0]
+        s.close()
+        if re.search(rb"^HTTP/\S+\s+200\b", head):
+            return "http://127.0.0.1:%d" % port
+    except Exception:
+        pass
+    return ""
+
+
+def _discover_local_proxy():
+    """自动发现本机代理软件（v2rayN / sing-box / Clash 等）的 HTTP 混合端口。
+
+    只探测「已知代理进程」占用的端口 + 常见默认端口，不去骚扰其它本地服务。
+    """
+    names = _pid_names()
+    pri, rest = [], []
+    for port, pid in _listening_ports():
+        nm = names.get(pid, "")
+        (pri if any(h in nm for h in _PROXY_PROC_HINTS) else rest).append(port)
+    candidates = []
+    for p in list(_PROXY_COMMON_PORTS) + sorted(set(pri), reverse=True):
+        if p not in candidates:
+            candidates.append(p)
+    for port in candidates[:60]:
+        u = _probe_http_proxy(port)
+        if u:
+            return u, "本机代理端口 %d" % port
+    return "", ""
+
+
+def proxy_url(force=False):
+    """解析当前应使用的代理 URL（带缓存），返回 "" 表示没有可用代理。
+
+    缓存到期时先做一次 0.6 秒的 TCP 可达性检查：端口还活着就继续用，
+    不再重扫端口（自动发现要 4 秒，不能让它拖慢每 5 分钟的一次即时回执）。
+    只有端口真的死了（v2rayN 重启换了随机端口）才重新发现。
+    """
+    now = time.time()
+    cached = _PROXY_CACHE.get("url")
+    if (not force and _PROXY_CACHE["ts"]
+            and now - _PROXY_CACHE["ts"] < _PROXY_TTL):
+        return cached
+    if not force and cached and _proxy_reachable(cached):
+        _PROXY_CACHE["ts"] = now
+        return cached
+    old = cached
+    cfg = _CFG or {}
+    disabled = str(cfg.get("proxy", "") or "").strip().lower() == "direct"
+    url, src = _proxy_fixed()
+    if url.lower().startswith("socks"):
+        # urllib 不原生支持 SOCKS；请填代理软件的 HTTP 混合端口
+        url, src = "", ""
+    if url and src != "config.json" and not _proxy_reachable(url):
+        url, src = "", ""
+    if not url and not disabled:
+        url, src = _discover_local_proxy()
+    _PROXY_CACHE.update(url=url, ts=now, source=src)
+    if url != old:
+        if url:
+            log("网络代理：%s（来源：%s）；境外请求统一优先走代理" % (url, src))
+        else:
+            log("⚠️ 未找到可用代理，境外请求只能直连；可在 config.json 填 proxy，或开启代理软件")
+    return url
+
+
+def _is_timeout(e):
+    s = str(e).lower()
+    return (isinstance(e, (TimeoutError, socket.timeout))
+            or "timed out" in s or "timeout" in s)
+
+
+def net_open(req, timeout=30, url=None, fallback=True, link=None, limit=None):
+    """统一网络入口：境外请求「代理优先，直连兜底」，境内请求固定直连。
+
+    req     : urllib.request.Request
+    timeout : 首个通道的完整超时
+    fallback: 是否允许在代理失败后试直连（POST 类重复发送风险高的调用可关）
+    link    : 可选 dict，仅用于记录成功通道供状态展示，**不参与排序**
+    limit   : 最多读取的字节数（抓大网页时防内存膨胀）
+    """
+    target = url or getattr(req, "full_url", "") or ""
+    host = _host_of(target)
+    if _is_direct_host(host) and not (_CFG and _CFG.get("llm_direct") is False):
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with op.open(req, timeout=timeout) as resp:
+            return resp.read(limit) if limit else resp.read()
+    policy = str((_CFG or {}).get("network_policy", "proxy_first") or "").lower()
+    order = ["direct", "proxy"] if policy == "direct_first" else ["proxy", "direct"]
+    if not proxy_url():
+        order = ["direct"]          # 没代理就别把同一个直连撞两遍
+    elif not fallback:
+        order = ["proxy"]
+    last = None
+    for i, mode in enumerate(order):
+        # 兜底通道给短超时：代理不通时快速切走，别让即时回执等半分钟。
+        # 短请求最多再给 5 秒（直连要么秒回、要么根本不通），长轮询给 15 秒。
+        t = timeout if i == 0 else min(timeout, 5 if timeout <= 15 else 15)
+        op = (urllib.request.build_opener(urllib.request.ProxyHandler({}))
+              if mode == "direct" else _opener())
+        try:
+            with op.open(req, timeout=t) as resp:
+                data = resp.read(limit) if limit else resp.read()
+            if link is not None:
+                if link.get("mode") != mode:
+                    log("网络通道：%s 可用（境外请求代理优先）"
+                        % ("直连" if mode == "direct" else "代理"))
+                link.update(mode=mode, ts=time.time())
+                # 只有代理真正成功才清零失败计数；直连兜底成功不代表代理已恢复
+                if mode == "proxy":
+                    link["fail"] = 0
+            return data
+        except Exception as e:
+            last = e
+            if mode == "proxy":
+                if link is not None:
+                    link["fail"] = int(link.get("fail") or 0) + 1
+                # 代理端口可能刚变（v2rayN 重启换随机端口）：连接类错误才复检，
+                # 长轮询的正常超时不算，避免每次超时都去扫端口拖慢请求。
+                if (not _is_timeout(e)
+                        and time.time() - float(_PROXY_CACHE.get("recheck") or 0) > 60):
+                    _PROXY_CACHE["ts"] = 0.0
+                    _PROXY_CACHE["recheck"] = time.time()
+            continue
+    raise last if last else RuntimeError("网络请求失败")
+
 
 # ----------------------------------------------------------------------------
 # 日志
@@ -262,7 +497,7 @@ def _ms_to_snow(ms):
     return (int(ms) - DISCORD_EPOCH_MS) << 22
 
 def _api_fetch(url, token, tries=5):
-    """调用 Discord REST API（代理由 _opener() 按 config.proxy 决定）。
+    """调用 Discord REST API（境外请求统一代理优先，见 net_open）。
     429 限速自动等待重试；401/403 直接判定为 token 无效或无权访问。"""
     last = None
     for i in range(tries):
@@ -272,8 +507,8 @@ def _api_fetch(url, token, tries=5):
             "Accept": "application/json",
         })
         try:
-            with _opener().open(req, timeout=30) as r:
-                return json.loads(r.read().decode("utf-8"))
+            raw = net_open(req, timeout=30, url=url).decode("utf-8", "replace")
+            return json.loads(raw)
         except urllib.error.HTTPError as e:
             try:
                 body = e.read().decode("utf-8", "replace")
@@ -418,18 +653,18 @@ def run_export(cfg, after_dt, before_dt, out_json):
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
             env.pop(k, None)
     elif p:
+        p = _norm_proxy(p)
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
             env[k] = p
     else:
-        # proxy="" 系统默认：若本机开了 Clash/V2Ray 系统代理，自动继承，免填端口
-        sp = _windows_system_proxy()
-        if sp:
-            http, https = sp
+        # v1.13.0：与主流程共用 proxy_url()，境外导出统一代理优先（含端口自动发现）
+        pu = proxy_url()
+        if pu:
             for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-                env[k] = https if k.lower().endswith("https") else http
-            log("检测到 Windows 系统代理，导出将走：%s" % http)
+                env[k] = pu
+            log("Discord 导出统一走代理：%s（来源：%s）" % (pu, _PROXY_CACHE["source"]))
         else:
-            log("未检测到 Windows 系统代理（proxy=空）。如需翻墙导出 Discord，请在 Clash/V2Ray 开启「系统代理」，或在 config.json 显式填写 proxy")
+            log("⚠️ 未找到可用代理，Discord 导出只能直连；可在 config.json 填 proxy 或开启代理软件")
     # 超时保护：避免网络不通时无限卡死（默认 120s，正常导出只需 30s 左右）
     dce_timeout = int(cfg.get("dce_timeout", 120) or 120)
     fallback = bool(cfg.get("api_fallback", True))
@@ -2197,84 +2432,30 @@ _TG_LINK = {"mode": None, "ts": 0.0, "fail": 0}
 
 
 def tg_open(req, timeout=30):
-    """发 Telegram/飞书请求：直连与代理双通道自动择优，并记住哪条通道能用。
+    """Telegram 请求（v1.13.0 起）：统一走 net_open 的「代理优先」策略。
 
-    为什么需要（2026-11-10 实测）：老代码对所有境外域名一律走代理。
-    当天 Clash 的系统代理是关的、节点也不稳，于是每一次 getUpdates 都失败
-    （日志里「网络异常第 90 次」），指令要靠偶然成功的那一次才被收到，
-    回执也要卡 9 秒；而实测**直连 api.telegram.org 只要 1.6 秒**。
-    反过来，直连被墙、代理能通的情况也存在。所以不能写死一边：
-    记住上次成功的通道，先用它；切换成功就更新记忆。
-
-    2026-11-10 二次修正（修「触发异常」假故障时发现的真问题）：
-    记忆是好机制，但**记错了会自伤**。当天实况是：监听进程启动时直连还能通
-    （20:36:53 记住「直连」），几分钟后直连死了、代理还活着（子进程 20:37:44 记住「代理」）。
-    于是监听侧每次请求都先拿**完整超时（30-40 秒）**去撞已经死掉的直连，
-    撞完才碰兜底通道，而兜底只给 10 秒 —— 一次 sendMessage 就这么超时了。
-    因此补三条：
-      ① 记忆通道失败一次就**降低它的优先级**（下次请求先试另一条，不再白等 30 秒；
-         连续失败到 2 次直接清空记忆，下次从直连重新探测）；
-      ② 兜底通道不再固定 10 秒：主通道是「超时」而非「拒绝」时，说明网络只是慢，
-         兜底给足时间（min(timeout, 20)），否则永远是「两条都不通」；
-      ③ 记录失败计数，供日志区分「偶发抖动」和「通道已死」。
+    旧版用「记住上次成功的通道」动态排序，实测会在直连/代理之间反复翻转：
+    run.log 里「网络通道：直连 → 代理 → 直连 …」刷屏，getUpdates 连挂十几次，
+    即时回执时快时慢。现在通道顺序固定为「代理 → 直连」，_TG_LINK 只用于
+    状态展示，不再参与排序；代理地址由 proxy_url() 自动解析并定期复检。
     """
-    order = ["direct", "proxy"]
-    cur = _TG_LINK.get("mode")
-    fails = int(_TG_LINK.get("fail") or 0)
-    if cur and fails >= 1:
-        # 记忆里的通道刚失败过：下一次请求先试另一条，别再拿完整超时撞死路。
-        # 实测光「连续 2 次才清空」不够 —— 中间那一次仍会白等 30 秒。
-        order = [m for m in order if m != cur] + [cur]
-    elif cur:
-        order = [cur] + [m for m in order if m != cur]
-
-    last = None
-    slow = False            # 首个通道是「超时」（慢）还是「拒绝」（快失败）
-    for i, mode in enumerate(order):
-        if i == 0:
-            t = timeout                 # 首个尝试的通道给足时间
-        elif slow:
-            t = min(timeout, 20)        # 网络整体慢，兜底也要给足
-        else:
-            t = min(timeout, 10)        # 备用通道快速试探
-        try:
-            op = (urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                  if mode == "direct" else _opener())
-            with op.open(req, timeout=t) as resp:
-                data = resp.read()
-            if cur != mode:
-                log("网络通道：%s 可用（已记住）" % ("直连" if mode == "direct" else "代理"))
-            _TG_LINK.update(mode=mode, ts=time.time(), fail=0)
-            return data
-        except Exception as e:
-            last = e
-            if mode == cur:
-                _TG_LINK["fail"] = int(_TG_LINK.get("fail") or 0) + 1
-                # 记忆通道连续失败 → 清空记忆，下次从直连重新探测，避免一直撞死路
-                if _TG_LINK["fail"] >= 2:
-                    _TG_LINK.update(mode=None, fail=0)
-                    log("记忆通道（%s）连续失败，已清空记忆，下次重新探测"
-                        % ("直连" if mode == "direct" else "代理"))
-            if isinstance(e, (TimeoutError, socket.timeout)) or "timed out" in str(e).lower():
-                slow = True
-            continue
-    raise last if last else RuntimeError("Telegram 请求失败")
+    return net_open(req, timeout=timeout, link=_TG_LINK)
 
 
 def tg_detect(token, timeout=8):
-    """启动时探测 Telegram 走「直连」还是「代理」，结果记进 _TG_LINK。
+    """启动时用 getMe 探一次 Telegram 通道，结果记进 _TG_LINK。
 
-    必须先探测再长轮询：getUpdates 带 30 秒长轮询，而陌生通道只给 10 秒探测超时，
-    不先定通道的话，第一次长轮询会被自己的探测超时打断，永远判成「都不通」。
+    必须先探测再长轮询：getUpdates 带 30 秒长轮询，而陌生通道探测超时很短，
+    不先定通道的话，第一次长轮询会被自己的探测超时打断。
     """
     req = urllib.request.Request("https://api.telegram.org/bot%s/getMe" % token)
     try:
         d = json.loads(tg_open(req, timeout=timeout).decode("utf-8", "replace"))
-        log("Telegram 通道：%s（%.0f 秒探测成功）"
-            % ("直连" if _TG_LINK.get("mode") == "direct" else "代理", timeout))
+        log("Telegram 通道：%s（%.0f 秒内探测成功；境外请求统一代理优先）"
+            % ("直连兜底" if _TG_LINK.get("mode") == "direct" else "代理", timeout))
         return d
     except Exception as e:
-        log("⚠️ Telegram 两条通道都没通（%s）；监听会继续重试，恢复后自动接上"
+        log("⚠️ Telegram 代理与直连都没通（%s）；监听会继续重试，恢复后自动接上"
             % str(e)[:120])
         return None
 
@@ -2283,8 +2464,8 @@ def _post_json(url, payload):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    # 飞书是境内服务，必须直连（走代理反而 502）；Telegram 才需要双通道择优。
-    # 这个函数两个渠道共用，所以按域名分流，不能一律用 tg_open。
+    # 飞书是境内服务（已在 _DIRECT_HOSTS 白名单），必须直连；
+    # Telegram 走 net_open 的代理优先 + 直连兜底。两个渠道共用本函数，按域名分流。
     if _host_of(url).endswith("telegram.org"):
         raw = tg_open(req, timeout=30).decode("utf-8", "replace")
     else:

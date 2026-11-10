@@ -22,6 +22,7 @@
   "llm_verify_pass": true,
   "llm_direct": true,
   "no_proxy_hosts": [],
+  "network_policy": "proxy_first",
   "proxy": "",
   "feishu_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/PASTE_HOOK_ID",
   "feishu_secret": "",

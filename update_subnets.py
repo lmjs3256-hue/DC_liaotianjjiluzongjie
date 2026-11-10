@@ -58,10 +58,9 @@ def fetch_identities(cfg=None, timeout=90, retries=3, log=None):
     这是可自愈的抖动而不是页面改版。不重试的话，周更正好撞上一次抖动就白等一周。
     """
     log = log or P.log
-    pu = _proxy_url(cfg)
-    handlers = [P.urllib.request.ProxyHandler({"http": pu, "https": pu})] if pu else \
-               [P.urllib.request.ProxyHandler({})]
-    op = P.urllib.request.build_opener(*handlers)
+    # v1.13.0：与主流程共用代理解析，境外抓取统一「代理优先、直连兜底」
+    if cfg is not None and getattr(P, "_CFG", None) is None:
+        P._CFG = cfg
     req = P.urllib.request.Request(
         SRC_URL, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DTAO-Pipeline/1.0"})
 
@@ -69,8 +68,7 @@ def fetch_identities(cfg=None, timeout=90, retries=3, log=None):
     last_err = None
     for i in range(max(1, retries)):
         try:
-            with op.open(req, timeout=timeout) as resp:
-                html = resp.read().decode("utf-8", "replace")
+            html = P.net_open(req, timeout=timeout, url=SRC_URL).decode("utf-8", "replace")
             last_err = None
             break
         except Exception as e:

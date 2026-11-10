@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -877,12 +877,15 @@ SYSTEM_PROMPT = (
     "**背景日发生的事一律不得写成总结日（当天）的新闻**；如果当天消息明确延续背景日的话题，"
     "可以写「延续前几日的话题」，但每件事实必须归属其真实发生的日期，不得把日期混写、"
     "也不得把背景日的内容单独扩成一条。总结对象永远只有【当日消息】。\n"
-    "24b. **子网档案只用来认人，不用来叙事**：输入里可能附有【本次聊到的子网 —— 本地档案摘要】，"
-    "它给的是每个子网的名称、业务定位、历史讨论和此前投研结论。用它的方式只有两种："
-    "① 当天消息里提到某子网时，写清它**是什么**（例：SN41 Almanac 是做预测市场情报的），"
-    "不要只写「某子网」「该子网」；② 当天讨论明显延续此前投研关注点时，知道上下文，避免把结论写反。"
-    "**不得把档案里的历史讨论当成本次总结对象**（那是前几天的原话，不要重抄一遍、也不要当成今天发生的事）；"
-    "**不得把档案里的旧数据当成今天的行情数据**（价格/收入/回购只认当日或最近一次抓取，并标时间）。\n"
+    "24b. **子网档案是判断底子，不是写作素材**：输入里可能附有【本次聊到的子网 —— "
+    "名称对照（+ 此前判断）】，里面每个子网只有名称/业务（有的还带几条「此前判断」）。"
+    "它的用处只有两个，**都不是让你往里写**："
+    "① **认人**——当天消息只写了编号的，用这里的名称/业务写清楚，别写「某子网」「该子网」；"
+    "② **判关联**——只有当今天的事与档案构成「**项目有进展**」（旧事被推进/落地）"
+    "或「**早期判断被验证**」（某条「此前判断」被今天的事实证实或推翻）时，"
+    "才用**一句话**带过，如「（10-30 曾说会跌破 438，今日已跌破）」。"
+    "**没有构成这两种关系就一个字都别写**：不要复述历史讨论、不要把旧事写成本日新闻、"
+    "不要把旧数据当今天的行情。日报主体永远是当天谈到的话题，宁可少写也不要凑档案。\n"
     "25. **「次日」消息是今晨补录**：总结「昨天」时，导出范围延伸到当下，"
     "时间带「次日」前缀的消息发生在**总结日的下一天（今天凌晨到现在）**。"
     "这些消息可以写进日报，但必须标注「今晨」，不得当成总结日当天的事件，"
@@ -2538,45 +2541,60 @@ def _clip_flat(s, n):
     return s if len(s) <= n else s[:n] + "…"
 
 
-def _research_brief(body, max_items=3):
-    """从一份投研报告正文里抽「最该被日报引用」的结论行。
+def _research_watch_items(body, max_items=3):
+    """从投研报告里抽「📌 预期跟踪」的条目 —— 这些天生就是「等待被验证的判断」。
 
-    为什么不直接截前 N 字：报告以「📰 最新资讯」开头，截前 N 字拿到的是一堆资讯标题，
-    对「这子网是谁、现在什么状况」几乎没用。收入/回购与预期跟踪才是结论所在。
+    日报需要的正是这一类：某个判断当初写下来，今天出现的事实把它证实或推翻了。
+    收入/回购数据反而是「当时的行情」，拿来补日报容易变成旧数据当新闻，不抽。
+
+    输出只留「盯什么」：原始条目形如
+    `盯 owner 锁仓状态 → 目前 owner locked in、unwinding=0；若出现…即为解仓信号`，
+    整条可达 90+ 字。箭头左半是「当时在盯什么」（判断主体），右半是**当时的状态值**——
+    那是旧数据，既占篇幅又容易被误当成今天的情况，按用户的原则直接丢掉。
+    模型判断「有没有被验证」，靠的是「当时在盯什么」+ 今天的事实，不需要旧状态。
     """
-    out, txt = [], (body or "")
-    for emoji, label in (("💰", "收入/回购"), ("📌", "上次跟踪"), ("💡", "要点")):
-        m = re.search(r"\*\*%s[^\*]*\*\*[^\n]*\n((?:[-•].+\n?)+)" % emoji, txt)
-        if not m:
+    out = []
+    m = re.search(r"\*\*📌[^\*]*\*\*[^\n]*\n((?:[-•].+\n?)+)", body or "")
+    if not m:
+        return out
+    for ln in m.group(1).strip().splitlines():
+        ln = re.sub(r"^[-•]\s*", "", ln)
+        ln = re.sub(r"</?font[^>]*>", "", ln, flags=re.I)
+        ln = ln.replace("**", "").strip()
+        if not ln:
             continue
-        for ln in m.group(1).strip().splitlines():
-            ln = re.sub(r"^[-•]\s*", "", ln)
-            ln = re.sub(r"</?font[^>]*>", "", ln, flags=re.I)
-            ln = ln.replace("**", "").strip()
-            if ln:
-                out.append("%s：%s" % (label, _clip_flat(ln, 100)))
-            if len(out) >= max_items:
-                return out
+        # 「本期无历史跟踪事项」这类占位行没信息量
+        if re.search(r"无.{0,6}跟踪事项|首次投研|暂无", ln):
+            continue
+        left = ln.split("→", 1)[0] if "→" in ln else ln
+        left = _clip_flat(left, 46)
+        if left:
+            out.append(left)
         if len(out) >= max_items:
             break
     return out
 
 
-def build_subnet_context_block(cfg, items, day_str=None, max_sn=8, max_chars=2000):
-    """把「当日消息里提到的子网」按本地档案摘要注入，补一层全局理解。
+def build_subnet_context_block(cfg, items, day_str=None, max_sn=10, max_chars=1200):
+    """给日报补一层「档案底子」，只补有意义的那点，绝不倒档案。
 
-    为什么需要：日报输入原本只有原始聊天记录，模型不知道 SN64 是 Chutes、
-    做什么业务、前几次投研得出过什么结论，只能从零散对话里猜 —— 于是写出
-    「某子网」这种模糊表述，或者把改名/换业务的子网背景搞错。
-    与「背景资料」的分工：背景资料是前几天的**聊天记录**（还没沉淀），
-    这里是**已沉淀的档案**（名称/业务/历史讨论/投研结论），两者互补不重复。
+    定位（用户明确要求）：档案是**判断辅助**，不是内容来源。日报主体永远是当天谈的话题；
+    档案只在两种情况下才有意义 ——
+      · **项目有进展**：今天的事是之前某件事的推进（上次说在谈，今天官宣了）；
+      · **早期判断被验证**：此前某人做过判断，今天的事实证实或推翻了它。
+    所以这里只注入两样东西：
+      1. **身份行（恒给）**：`SN64 Chutes（业务）｜今日提到 N 次`。帮模型认人，
+         避免写出「某子网」。一行一个，成本极低。
+      2. **待验证判断（有投研才给）**：投研报告的「📌 预期跟踪」条目。
+         这些天然就是「写下来的、等事实检验的判断」，正是「早期观点被验证」的候选。
 
-    两条自我约束（都是为了不白占字数）：
-      · 档案讨论只取 **day_str 之前**的条目 —— 当天消息正文里已经有了，
-        再注入一遍等于让模型看两遍同样的东西；
-      · 同一条原话只出现一次 —— 泛论类发言会同时命中多个子网，
-        重复投递对理解任何一个子网都没帮助。
-    块内明写「不是总结对象」，避免模型把档案里的旧事当今天的新事件重写。
+    **不给历史原话**——这是实测后的取舍：早先试过用中文 2-gram 做关键词重叠来挑
+    「相关旧记录」，结果全是噪声。根因是子网名本身构成重叠：「28-gm 41-almanac
+    51-lium 53-engy」这种罗列名单的泛论，因为同时含有多个子网名而拿到最高分，
+    可它既不是进展也不是验证。剔掉名称词后重叠又几乎归零（1200+ 当日实词里，
+    真正相关的最多命中 2-4 个）。这种匹配不可靠，宁可不给。
+    另外 context_days（默认 2 天）已经把最近的聊天记录都给模型了，
+    更早的原话价值远低于它带来的噪声。
     """
     if not items:
         return ""
@@ -2609,8 +2627,7 @@ def build_subnet_context_block(cfg, items, day_str=None, max_sn=8, max_chars=200
     # 2) 聊得多的排前面；同次数则编号小的在前，保证输出稳定（可复现）
     ranked = sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:max_sn]
 
-    seen_txt = set()          # 已引用的原话，跨子网去重
-    lines, used, n_hit = [], 0, 0
+    lines, used, n_hit, n_watch = [], 0, 0, 0
     for sn, times in ranked:
         try:
             arc = SA.load_archive(arc_dir, sn)
@@ -2619,58 +2636,44 @@ def build_subnet_context_block(cfg, items, day_str=None, max_sn=8, max_chars=200
         if not arc:
             continue                     # 没建档的子网不编背景，留给正文自己说
         name = (arc.get("name") or "").strip() or "（知识库未收录）"
-        biz = _clip_flat(arc.get("biz") or "", 44)
+        biz = _clip_flat(arc.get("biz") or "", 30)
         head = "- **SN%d %s**" % (sn, name)
         if biz:
             head += "（%s）" % biz
         head += "｜今日提到 %d 次" % times
 
-        days = arc.get("days") or {}
-        n_ent = sum(len(v or []) for v in days.values())
-        if days:
-            head += "｜档案覆盖 %d 天 / %d 条" % (len(days), n_ent)
-
-        detail = []
-        # 最近一份投研的结论（这部分最值钱，是已经交叉验证过的判断）
+        # 待验证判断：只看最近一份投研，最多 3 条。
+        # 全局再加个闸：最多 3 个子网挂判断——否则聊到的子网一多，
+        # 这里会变成「投研报告汇总」，直接违背「主体是当日话题」的定位。
+        watch = []
         reps = arc.get("reports") or []
-        if reps:
+        if reps and n_watch < 3:
             last = reps[-1]
-            detail.append("· 最近投研（%s）：" % (last.get("date") or "?"))
-            brief = _research_brief(last.get("body") or "")
-            if brief:
-                detail.extend("  " + b for b in brief)
-            else:
-                detail.append("  （该次报告无结论段可摘）")
-        # 历史语境：只取 day_str 之前的最近一条，当天内容正文已有
-        cand = []
-        for d in sorted(days.keys()):
-            if day_str and d >= day_str:
-                continue                 # 当天及以后的不要
-            for e in (days.get(d) or []):
-                t = _clip_flat(e.get("zh") or e.get("text") or "", 70)
-                if t:
-                    cand.append((d, e.get("author") or "?", t))
-        for d, who, t in reversed(cand):
-            if t in seen_txt:
-                continue                 # 泛论类发言会被多个子网命中，只引用一次
-            seen_txt.add(t)
-            detail.append("· 档案 %s %s：「%s」" % (d[5:], who, t))
-            break                        # 每个子网只给一条历史语境
+            if not (day_str and (last.get("date") or "") >= day_str):
+                for it in _research_watch_items(last.get("body") or "", max_items=3):
+                    watch.append("  · 此前判断（%s）：「%s」" % (last.get("date") or "?", it))
 
-        block = head + ("\n" + "\n".join(detail) if detail else "")
+        block = head + ("\n" + "\n".join(watch) if watch else "")
         if used + len(block) > max_chars:
             break
         lines.append(block)
         used += len(block)
         n_hit += 1
+        if watch:
+            n_watch += 1
 
     if not lines:
         return ""
-    log("子网档案：当日提到 %d 个子网，注入档案摘要 %d 个（%d 字）"
-        % (len(cnt), n_hit, used))
-    return ("【本次聊到的子网 —— 本地档案摘要】下面是这些子网的沉淀档案（业务定位、"
-            "历史讨论、此前投研结论）。**仅供理解背景，不是本次总结对象**：不要把档案里的"
-            "旧事当成今天的新事件重写一遍；只用来避免把子网搞混、写清「哪个子网是什么」。\n"
+    log("子网档案：当日提到 %d 个子网，注入 %d 个身份（其中 %d 个带此前判断），共 %d 字"
+        % (len(cnt), n_hit, n_watch, used))
+    return ("【本次聊到的子网 —— 名称对照（+ 此前判断）】\n"
+            "这是**判断用的底子，不是写作素材**。只做两件事：\n"
+            "① **认人**：当天消息只写了编号的，用这里的名称/业务写清楚，别写「某子网」；\n"
+            "② **判关联**：只有当今天的话题与之构成「**项目有进展**」（旧事被推进/落地）"
+            "或「**早期判断被验证**」（下面的「此前判断」被今天的事实证实或推翻）时，"
+            "才用**一句话**带过，如「（10-30 曾说会跌破 438，今日已跌破）」。\n"
+            "**没有构成这两种关系就一个字都别写**——不要复述旧记录、不要把旧事写成本日新闻、"
+            "不要把旧数据当今日行情。日报主体永远是当天谈到的话题。\n"
             + "\n".join(lines))
 
 
@@ -2688,6 +2691,7 @@ def _build_full_text_block(cfg, channel_name, day_str, items):
     if sn_block:
         text_block += "\n\n" + sn_block
     return text_block
+
 
 def _audit_names(digest, items, tag=""):
     """人名保真核对：把日报「人物观点」里出现的名字与当日真实发言者名单比对。

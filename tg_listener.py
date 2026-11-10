@@ -405,9 +405,12 @@ def tg_api(token, method, params=None, timeout=None):
     才发出去。现在按方法分层：长轮询 40 秒，其余短请求 10 秒。
     """
     if timeout is None:
-        # 短请求给 8 秒：境外请求统一代理优先（pipeline.net_open），
-        # 代理正常时 1-2 秒返回；给太长只会把「正在生成」这条回执拖成半分钟。
-        timeout = 40 if method == "getUpdates" else 8
+        # 短请求给 12 秒：境外请求统一代理优先（pipeline.net_open），
+        # 代理正常时 1-2 秒返回，但节点偶发抖动会到 7-8 秒（实测样本
+        # 1.6 / 2.3 / 4.0 / 6.9 / 7.4 / 7.6 秒）。给 8 秒会把「正在生成」
+        # 这条回执抖丢；12 秒足以覆盖抖动，且代理真挂时还有 5 秒直连兜底，
+        # 总上限 17 秒，远低于旧版直连优先的 30-40 秒。
+        timeout = 40 if method == "getUpdates" else 12
     url = "https://api.telegram.org/bot%s/%s" % (token, method)
     params = dict(params or {})
     # 通道还没定（刚启动 / 两条都不通）时不要长轮询：长轮询要 30 秒，

@@ -21,6 +21,7 @@
     仍不行就自己退出并打印提示，避免和手工启动的进程互相打断。
 """
 
+import atexit
 import ctypes
 import os
 import subprocess
@@ -33,10 +34,25 @@ LISTENER = os.path.join(HERE, "tg_listener.py")
 GUARD_LOG = os.path.join(HERE, "tg_guard.log")
 GUARD_MUTEX = "Local\\DTAO_TG_Guard_SingleInstance"
 PID_FILE = os.path.join(HERE, "tg_listener.pid")
+GUARD_PID_FILE = os.path.join(HERE, "tg_guard.pid")
 
 RESTART_DELAY = 20      # listener 正常退出后，等多久再拉起
+RELOAD_DELAY = 2        # 退出码 75 = 「我要热重载」：立刻拉起，不等 20 秒
 FAST_EXIT_SEC = 10      # 小于这个存活时间算「秒退」
 FAST_EXIT_MAX = 3       # 连续秒退多少次后守护自己退出
+EXIT_RELOAD = 75        # 与 tg_listener 约定：代码有新版本，请立即重启我
+
+# CREATE_NO_WINDOW + DETACHED_PROCESS：拉起的监听不占窗口，
+# 也不随「守护所在的控制台被关掉」一起被杀（这是以前「自动关闭」的一个来源）。
+_DETACHED = 0x00000008
+_NO_WINDOW = 0x08000000
+
+
+def _pythonw():
+    """优先用 pythonw.exe 拉起监听：无黑窗，用户看不到也关不掉。"""
+    exe = sys.executable
+    cand = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    return cand if os.path.exists(cand) else exe
 
 
 def _pid_alive(pid):
@@ -122,6 +138,25 @@ def main():
         log("找不到 %s，守护退出" % LISTENER)
         return 2
 
+    # 记录守护自己的 pid：tgctl stop / status 要靠它才能准确找到守护，
+    # 否则只能靠命令行匹配（慢且可能误伤）。
+    try:
+        with open(GUARD_PID_FILE, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+    def _bye():
+        try:
+            if os.path.exists(GUARD_PID_FILE):
+                with open(GUARD_PID_FILE, "r", encoding="utf-8") as f:
+                    if (f.read() or "").strip() == str(os.getpid()):
+                        os.remove(GUARD_PID_FILE)
+        except Exception:
+            pass
+
+    atexit.register(_bye)
+
     log("守护循环已启动（pid=%d），唯一实例，每 %d 秒检查一次" %
         (os.getpid(), RESTART_DELAY))
 
@@ -139,8 +174,13 @@ def main():
 
         started = time.time()
         try:
-            # 前端运行，日志由 tg_listener.py 自己写；这里只等它退出
-            proc = subprocess.Popen([sys.executable, LISTENER], cwd=HERE)
+            # 无窗口 + 脱离控制台：监听自己写 tg_listener.log，不需要继承 stdout。
+            # 这样即使用户把守护所在的 cmd 窗口关掉，监听也不会一起被杀。
+            flags = (_DETACHED | _NO_WINDOW) if os.name == "nt" else 0
+            proc = subprocess.Popen(
+                [_pythonw(), LISTENER], cwd=HERE,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
             code = proc.wait()
         except KeyboardInterrupt:
             log("守护收到 Ctrl+C，停止")
@@ -151,6 +191,13 @@ def main():
 
         lived = time.time() - started
         log("监听过退出（code=%s，存活 %.0f 秒）" % (code, lived))
+
+        # 热重载：监听检测到 pipeline.py 版本变了，会以 75 退出，要求立即重启
+        if code == EXIT_RELOAD:
+            log("收到热重载请求（代码已更新），%d 秒后拉起新版本" % RELOAD_DELAY)
+            fast_exits = 0
+            time.sleep(RELOAD_DELAY)
+            continue
 
         if lived < FAST_EXIT_SEC:
             fast_exits += 1

@@ -31,3 +31,9 @@ __pycache__/
 tg_listener.pid
 .guard.lock
 tg_guard.log
+
+# ===== 运行时状态（pid / 版本 / 控制台日志，不入库）=====
+*.pid
+tg_listener.state.json
+tgctl.log
+tg_guard.log

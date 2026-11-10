@@ -27,6 +27,7 @@ import html
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -530,7 +531,8 @@ def src_github(meta, days=120):
     owner, repo = m.group(1), re.sub(r"\.git$", "", m.group(2))
     out = {"src": "GitHub", "ok": True, "repo": "%s/%s" % (owner, repo),
            "releases": [], "commits": [], "err": ""}
-    ok, x = fetch("https://github.com/%s/%s/releases.atom" % (owner, repo))
+    ok, x = fetch("https://github.com/%s/%s/releases.atom" % (owner, repo),
+                  timeout=15, retries=1)
     if ok:
         for it in re.findall(r"<entry>(.*?)</entry>", x, re.S)[:8]:
             ti = re.search(r"<title>(.*?)</title>", it, re.S)
@@ -538,9 +540,11 @@ def src_github(meta, days=120):
             out["releases"].append({
                 "title": html.unescape(re.sub(r"<.*?>", "", ti.group(1))).strip() if ti else "",
                 "at": (up.group(1) if up else "")[:10]})
-    ok, x = fetch("https://github.com/%s/%s/commits.atom" % (owner, repo))
+    ok, x = fetch("https://github.com/%s/%s/commits.atom" % (owner, repo),
+                  timeout=15, retries=1)
     if not ok:
-        ok, x = fetch("https://github.com/%s/%s/commits/main.atom" % (owner, repo))
+        ok, x = fetch("https://github.com/%s/%s/commits/main.atom" % (owner, repo),
+                      timeout=15, retries=1)
     if ok:
         for it in re.findall(r"<entry>(.*?)</entry>", x, re.S)[:15]:
             ti = re.search(r"<title>(.*?)</title>", it, re.S)
@@ -944,27 +948,44 @@ def x_eco_posts(meta, days=14, log=None, skip_handles=None):
     lo_ts = int((datetime.datetime.now(TZ) -
                  datetime.timedelta(days=max(3, int(days or 14)))).timestamp())
     hits, seen = [], set()
-    for h in X_ECO_ACCOUNTS:
-        if h.lower() in skip:
-            continue
+    # 三个生态号并发抓：串行时每个 ~15 秒，实测这一段白白花掉 45 秒，
+    # 而且多数情况下一无所获（生态号本来就不会天天点名某个子网）。
+    import concurrent.futures as cf
+    targets = [h for h in X_ECO_ACCOUNTS if h.lower() not in skip]
+
+    def _grab(h):
         try:
-            _p, posts = x_user_posts(h, pages=1)
+            return x_user_posts(h, pages=1)[1]
         except Exception:
+            return []
+
+    posts_all = []
+    pool = cf.ThreadPoolExecutor(max_workers=max(1, len(targets)))
+    futs = [pool.submit(_grab, h) for h in targets]
+    try:
+        for fut in cf.as_completed(futs, timeout=25):
+            try:
+                posts_all.extend(fut.result() or [])
+            except Exception:
+                continue
+    except cf.TimeoutError:
+        pass        # 到点就走，拿到的先用；生态号提及本来只是补充信源
+    pool.shutdown(wait=False)
+
+    for p in posts_all:
+        if p["id"] in seen or p["ts"] < lo_ts:
             continue
-        for p in posts:
-            if p["id"] in seen or p["ts"] < lo_ts:
+        hit = [x.pattern for x in pats if x.search(p["text"])]
+        if not hit:
+            continue
+        # SN 编号正则太宽（"subnet 8" 会命中 subnet 80），要求同时出现名字或独立编号
+        if name and len(name) >= 3 and not pats[0].search(p["text"]):
+            m = re.search(r"(?i)\bsubnet\s*%d\b|\bSN\s*%d\b|\bnetuid\s*%d\b" % (sn, sn, sn),
+                          p["text"])
+            if not m:
                 continue
-            hit = [x.pattern for x in pats if x.search(p["text"])]
-            if not hit:
-                continue
-            # SN 编号正则太宽（"subnet 8" 会命中 subnet 80），要求同时出现名字或独立编号
-            if name and len(name) >= 3 and not pats[0].search(p["text"]):
-                m = re.search(r"(?i)\bsubnet\s*%d\b|\bSN\s*%d\b|\bnetuid\s*%d\b" % (sn, sn, sn),
-                              p["text"])
-                if not m:
-                    continue
-            seen.add(p["id"])
-            hits.append(p)
+        seen.add(p["id"])
+        hits.append(p)
     hits.sort(key=lambda x: -x["ts"])
     if hits and log:
         log("    X 生态圈：%d 条提及 SN%d/%s" % (len(hits), sn, name or "-"))
@@ -1071,31 +1092,62 @@ def src_x(meta, site_html="", extra_links=None, days=14, log=None):
 
 
 def collect(meta, sn, log=print, extra_x_links=None, days=14):
-    """并发度不做，串行抓取（源少、且要统一走代理，串行更稳）。
+    """并发抓取全网素材，整体设一个墙钟上限。
 
-    X 放在官网之后：官网页面里挂的 X 账号是最可靠的账号来源，
-    所以先把官网 HTML 拿到手，再把其中的 X 链接喂给 src_x 定位。"""
+    为什么从串行改成并发（2026-11-10 实测）：9 个源串行跑，网络一抖动就累加成
+    **213 秒**（GitHub 117s + 收入/回购 46s + Google News 55s + X 35s …），
+    用户发个编号要等 10 分钟才拿到报告。这些源都是纯网络 I/O、彼此无依赖，
+    并发后总耗时 ≈ 最慢的那一个，而不是全部之和。
+
+    上限的意义：某个源卡住时不能让整份报告陪着等。到点还没回来的源按
+    「超时跳过」处理，报告照出，并在头部如实标注哪个源没拿到。
+
+    X 仍放在官网之后：官网页面里挂的 X 账号是最可靠的账号来源，
+    所以要先拿到官网 HTML，再把其中的 X 链接喂给 src_x 定位。
+    """
+    import concurrent.futures as cf
+
+    # 关键源（链上指标、收入/回购）值得多等一会儿；资讯类超时就直接放弃，
+    # 缺一条新闻远不如「整份报告晚 2 分钟」代价大。
     jobs = [
-        ("bittensor.ai", lambda: src_bittensor_ai(sn)),
-        ("taostats", lambda: src_taostats(sn)),
-        ("dtaoscan", lambda: src_dtaoscan(sn)),
+        ("bittensor.ai", lambda: src_bittensor_ai(sn), 75),
+        ("taostats", lambda: src_taostats(sn), 75),
+        ("dtaoscan", lambda: src_dtaoscan(sn), 75),
         # 收入/回购单独抓一次 bittensor.ai：数据藏在 RSC payload 里，
         # 和上面的常规指标解析路径不同（不能合并，否则一边失败会拖累另一边）
-        ("收入/回购", lambda: src_income(sn)),
-        ("官网", lambda: src_website(meta)),
-        ("GitHub", lambda: src_github(meta)),
-        ("Google News", lambda: src_news(meta, sn)),
-        ("DuckDuckGo", lambda: src_web_search(meta, sn)),
+        ("收入/回购", lambda: src_income(sn), 75),
+        ("官网", lambda: src_website(meta), 45),
+        ("GitHub", lambda: src_github(meta), 45),
+        ("Google News", lambda: src_news(meta, sn), 45),
+        ("DuckDuckGo", lambda: src_web_search(meta, sn), 45),
     ]
+
     res = {}
-    for name, fn in jobs:
-        try:
-            r = fn()
-        except Exception as e:
-            r = {"src": name, "ok": False, "err": str(e)[:160]}
-        res[name] = r
-        log("  投研抓取 %-12s %s%s" % (name, "OK" if r.get("ok") else "失败",
-                                     "" if r.get("ok") else "（%s）" % r.get("err", "")[:80]))
+    t0 = time.time()
+    # max_workers 取源数量：全是 I/O，开满才能真正「等最慢的那个」
+    pool = cf.ThreadPoolExecutor(max_workers=len(jobs))
+    futs = {}
+    for name, fn, _lim in jobs:
+        futs[pool.submit(fn)] = name
+    try:
+        for fut in cf.as_completed(list(futs.keys()), timeout=max(j[2] for j in jobs)):
+            name = futs[fut]
+            try:
+                res[name] = fut.result()
+            except Exception as e:
+                res[name] = {"src": name, "ok": False, "err": str(e)[:160]}
+            r = res[name]
+            log("  投研抓取 %-12s %s%s" % (name, "OK" if r.get("ok") else "失败",
+                                         "" if r.get("ok") else "（%s）" % r.get("err", "")[:80]))
+    except cf.TimeoutError:
+        log("  投研抓取：到 %.0f 秒上限，未返回的源按超时跳过" % (time.time() - t0))
+    # 没回来的源补一条记录，报告头部才能如实反映「哪个源没拿到」
+    for fut, name in futs.items():
+        if name not in res:
+            res[name] = {"src": name, "ok": False, "err": "超时跳过（>%ds）" % 75}
+            log("  投研抓取 %-12s 超时跳过" % name)
+    pool.shutdown(wait=False)   # 不等卡住的线程：它们都是 daemon，随进程结束
+
     # 官网原文（HTML）用于定位官方 X 账号
     site_html = (res.get("官网") or {}).get("html") or ""
     try:

@@ -111,6 +111,11 @@ HELP = (
 _MUTEX_NAME = "Local\\DTAO_TG_Listener_SingleInstance"
 _mutex_handle = None
 _PID_FILE = os.path.join(HERE, "tg_listener.pid")
+# 运行状态：pid + 启动时加载的 pipeline 版本 + 启动时间。
+# 为什么要落盘：新进程要能判断「现在跑着的是哪个版本」，
+# 才能做到「同版本不打扰、旧版本杀掉接管」。只看 pid 文件是判断不出版本的。
+_STATE_FILE = os.path.join(HERE, "tg_listener.state.json")
+EXIT_RELOAD = 75        # 约定：代码有新版本，请守护立即重启我
 # 已处理过的消息指纹（chat_id:message_id），进程内幂等去重
 _SEEN_MSG_IDS = {}
 
@@ -140,9 +145,34 @@ def _pid_alive(pid):
 def _list_listener_pids():
     """列出所有正在跑「本项目 tg_listener.py」的 python 进程 pid（不含自己）。
 
-    优先用 PowerShell 的 CIM 拿命令行（能精确匹配本项目路径）；
-    拿不到就退回 pid 文件里记录的那个 pid。两者都失败就什么都不杀——
-    宁可留着旧进程让它被互斥体挡在外，也不要误杀用户的其它 python 程序。
+    快路径优先：pid 文件里的进程活着就直接返回，**不启动 PowerShell**。
+    为什么要这样：启动 PowerShell 拿进程列表要 5-15 秒（冷启动更久），
+    每次拉起监听都白等这么久，日志里会长时间没有「已加载」这一行，
+    看起来就像「进程起不来」。只有 pid 文件缺失/进程已死时，才去枚举兜底。
+    """
+    pids = set()
+    me = os.getpid()
+
+    # --- 快路径 ---
+    try:
+        with open(_PID_FILE, "r", encoding="utf-8") as f:
+            pid = int((f.read() or "0").strip() or 0)
+        if pid and pid != me and _pid_alive(pid):
+            return {pid}
+    except Exception:
+        pass
+
+    # 兜底枚举交给 _enum_listener_pids（慢，5-15 秒）：
+    # 这里不做，是因为「pid 文件过期」是常态（进程被强杀就会留下），
+    # 每次启动都为它等十几秒，反而让「已加载」那行迟迟不出现、看起来像起不来。
+    # 真有拿不到 pid 的孤儿进程时，互斥体会先挡住我们，再走 _kill_stale_instances 枚举。
+    return pids
+
+
+def _enum_listener_pids():
+    """枚举所有监听进程（慢：要起 PowerShell 拿命令行，5-15 秒）。
+
+    只在互斥体被占、需要清理「pid 文件里没有的孤儿进程」时才调用。
     """
     pids = set()
     me = os.getpid()
@@ -164,15 +194,6 @@ def _list_listener_pids():
                     pids.add(pid)
     except Exception as e:
         log("枚举监听进程失败（改用 pid 文件）：%s" % e)
-
-    if not pids:
-        try:
-            with open(_PID_FILE, "r", encoding="utf-8") as f:
-                pid = int((f.read() or "0").strip() or 0)
-            if pid and pid != me and _pid_alive(pid):
-                pids.add(pid)
-        except Exception:
-            pass
     return pids
 
 
@@ -194,9 +215,10 @@ def _kill_pid(pid):
 
 
 def _kill_stale_instances():
-    """启动时杀掉所有旧监听实例（含守护脚本留下的多重实例）。"""
+    """杀掉所有旧监听实例（含守护脚本留下的、pid 文件里没有的多重实例）。"""
     killed = []
-    for pid in sorted(_list_listener_pids()):
+    targets = set(_list_listener_pids()) | _enum_listener_pids()
+    for pid in sorted(targets):
         if _kill_pid(pid):
             killed.append(pid)
             log("已终止旧监听进程 pid=%d" % pid)
@@ -206,16 +228,88 @@ def _kill_stale_instances():
     return killed
 
 
-def acquire_single_instance(retries=6, delay=0.8):
-    """申请全局唯一实例；已有实例则拒绝启动。返回 True 表示拿到锁。
+def _disk_version():
+    """磁盘上 pipeline.py 的版本号。
 
-    注意顺序：**先抢锁，抢不到再杀旧进程，然后重抢**。
-    反过来（先杀再造）会有竞态——旧进程刚被 TerminateProcess 时，
-    内核对象还引用着互斥体没释放，新进程这时去 CreateMutex 会拿到
-    ERROR_ALREADY_EXISTS，于是刚要启动就把自己判成「已有实例」退出，
-    表现就是「杀掉了旧的不见新的起来」。所以这里必须带重试。
+    正则读文件而不是 import：import 拿到的是**进程内存里的旧模块**，
+    这里要的恰恰是「磁盘上现在是哪一版」，两者不同才说明需要热重载。
+    """
+    try:
+        with open(os.path.join(HERE, "pipeline.py"), "r", encoding="utf-8") as f:
+            m = re.search(r'^__version__\s*=\s*["\']([^"\']+)', f.read(), re.M)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def _running_version(pid):
+    """某个监听 pid 启动时加载的版本；读不到就返回 None（当作旧版本）。"""
+    try:
+        with open(_STATE_FILE, "r", encoding="utf-8") as f:
+            st = json.load(f)
+        if int(st.get("pid") or 0) == int(pid):
+            return st.get("version") or None
+    except Exception:
+        pass
+    return None
+
+
+def _write_state():
+    """把「本进程跑的是哪个版本」落盘，供 tgctl 与下一个新进程判断。"""
+    try:
+        with open(_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(),
+                       "version": getattr(P, "__version__", "?"),
+                       "started_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                      f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _cleanup_state():
+    try:
+        with open(_STATE_FILE, "r", encoding="utf-8") as f:
+            if int(json.load(f).get("pid") or 0) == os.getpid():
+                os.remove(_STATE_FILE)
+    except Exception:
+        pass
+
+
+def acquire_single_instance(retries=6, delay=0.8):
+    """申请全局唯一实例，并且做「按版本接管」。
+
+    规则（用户明确要求：更新版本后新进程杀掉旧进程）：
+      · 已有**同版本**监听在跑 → 直接退出，绝不去打断它
+        （以前是无条件杀，两个启动入口一叠加就互相残杀，
+        表现是发了指令永远等不到回复）；
+      · 已有**旧版本**监听在跑 → 杀掉它，由本进程接管
+        （这样改完代码重启一次就生效，不用手工清进程）。
+
+    抢锁顺序仍是「先抢锁，抢不到再杀旧进程，然后重抢」：反过来会有竞态 ——
+    旧进程刚 TerminateProcess 时内核对象还引用着互斥体，新进程此时
+    CreateMutex 会拿到 ERROR_ALREADY_EXISTS，于是刚要启动就判自己「已有实例」。
     """
     global _mutex_handle
+    mine = getattr(P, "__version__", "?")
+    disk = _disk_version() or mine
+
+    existing = _list_listener_pids()
+    if existing:
+        same, old = [], []
+        for pid in sorted(existing):
+            v = _running_version(pid)
+            (same if (v and v == disk) else old).append((pid, v))
+        if same and not old:
+            log("已有同版本（v%s）监听在跑（pid=%s），本进程退出，不打扰它"
+                % (disk, "、".join(str(p) for p, _ in same)))
+            return False
+        for pid, v in old:
+            if _kill_pid(pid):
+                log("检测到旧版本（v%s）监听 pid=%d，已终止，由 v%s 接管"
+                    % (v or "未知", pid, mine))
+        if old:
+            time.sleep(1.5)     # 等它释放互斥体/端口，别急着抢
+
     for attempt in range(retries):
         if os.name == "nt":
             try:
@@ -252,6 +346,7 @@ def acquire_single_instance(retries=6, delay=0.8):
             f.write(str(os.getpid()))
     except Exception:
         pass
+    _write_state()
     return True
 
 
@@ -271,15 +366,25 @@ def release_single_instance():
                     os.remove(_PID_FILE)
     except Exception:
         pass
+    _cleanup_state()
 
 
 def tg_api(token, method, params=None, timeout=40):
     url = "https://api.telegram.org/bot%s/%s" % (token, method)
-    data = json.dumps(params or {}).encode("utf-8")
+    params = dict(params or {})
+    # 通道还没定（刚启动 / 两条都不通）时不要长轮询：长轮询要 30 秒，
+    # 而探测陌生通道只给 10 秒，会把自己打断、永远走不到成功那一步。
+    if method == "getUpdates" and P._TG_LINK.get("mode") is None:
+        if int(params.get("timeout") or 0) > 0:
+            params["timeout"] = 0
+            timeout = min(timeout, 12)
+    data = json.dumps(params).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    with P._opener().open(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    # 走 pipeline 的双通道 opener：直连/代理哪个通用哪个，并记住结果。
+    # 以前固定走代理，代理一挂就整片 getUpdates 失败（实测连挂 90 次），
+    # 指令只能等偶然成功的那一次才被收到。
+    return json.loads(P.tg_open(req, timeout=timeout).decode("utf-8"))
 
 
 # 底部按钮栏：默认不再常驻（v1.5.3 起，每次 bot 回复自动收起键盘）。
@@ -302,6 +407,20 @@ def send(chat_id, text, markup=None):
     tg_api(P._CFG["telegram_bot_token"], "sendMessage",
            {"chat_id": chat_id, "text": text, "disable_web_page_preview": True,
             "reply_markup": json.dumps(markup or _REMOVE_KB)})
+
+
+def send_async(chat_id, text, markup=None):
+    """后台线程发消息：网络慢时不要把主流程卡在一条回执上。
+
+    Telegram 抖动时一次 sendMessage 能阻塞 4-10 秒，而回执只是「告知」，
+    没有任何后续逻辑依赖它 —— 放后台发，流水线可以立刻开始跑。
+    """
+    def _go():
+        try:
+            send(chat_id, text, markup)
+        except Exception as e:
+            log("异步发送失败（忽略）：%s" % e)
+    threading.Thread(target=_go, daemon=True).start()
 
 
 def _tg_bold(s):
@@ -437,8 +556,13 @@ def _pipeline_worker(args, chat_id):
         log("流水线线程结束（已释放执行锁）：%s" % " ".join(args))
 
 
-def run_pipeline(args, chat_id):
-    """触发流水线：后台线程执行，监听主循环立刻继续收指令。"""
+def run_pipeline(args, chat_id, quiet=False):
+    """触发流水线：后台线程执行，监听主循环立刻继续收指令。
+
+    quiet=True 表示调用方已经自己发过回执了，这里不再重复发一条
+    「⏳ 开始执行」—— 每条 send 都是一次网络往返，Telegram 抖动时
+    一次能卡 4-10 秒，两条回执就是白等十几秒（2026-11-10 实测）。
+    """
     global _BUSY
     with _BUSY_LOCK:
         if _BUSY:
@@ -448,10 +572,11 @@ def run_pipeline(args, chat_id):
                 pass
             return
         _BUSY = True
-    try:
-        send(chat_id, "⏳ 开始执行：%s" % " ".join(args))
-    except Exception as e:
-        log("发送开始提示失败（忽略）：%s" % e)
+    if not quiet:
+        try:
+            send(chat_id, "⏳ 开始执行：%s" % " ".join(args))
+        except Exception as e:
+            log("发送开始提示失败（忽略）：%s" % e)
     t = threading.Thread(target=_pipeline_worker, args=(args, chat_id), daemon=True)
     t.start()
     log("已在后台线程启动流水线：%s" % " ".join(args))
@@ -667,21 +792,21 @@ def _start_research(sn_arg, days_n, chat_id, feedback=""):
         pass
     days = int(days_n) if days_n else int(cfg.get("research_days", 14) or 14)
     if feedback:
-        send(chat_id, "🔬 收到，**按你的反馈重做 SN%d%s 的投研报告**（回看 %d 天）。\n"
-                      "反馈：%s\n"
-                      "会重新核对名称/事实并重抓全网，约 1-3 分钟…"
-                      % (sn, (" " + name) if name else "", days, feedback[:200]))
+        send_async(chat_id, "🔬 收到，**按你的反馈重做 SN%d%s 的投研报告**（回看 %d 天）。\n"
+                            "反馈：%s\n"
+                            "会重新核对名称/事实并重抓全网，约 1-3 分钟…"
+                            % (sn, (" " + name) if name else "", days, feedback[:200]))
         # 反馈必须原样传（含空格标点）：pipeline 侧靠整句理解「改名为 X」这种句式，
         # 拆成 token 再拼回去容易丢中文标点和语气词。`~fb` 是分隔符（不能用 `--fb`，
         # argparse 会把 `-` 开头的 token 当选项直接报错）。
         run_pipeline(["research", str(sn)] + ([str(days_n)] if days_n else [])
-                     + ["~fb", feedback], chat_id)
+                     + ["~fb", feedback], chat_id, quiet=True)
         return
-    send(chat_id, "🔬 收到，正在做 **SN%d%s** 的重要事件跟踪报告（回看 %d 天档案）。\n"
-                  "流程：调取本地子网档案 → 抓取链上数据站/官网/GitHub/新闻/搜索/X "
-                  "→ 交叉核验 → 生成报告，约 1-3 分钟…"
-                  % (sn, (" " + name) if name else "", days))
-    run_pipeline(["research", str(sn)] + ([days_n] if days_n else []), chat_id)
+    send_async(chat_id, "🔬 收到，正在做 **SN%d%s** 的重要事件跟踪报告（回看 %d 天档案）。\n"
+                        "流程：调取本地子网档案 → 抓取链上数据站/官网/GitHub/新闻/搜索/X "
+                        "→ 交叉核验 → 生成报告，约 1-3 分钟…"
+                        % (sn, (" " + name) if name else "", days))
+    run_pipeline(["research", str(sn)] + ([days_n] if days_n else []), chat_id, quiet=True)
 
 
 # 裸编号触发：群里直接发「29」「SN29」「#29」「subnet 29」「29 30」即可。
@@ -938,9 +1063,9 @@ def main():
     # 单实例：抢锁 → 抢不到就杀掉旧监听 → 重抢（acquire_single_instance 内部完成）。
     # 绝不允许两个进程同时轮询同一个 bot，否则一条指令会被执行多次、推多份日报。
     if not acquire_single_instance():
-        log("❌ 已有 tg_listener 实例在运行，本进程退出（避免同一条指令被重复执行）")
+        log("❌ 已有同版本监听在运行，本进程退出（不打断正在执行的指令）")
         try:
-            print("已有监听实例在运行，本进程退出。")
+            print("已有同版本监听在运行，本进程退出。用 python tgctl.py status 查看状态。")
         except Exception:
             pass
         return
@@ -950,8 +1075,9 @@ def main():
     P._CFG = cfg
     # 记录本次加载的 pipeline 版本：常驻进程会把代码固化在内存里，
     # 之后若 pipeline.py 有更新，必须重启监听才会同步（这条日志便于排查）
-    log("已加载 pipeline 模块 v%s（代码已固化在内存；pipeline.py 更新后需重启监听，"
-        "杀进程即可，tg_guard 会在 20 秒后自动拉起）"
+    log("已加载 pipeline 模块 v%s（代码已固化在内存）；"
+        "之后 pipeline.py 若更新，本进程会在 60 秒内自动退出并要求守护重启，"
+        "也可直接跑 `python tgctl.py restart` 立即生效"
         % getattr(P, "__version__", "?"))
     token = cfg.get("telegram_bot_token")
     if not token:
@@ -960,12 +1086,21 @@ def main():
     # 每日真实导出次数仍受 pipeline 内置节流保护，多人反复触发也不会敞开口消耗 token。
     allowed_users = [str(u) for u in (cfg.get("allowed_user_ids") or []) if u]
 
-    # 启动即跳过历史消息，只处理之后的新指令
+    # 启动即探测通道 + 跳过历史消息，只处理之后的新指令
     try:
-        init = tg_api(token, "getUpdates", {"limit": 1, "timeout": 0}, timeout=20)
+        P.tg_detect(token)
+    except Exception as e:
+        log("通道探测异常（继续运行）：%s" % e)
+    try:
+        # 一次把待处理的历史全部取出来，offset 直接跳到最大那条之后。
+        # 老代码 limit=1：只确认最早的一条，剩下的仍会在主循环里被当成新指令执行 ——
+        # 于是每次重启都可能把停机期间的指令重跑一遍（同一条 105 被跑两次）。
+        init = tg_api(token, "getUpdates", {"limit": 100, "timeout": 0}, timeout=20)
         offset = 0
         if init.get("ok") and init.get("result"):
-            offset = init["result"][-1]["update_id"] + 1
+            offset = max(int(u["update_id"]) for u in init["result"]) + 1
+            log("启动清空历史：跳过 %d 条待处理消息（offset=%d）"
+                % (len(init["result"]), offset))
     except Exception as e:
         offset = 0
         log("启动清空历史失败（忽略）：%s" % e)
@@ -983,8 +1118,23 @@ def main():
     _start_kb_scheduler()
 
     last_hb = time.time()
+    last_ver_check = time.time()
     while True:
         try:
+            # 代码热重载：磁盘 pipeline.py 的版本变了就主动退出，让守护用新代码拉起。
+            # 为什么需要：常驻进程把代码固化在内存里，改完代码不重启就一直是旧逻辑，
+            # 而用户完全看不出「改了没生效」。以前只能人工杀进程。
+            if time.time() - last_ver_check > 60:
+                last_ver_check = time.time()
+                _disk = _disk_version()
+                _mine = getattr(P, "__version__", "?")
+                if _disk and _disk != _mine:
+                    log("检测到代码已更新：内存 v%s → 磁盘 v%s，退出并请求热重载"
+                        % (_mine, _disk))
+                    release_single_instance()
+                    # 75 是给守护的暗号：别等 20 秒，立刻拉起
+                    os._exit(EXIT_RELOAD)
+
             # 心跳：每 10 分钟一行，排查「收不到指令」时可确认监听是否真的活着
             if time.time() - last_hb > 600:
                 log("💓 心跳：监听存活中（offset=%s）" % offset)
@@ -1036,9 +1186,11 @@ def main():
             if net_err:
                 _net_fail = globals().get("_NET_FAIL", 0) + 1
                 globals()["_NET_FAIL"] = _net_fail
-                wait = min(30, 2 ** min(_net_fail - 1, 5))
-                log("网络异常第 %d 次（%s），%d 秒后重连"
-                    % (_net_fail, type(e).__name__, wait))
+                # 退避封顶 10 秒：双通道已经在自动择优，还连着失败多半是整体断网，
+                # 此时把重试间隔拉到 30 秒只会让恢复更慢（以前就是这么卡住的）。
+                wait = min(10, 2 ** min(_net_fail - 1, 4))
+                log("网络异常第 %d 次（%s: %s），%d 秒后重连"
+                    % (_net_fail, type(e).__name__, str(e)[:110], wait))
                 time.sleep(wait)
             else:
                 globals()["_NET_FAIL"] = 0

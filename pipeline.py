@@ -61,7 +61,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.10.1"
+__version__ = "1.11.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1655,19 +1655,28 @@ def sanitize_chat(text):
     txt = dedupe_bullets(txt)
     return _tidy_layout(txt)
 
-def call_llm(cfg, text_block, system_prompt=None, tries=3):
+def call_llm(cfg, text_block, system_prompt=None, tries=3, budget=None):
     """调用任意 OpenAI 兼容的 /chat/completions 接口。
 
     所有渠道差异都通过 config 控制，不写死在代码里：
       deepseek_base_url / deepseek_model / deepseek_api_key
-      deepseek_timeout         超时秒数（推理模型建议 180-300）
+      deepseek_timeout         单次尝试超时秒数
+      deepseek_total_budget    所有尝试合计的时间预算（秒），默认 240
       deepseek_max_tokens      输出上限（推理模型要留足思考空间）
       deepseek_extra_params    额外请求体，原样合并（如 {"enable_thinking": false}）
+
+    为什么要「总预算」而不是只设单次超时：单次 300 秒 × 3 次 = 最坏 15 分钟。
+    2026-11-10 实测就是撞上这个 —— 远端两次 WinError 10054，一次卡满 205 秒，
+    用户等一个「105」等了 9 分 51 秒。现在每次尝试的超时取
+    min(单次超时, 剩余预算)，预算用完就带着已有错误抛出，由上层降级。
     """
     api_key = cfg["deepseek_api_key"]
     base = cfg.get("deepseek_base_url", "https://api.deepseek.com/v1").rstrip("/")
     model = cfg.get("deepseek_model", "deepseek-chat")
     timeout = int(cfg.get("deepseek_timeout", 120))
+    if budget is None:
+        budget = int(cfg.get("deepseek_total_budget", 240) or 240)
+    deadline = time.time() + budget if budget and budget > 0 else None
     max_tokens = int(cfg.get("deepseek_max_tokens", 2500))
     url = base + "/chat/completions"
     payload = {
@@ -1686,11 +1695,20 @@ def call_llm(cfg, text_block, system_prompt=None, tries=3):
     last = None
     op = _opener_for(url)   # 国内 LLM 直连、其余走代理，避免被 Clash 节点 502
     for i in range(tries):
+        # 每次尝试的超时取 min(单次超时, 剩余总预算)：预算不够就别再开新的一轮，
+        # 否则「最后一次重试」会把总耗时拖成单次超时的好几倍。
+        eff_timeout = timeout
+        if deadline:
+            remain = deadline - time.time()
+            if remain <= 5:
+                log("  ↳ %s 时间预算用尽（%ds），不再重试" % (model, budget))
+                break
+            eff_timeout = int(min(timeout, remain))
         req = urllib.request.Request(url, data=body, method="POST")
         req.add_header("Authorization", "Bearer %s" % api_key)
         req.add_header("Content-Type", "application/json")
         try:
-            with op.open(req, timeout=timeout) as resp:
+            with op.open(req, timeout=eff_timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             choice = (data.get("choices") or [{}])[0]
             msg = choice.get("message") or {}
@@ -1718,10 +1736,13 @@ def call_llm(cfg, text_block, system_prompt=None, tries=3):
         except Exception as e:
             last = "%s 调用失败：%s" % (model, e)
         if i < tries - 1:
+            wait = 10 * (i + 1)
+            if deadline:
+                wait = max(1, min(wait, int(deadline - time.time())))
             log("  ↳ %s 第 %d/%d 次尝试失败（%s），%ds 后重试"
-                % (model, i + 1, tries, last, 10 * (i + 1)))
-            time.sleep(10 * (i + 1))
-    raise RuntimeError(last)
+                % (model, i + 1, tries, last, wait))
+            time.sleep(wait)
+    raise RuntimeError(last or "LLM 调用未成功（时间预算用尽或全部尝试失败）")
 
 
 # 向后兼容：老代码（监听、脚本）仍调用 call_deepseek
@@ -2171,12 +2192,72 @@ def push_telegram(cfg, title, digest):
             log("Telegram 分片 %d Markdown 解析失败，已纯文本兜底：%s" % (i, e))
         log("Telegram 推送分片 %d 完成" % i)
 
+_TG_LINK = {"mode": None, "ts": 0.0}
+
+
+def tg_open(req, timeout=30):
+    """发 Telegram/飞书请求：直连与代理双通道自动择优，并记住哪条通道能用。
+
+    为什么需要（2026-11-10 实测）：老代码对所有境外域名一律走代理。
+    当天 Clash 的系统代理是关的、节点也不稳，于是每一次 getUpdates 都失败
+    （日志里「网络异常第 90 次」），指令要靠偶然成功的那一次才被收到，
+    回执也要卡 9 秒；而实测**直连 api.telegram.org 只要 1.6 秒**。
+    反过来，直连被墙、代理能通的情况也存在。所以不能写死一边：
+    记住上次成功的通道，先用它；切换成功就更新记忆。
+    """
+    order = ["direct", "proxy"]
+    cur = _TG_LINK.get("mode")
+    if cur:
+        order = [cur] + [m for m in order if m != cur]
+
+    last = None
+    for mode in order:
+        # 记忆命中时给它完整超时；陌生通道只给 10 秒试探，别让死通道拖时间
+        t = timeout if (cur and mode == cur) else min(timeout, 10)
+        try:
+            op = (urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                  if mode == "direct" else _opener())
+            with op.open(req, timeout=t) as resp:
+                data = resp.read()
+            if cur != mode:
+                log("网络通道：%s 可用（已记住）" % ("直连" if mode == "direct" else "代理"))
+                _TG_LINK.update(mode=mode, ts=time.time())
+            return data
+        except Exception as e:
+            last = e
+            continue
+    raise last if last else RuntimeError("Telegram 请求失败")
+
+
+def tg_detect(token, timeout=8):
+    """启动时探测 Telegram 走「直连」还是「代理」，结果记进 _TG_LINK。
+
+    必须先探测再长轮询：getUpdates 带 30 秒长轮询，而陌生通道只给 10 秒探测超时，
+    不先定通道的话，第一次长轮询会被自己的探测超时打断，永远判成「都不通」。
+    """
+    req = urllib.request.Request("https://api.telegram.org/bot%s/getMe" % token)
+    try:
+        d = json.loads(tg_open(req, timeout=timeout).decode("utf-8", "replace"))
+        log("Telegram 通道：%s（%.0f 秒探测成功）"
+            % ("直连" if _TG_LINK.get("mode") == "direct" else "代理", timeout))
+        return d
+    except Exception as e:
+        log("⚠️ Telegram 两条通道都没通（%s）；监听会继续重试，恢复后自动接上"
+            % str(e)[:120])
+        return None
+
+
 def _post_json(url, payload):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     req.add_header("Content-Type", "application/json")
-    with _opener().open(req, timeout=30) as resp:
-        raw = resp.read().decode("utf-8")
+    # 飞书是境内服务，必须直连（走代理反而 502）；Telegram 才需要双通道择优。
+    # 这个函数两个渠道共用，所以按域名分流，不能一律用 tg_open。
+    if _host_of(url).endswith("telegram.org"):
+        raw = tg_open(req, timeout=30).decode("utf-8", "replace")
+    else:
+        with _opener_for(url).open(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", "replace")
     try:
         res = json.loads(raw)
     except Exception:

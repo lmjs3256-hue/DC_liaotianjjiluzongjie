@@ -28,6 +28,33 @@ v1.13.0 上线后继续采样代理延迟，发现节点有明显抖动：`getMe
 - `getUpdates` 长轮询仍为 40 秒，不受影响。
 - 其余行为不变；`py_compile` / `git diff --check` 通过。
 
+### 启动脚本修复（2026-11-11，仅 .bat，不改 `__version__`）
+
+用户反馈「双击桌面 bat 还是弹『选择一个应用以打开此 .py 文件』」。排查确认：
+
+- 桌面 `DTAO监听启动.bat` 仍是 **2026-10-27 的旧版**（LF 换行、UTF-8 无 BOM），
+  内容为 `start "" /min cmd /c "...\DTAO_TG_Listener_Guard.bat"`。
+  上一轮「收敛入口」只改了项目内的 bat，**没覆盖桌面这个快捷 bat**，所以旧链路一直在用。
+- 旧链路最终走到 `DTAO_TG_Listener_Guard.bat` 的 `start "" "%PYW%" "%~dp0tg_guard.py"`，
+  这是全项目唯一把 `.py` 交给 `start`／Shell 的写法。配合旧桌面 bat 的 LF 换行、
+  UTF-8 中文注释和嵌套 `start` + `cmd /c`，任何一步的引号或变量解析错位，
+  都会让 `.py` 落到 Windows `ShellExecute` 手上。
+- 本机 `HKCR\.py` 默认值为**空**、无 `UserChoice`、无 `Python.File`
+  （用的是 WorkBuddy 便携 Python，从未注册关联）→ Shell 只能弹「选择应用」。
+
+修复：
+
+- 7 个 bat 全部重写为 **纯 ASCII + CRLF**，原文件保留 `.bak` 备份。
+- 桌面 bat 只 `call` 项目里唯一入口 `DTAO_TG_Listener.bat`；后者用**绝对 `python.exe` 路径**
+  直接执行 `tgctl.py status` / `start`，补 `chcp 65001` 保证中文不乱码。
+- `DTAO_TG_Listener_Guard.bat` 改为纯转发，删掉那行 `start ... .py`。
+- 自启脚本写死绝对 `pythonw.exe`，解释器不存在直接 `exit /b 1`，不再回退到裸 `pythonw.exe`。
+- 给当前用户补 `HKCU\Software\Classes\.py → DTAO.PythonFile → python.exe "%1" %*`
+  作为兜底（可逆：删这两个键即恢复原状）。
+
+验证：模拟双击桌面 bat `exit=0 / 0.2 秒`，中文状态正常、监听 pid=18192 v1.13.1 已在运行、
+无报错；`ShellExecuteW` 打开测试 `.py` 返回 42 并成功执行，不再弹「选择应用」。
+
 ---
 
 ## v1.13.0 — 2026-11-11

@@ -544,8 +544,12 @@ v1.11.0 起所有开关都收进 `tgctl.py`，这个 bat 只是它的菜单：�
 - 启动文件夹放了 `DTAO_Listener_Autostart.bat`（内容只做一件事：`pythonw tgctl.py start`）。
   - 路径：`C:/Users/你的用户名/AppData/Roaming/Microsoft/Windows/Start Menu/Startup/`
     （`Win+R` → `shell:startup` 可直接打开）
-  - ⚠️ 别把 `DTAO_TG_Listener_Guard.bat` 直接拷进去：它用 `%~dp0` 定位 `tg_listener.py`，
-    拷过去会找不到程序。用写死路径的 `DTAO_Listener_Autostart.bat` / `tg_autostart.bat` 才稳。
+  - ⚠️ 别把项目里的 bat 直接拷进启动文件夹：它们用 `%~dp0` 定位同目录脚本，拷过去会找不到程序。
+    用写死路径的 `DTAO_Listener_Autostart.bat` / `tg_autostart.bat` 才稳。
+  - ⚠️ **别让 `.py` 被 Windows 直接「打开」**：本机用的是便携 Python，`HKCR\.py` 原本没有文件关联。
+    一旦某个 bat 写成 `start xxx.py`（而不是 `python.exe xxx.py`），系统就会弹
+    「选择一个应用以打开此 .py 文件」。现在所有入口一律用**绝对解释器路径**执行，
+    并给当前用户补了 `.py → python.exe` 关联作为兜底。
 - 只有**登录 Windows 时**才触发。所以配好后建议重启一次验证，或先双击 `DTAO_TG_Listener.bat` 立即拉起。
 
 **版本检测与热重载（v1.11.0 引入，v1.12.1 加固为三重保险）**
@@ -587,7 +591,8 @@ v1.11.0 起所有开关都收进 `tgctl.py`，这个 bat 只是它的菜单：�
 - **历史坑（别再踩）**：v1.5.5 的 `.guard.lock` 是假的——cmd 的 `>>` 重定向是共享追加，
   多个守护实例都能打开成功，锁从来没生效。叠出两个 `:loop` 后，靠 `tg_listener.py`
   「启动杀旧实例」互相残杀，每 20 秒打死一次正在跑投研的进程，表现就是**发指令毫无反应**。
-- 想现在立刻启动：双击项目里的 `DTAO_TG_Listener_Guard.bat`。
+- 想现在立刻启动：**双击桌面的 `DTAO监听启动.bat`**（或项目里的 `DTAO_TG_Listener.bat`），
+  它会先打印真实状态、再执行 `tgctl.py start`，末尾 `pause` 不会自己消失。
 
 **手动临时跑（看得到窗口）**
 双击 `start_tg_listener.bat` 即可，关掉窗口就停。
@@ -807,10 +812,10 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 | `subnets_changelog.md` | 子网变动记录（新增/改名/注销/业务变更，带日期） |
 | `config.json` | 你的真实配置（含密钥，**不入库**） |
 | `start_tg_listener.bat` | 手动启动监听（带窗口） |
-| `DTAO_TG_Listener.bat` | 开机自启版（放启动文件夹，无窗口） |
-| `DTAO_TG_Listener_Guard.bat` | 守护版入口：转发到 `tg_guard.py`（监听崩溃/退出后 **20 秒自动重启**） |
+| `DTAO_TG_Listener.bat` | **唯一推荐入口**：打印状态 → `tgctl.py start` → `pause`；用绝对 `python.exe` 路径直接执行，不经系统文件关联 |
+| `DTAO_TG_Listener_Guard.bat` | 旧入口，仅为兼容保留，现在只转发到 `DTAO_TG_Listener.bat` |
 | `tg_guard.py` | 真正的守护循环：**互斥体单例** + 接管已在跑的监听（不重复拉起）+ 秒退保护；日志 `tg_guard.log` |
-| `DTAO_Listener_Autostart.bat` | 放「启动」文件夹用的自启引导（内部写死项目路径，开机自动拉起上面的守护脚本） |
+| `DTAO_Listener_Autostart.bat` | 放「启动」文件夹用的自启引导（写死项目路径 + 绝对 `pythonw.exe`，无窗口拉起 `tgctl.py start`） |
 | `install_task_login.ps1` | 注册任务计划程序自启（更稳，失败自动重启；**需以管理员身份运行**） |
 | `DEPLOY_HOMEPC.md` | 部署到另一台常开 Windows 电脑的完整教程 |
 | `exports/` | 导出的聊天记录和生成的日报（**不入库**） |

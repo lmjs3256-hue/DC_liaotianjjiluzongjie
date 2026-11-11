@@ -455,10 +455,13 @@ def send_async(chat_id, text, markup=None):
 
     Telegram 抖动时一次 sendMessage 能阻塞 4-10 秒，而回执只是「告知」，
     没有任何后续逻辑依赖它 —— 放后台发，流水线可以立刻开始跑。
+
+    复用 safe_send（带一次短退避重试），回执照样尽力送达，
+    但**绝不阻塞主循环**：用户发完指令立刻就能看到「收到」，工作也已开始。
     """
     def _go():
         try:
-            send(chat_id, text, markup)
+            safe_send(chat_id, text, markup, retries=2)
         except Exception as e:
             log("异步发送失败（忽略）：%s" % e)
     threading.Thread(target=_go, daemon=True).start()
@@ -682,7 +685,7 @@ def run_kb_update(chat_id):
             return
         _BUSY = True
     try:
-        safe_send(chat_id, "📚 开始校对子网知识库（拉链上身份 + 同步已建档案），约 1-2 分钟…")
+        send_async(chat_id, "📚 开始校对子网知识库（拉链上身份 + 同步已建档案），约 1-2 分钟…")
     except Exception:
         pass
     threading.Thread(target=_kb_worker, args=(chat_id,), daemon=True).start()
@@ -915,13 +918,16 @@ def handle(text, chat_id):
         safe_send(chat_id, "⌨️ 按钮栏已收起。需要时发 /keyboard 唤出。",
              markup=_REMOVE_KB)
     elif cmd == "digest":
-        run_pipeline(["daily"] + parts[1:], chat_id)
+        # 回执走后台线程，主流程立刻启动，用户马上看到「收到」
+        send_async(chat_id, "☀️ 收到，正在导出并总结聊天记录，稍等…")
+        run_pipeline(["daily"] + parts[1:], chat_id, quiet=True)
     elif cmd in ("today", "jinri"):
         # 总结今天的聊天记录（北京时间今天 00:00 -> 现在）
-        safe_send(chat_id, "☀️ 收到，正在导出并总结今天的聊天记录，稍等…")
-        run_pipeline(["daily", "今日"], chat_id)
+        send_async(chat_id, "☀️ 收到，正在导出并总结今天的聊天记录，稍等…")
+        run_pipeline(["daily", "今日"], chat_id, quiet=True)
     elif cmd == "weekly":
-        run_pipeline(["weekly"], chat_id)
+        send_async(chat_id, "📅 收到，正在生成周报，稍等…")
+        run_pipeline(["weekly"], chat_id, quiet=True)
     elif cmd in ("chat", "shuichat", "water", "水聊", "闲聊", "水贴"):
         # /水聊                  -> 最近一份导出记录的水聊侧记
         # /水聊 昨日              -> 指定日期（可跟天数：/水聊 昨日 3）
@@ -938,9 +944,9 @@ def handle(text, chat_id):
         if rest and rest[0].isdigit():
             days_back = max(1, min(14, int(rest[0])))
         args = ["chat"] + ([day] if day else []) + [str(days_back)]
-        safe_send(chat_id, "💬 收到，正在整理%s的水聊侧记（只读已有导出记录，不重新导出）…"
+        send_async(chat_id, "💬 收到，正在整理%s的水聊侧记（只读已有导出记录，不重新导出）…"
              % (day or "最近一次导出"))
-        run_pipeline(args, chat_id)
+        run_pipeline(args, chat_id, quiet=True)
     elif cmd in ("archive", "建档", "存档", "archive_subnets"):
         # 建档不再作为日常指令（导出时已自动增量建档，见 pipeline.run_one_day）。
         # 保留这个入口只做一件事：**全量重建**（换机器 / 清过档案 / 想补历史）。
@@ -1117,7 +1123,8 @@ def handle(text, chat_id):
         if not day:
             safe_send(chat_id, "没有可用的日报文件，请先发 /digest 生成一次。")
             return
-        run_pipeline(["repush", day] + targets, chat_id)
+        send_async(chat_id, "📤 收到，正在重推 %s%s…" % (day, ("（%s）" % "/".join(targets)) if targets else ""))
+        run_pipeline(["repush", day] + targets, chat_id, quiet=True)
     else:
         safe_send(chat_id, "未知指令：%s\n%s" % (text, HELP))
 

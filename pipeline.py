@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.14.1"
+__version__ = "1.15.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -2380,7 +2380,13 @@ def mark_changes_tg(text):
         return text
 
     def _sub(m):
-        inner = m.group(1)
+        inner = m.group(1).strip()
+        # 无数字的标红（最新资讯 📰 条目、图例「红色加粗」）不是数值变化：
+        # TG 没有颜色，降级成纯加粗即可。绝不能按 +/- 加箭头——否则事件日期里的
+        # "-"（如 11-18）会被误判成 ▼ 下降，语义全错。
+        has_number = bool(re.search(r"\d", inner))
+        if "📰" in inner or not has_number:
+            return inner if "**" in inner else "**%s**" % inner
         arrow = "▲" if "+" in inner else ("▼" if "-" in inner or "−" in inner else "●")
         return "**%s %s**" % (arrow, inner)
 

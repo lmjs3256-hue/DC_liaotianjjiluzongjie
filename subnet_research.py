@@ -2022,16 +2022,16 @@ def build_consensus(sources):
 RESEARCH_COMPRESS_PROMPT = (
     "你是投研报告的定稿编辑，本轮只做一件事：**删字数**，一个数字都不许改、不许换。\n"
     "\n【删什么（从高到低）】\n"
-    "1. 事实基线里对结论没影响的指标（Tempo、Epoch、Network share 这类）；\n"
-    "2. 交叉验证矩阵里「无法证实」且与主线无关的条目；\n"
-    "3. 时间线里纯社区闲聊、没有事件价值的那几条；\n"
-    "4. 跟踪清单压到 3-5 条，每条只留「盯什么 + 判断阈值」；\n"
-    "5. 各处重复表述（同一件事在结论和时间线各说一遍的，只留一处）。\n"
+    "1. 时间线里纯社区闲聊、没有事件价值的那几条；\n"
+    "2. 同一件事在时间线里写了两遍的，删掉重复的一条（红色资讯条目与群聊条目重复时，保留红色的那条）；\n"
+    "3. 跟踪清单压到 4 条，每条只留「盯什么 + 判断阈值」；\n"
+    "4. 各处铺垫词、形容词、重复解释。\n"
     "\n【必须原样保留】\n"
-    "- 全部小节标题与顺序；\n"
+    "- 全部小节标题与顺序（只有四段：时间线 / 当前数据 / 收入与回购 / 预期跟踪）；\n"
     "- 所有数字、单位、来源标记 `[群聊 MM-DD]` `[taostats]` `[dtaoscan]` `[bittensor.ai]` `[官网]` `[GitHub]` `[新闻]` `[X]` `[搜索]`；\n"
     "- 人名、子网名、SN 编号；\n"
-    "- 「⚠️ 数据冲突」「无法证实」这类判定词，以及风险与未证实里的每一条。\n"
+    "- 时间线里带 `<font color=\"red\">📰 ...</font>` 的红色资讯条目，以及末尾那行红色图例注明；\n"
+    "- 「⚠️ 数据冲突」「无法证实」这类判定词。\n"
     "\n只输出压缩后的完整报告，不写说明。"
 )
 
@@ -2196,6 +2196,155 @@ def tidy_layout(digest, log=print):
     return txt, fixed + dropped
 
 
+# ------------------------------------------------------------------ 最新资讯并入时间线
+# v1.15.0：用户指出「📰 最新资讯」与「🗓 重要事件时间线」大面积重复。
+# 提示词已改为四段（资讯并入时间线并标红）；本函数是代码层兜底，处理模型偶发的旧习惯：
+#   1) 残留独立的「📰 最新资讯」段 → 逐条并入时间线（标红加粗），与原时间线条目去重；
+#   2) 时间线内部同一件事写了两遍 → 保留信息更全的那条；
+#   3) 无论哪条路径，时间线段末尾都补一行红色图例注明。
+_RED_NEWS_RE = re.compile(r"<font\s+color=[\"']?red[\"']?\s*>.*?</font>", re.I | re.S)
+_NEWS_SECTION_RE = re.compile(r"^\*\*📰\s*最新资讯\*\*", re.I | re.M)
+_TIME_SECTION_RE = re.compile(r"^\*\*(?:🗓\s*)?重要事件时间线\*\*", re.I | re.M)
+_LEGEND_LINE = "注：<font color=\"red\">**红色加粗**</font>为最新资讯"
+_EXT_SOURCE_RE = re.compile(r"\[(?:X|新闻|官网|GitHub|搜索|X生态圈提及)\]")
+_BIGRAM = lambda s: {s[i:i + 2] for i in range(len(s) - 1)}
+
+
+def _line_sim(a, b):
+    """两条文本是否讲同一件事：字符二元组 Jaccard + 覆盖度。"""
+    a = re.sub(r"<[^>]+>", "", re.sub(r"^\s*[-*•]\s*", "", a or ""))
+    b = re.sub(r"<[^>]+>", "", re.sub(r"^\s*[-*•]\s*", "", b or ""))
+    ga, gb = _BIGRAM(a), _BIGRAM(b)
+    if not ga or not gb:
+        return 0.0
+    inter = len(ga & gb)
+    return max(inter / max(1, len(ga | gb)),
+               (inter / max(1, min(len(ga), len(gb)))) * 0.9 if abs(len(ga) - len(gb)) <= 6 else 0.0)
+
+
+def tidy_news_in_timeline(digest, log=print):
+    """把最新资讯并入时间线、标红加粗，并在段尾加图例注明。返回 (文本, 改动数)。"""
+    if not digest:
+        return digest, 0
+    changes = 0
+    lines = digest.split("\n")
+
+    # 段边界：标题以 ** 开头，到下一个 ** 标题前
+    def section_bounds(pattern):
+        for i, ln in enumerate(lines):
+            if pattern.match(ln.strip()):
+                j = i + 1
+                while j < len(lines) and not re.match(r"^\*\*", lines[j].strip()):
+                    j += 1
+                return i, j
+        return None
+
+    tl = section_bounds(_TIME_SECTION_RE)
+    if not tl:
+        return digest, 0
+
+    # 0) 先清掉文档里任意位置的旧图例行（模型有时把它写到别的段末尾），最后统一只留一条
+    n0 = len(lines)
+    lines = [ln for ln in lines
+             if not ("为最新资讯" in ln and "红色" in ln and "<font" in ln)]
+    if len(lines) != n0:
+        tl = section_bounds(_TIME_SECTION_RE)  # 行号已变，重新定位
+        changes += n0 - len(lines)
+
+    # 1) 残留的独立资讯段：整段取出，逐条转成时间线格式，最后删除该段
+    incoming = []
+    news = section_bounds(_NEWS_SECTION_RE)
+    if news:
+        ns, ne = news
+        tl_s0, tl_e0 = tl
+        existing = [ln for ln in lines[tl_s0 + 1:tl_e0] if ln.strip()]
+        for ln in lines[ns + 1:ne]:
+            s = ln.strip()
+            if not s.startswith(("-", "•")):
+                continue
+            body = re.sub(r"^\s*[-*•]\s*", "", s)
+            m = re.match(r"^(\d{1,2}-\d{1,2})\s*[·•]\s*(.*)$", body)
+            date, rest = (m.group(1), m.group(2)) if m else ("", body)
+            rest = re.sub(r"\s*\[X\]\s*$", "", rest).strip()
+            # 与时间线已有条目去重：同一件事不重复写
+            if any(_line_sim(rest, t) >= 0.5 for t in existing):
+                continue
+            status = "⚠️未验证（外部资讯）"
+            rec = ("- %s · <font color=\"red\">**📰 %s**</font> · %s" % (date, rest, status)
+                   if date else "- <font color=\"red\">**📰 %s**</font> · %s" % (rest, status))
+            incoming.append(rec)
+        # 删除旧资讯段（含其后空行），行号整体前移
+        k = ne
+        while k < len(lines) and not lines[k].strip():
+            k += 1
+        del lines[ns:k]
+        changes += 1
+        tl = section_bounds(_TIME_SECTION_RE)
+        log("资讯并入时间线：%d 条红色资讯，独立资讯段已删除" % len(incoming))
+
+    # 2) 重写时间线段：合并 incoming、给带外部来源的条目补红字、内部去重、补图例
+    tl_start, tl_end = tl
+    seg = lines[tl_start + 1:tl_end]
+    # 图例行单独摘出，最后重排到末尾
+    legend = next((ln for ln in seg if "为最新资讯" in ln), None)
+    items = [ln for ln in seg if ln.strip() and ln != legend]
+    # 2a) 模型已写进时间线、但带外部来源标记又忘了标红的条目 → 补红字
+    reded = 0
+    for i, ln in enumerate(items):
+        if "<font" in ln or "📰" in ln or not ln.strip().startswith(("-", "•")):
+            continue
+        if not _EXT_SOURCE_RE.search(ln):
+            continue
+        s = re.sub(r"^\s*[-*•]\s*", "", ln.strip())
+        # 拆成 日期 · 正文 · 验证状态（验证状态固定留在红字外）
+        vm = re.search(r"\s*·\s*((?:✅已验证|⚠️未验证)[^·]*)$", s)
+        status = (" · " + vm.group(1).strip()) if vm else ""
+        s = s[:vm.start()] if vm else s
+        dm = re.match(r"^(\d{1,2}-\d{1,2})\s*[·•]\s*(.*)$", s)
+        if dm:
+            date, body = dm.group(1), dm.group(2).strip()
+            items[i] = "- %s · <font color=\"red\">**📰 %s**</font>%s" % (date, body, status)
+        else:
+            items[i] = "- <font color=\"red\">**📰 %s**</font>%s" % (s.strip(), status)
+        reded += 1
+    if reded:
+        log("时间线补标红：%d 条外部资讯" % reded)
+        changes += reded
+
+    # 2b) 并入 incoming（再次去重）
+    for rec in incoming:
+        if not any(_line_sim(rec, it) >= 0.5 for it in items):
+            items.append(rec)
+            changes += 1
+    # 2c) 内部去重：保留信息更全 / 红色优先
+    kept, drop = [], set()
+    for a_i, i in enumerate(x for x in range(len(items)) if x not in drop):
+        if i in drop:
+            continue
+        ia = items[i]
+        for j in range(i + 1, len(items)):
+            if j in drop or _line_sim(ia, items[j]) < 0.6:
+                continue
+            keep_i = (len(items[j]) > len(ia)) or ("📰" in ia and "📰" not in items[j])
+            drop.add(j if keep_i else i)
+            if not keep_i:
+                break
+            ia = items[j]
+    if drop:
+        items = [it for i, it in enumerate(items) if i not in drop]
+        log("时间线去重：删除 %d 条重复事件" % len(drop))
+        changes += len(drop)
+
+    # 2d) 重建时间线段
+    new_seg = items + ([legend] if legend else [_LEGEND_LINE])
+    if not legend:
+        changes += 1
+    lines[tl_start + 1:tl_end] = new_seg
+
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    return out, changes
+
+
 def audit_numbers(digest, source_text, log=print):
     """检查报告里的带单位数字是否都在素材里。返回 (未命中列表, 命中率)。"""
     src = source_text or ""
@@ -2337,19 +2486,25 @@ _RESEARCH_PROMPT_TMPL = (
     "先读【本地群聊档案】与【此前投研结论】，把「档案里已经确认过的事实」当成**起点**；"
     "再读外部源，专门找**上次报告之后的新增变化**（新公告、新解仓、新数据、群里新出现的说法），"
     "把这些变化写进时间线。**已经在上次报告里写过、这次没有新进展的事，不要重复罗列**。\n"
-    "报告只回答五个问题：**什么时候发生了什么（时间线）· 现在什么价（当前数据）· "
-    "外面刚说了什么（最新资讯）· 收入多少、有没有回购（收入与回购）· 接下来盯什么（预期跟踪）**。"
+    "报告只回答四个问题：**什么时候发生了什么（时间线，外部最新资讯也写在这里并标红）· "
+    "现在什么价（当前数据）· 收入多少、有没有回购（收入与回购）· 接下来盯什么（预期跟踪）**。"
     "除此之外的分析、感慨、免责声明、方法论说明，一律不要。\n"
-    "\n【最新资讯是必答题，不是选答（本条优先级极高）】\n"
+    "\n【最新资讯并入时间线，不再单列（本条优先级极高）】\n"
     "群聊只是「社区在聊什么」，**不等于外部世界发生了什么**。用户明确要求："
-    "不能出现「明明有新资讯，报告里却一条都没有」。所以：\n"
+    "不能出现「明明有新资讯，报告里却一条都没有」，也**不许把资讯单列成段**——"
+    "独立的「📰 最新资讯」段与时间线大面积重复，已取消。所以：\n"
     "1. 输入里只要 [X] / [X 生态圈提及] / [新闻] / [官网] / [GitHub] 段里**有任何一条**"
-    "近 %(days)d 天内的新内容，就必须出现在「📰 最新资讯」段里，一条都不许漏；\n"
+    "近 %(days)d 天内的新内容，就**直接作为一条写进「🗓 重要事件时间线」**，按真实日期归位，一条都不许漏；\n"
     "2. 特别是 [X] 段里标了「（用户提供）」的贴文——那是用户自己贴过来要你看的，"
     "**必须逐条写进去**，写清发布者、日期、原话要点；\n"
-    "3. 只有某源**真的没抓到**（输入里明确写着「未获取」）时，才可以在该段写「X：未获取」；"
-    "不许因为「内容太琐碎」「拿不准」就整段略过；\n"
-    "4. 官方号时间线里看似日常的运营贴，只要含**新事实**（新合作、新上线、新功能、新数据、"
+    "3. 每条来自外部源（X / 新闻 / 官网 / GitHub / 搜索）的事件，"
+    "**事件正文必须用 `<font color=\"red\">**📰 正文**</font>` 红色加粗**："
+    "日期写在红字外（`- 11-18 · `），验证状态写在红字后（如 ` · ✅已验证（官方X+官网）`）；"
+    "同一条里红字只包事件正文，不要把日期、验证状态一起包进去；\n"
+    "4. 群聊里的事件、纯群内传闻**不要标红**；只有外部世界的新消息才标红，"
+    "让读者一眼分清「社区在聊」和「外面发生了什么」；\n"
+    "5. 一件事同时在群聊和外部源出现的，只写**一条**，按外部源归位并标红，不要写两遍；\n"
+    "6. 官方号时间线里看似日常的运营贴，只要含**新事实**（新合作、新上线、新功能、新数据、"
     "人事变动、被谁提到），就算资讯；纯表情、纯口号、纯抽奖不算。\n"
     "\n【事实纪律（违反即作废）】\n"
     "1. 每条事实后面必须带来源标记：`[群聊 MM-DD]`、`[档案]`（引用档案里的历史投研结论时用）、"
@@ -2372,8 +2527,8 @@ _RESEARCH_PROMPT_TMPL = (
     "10. **X 贴文只能按输入里的原文引用**：不要把英文长段落直接照搬，翻成中文、保留关键英文专有名词；"
     "标了「生态账号提及」的是第三方转述，**不得**写成「官方宣布」；"
     "链接要不要给都可以，但作者名与日期必须准确。\n"
-    "\n【输出结构（只有这五段，严格按顺序，不要加别的段）】\n"
-    "\n**🗓 重要事件时间线**（报告主体，占 50%% 以上篇幅）\n"
+    "\n【输出结构（只有这四段，严格按顺序，不要加别的段）】\n"
+    "\n**🗓 重要事件时间线**（报告主体，占 50%% 以上篇幅；外部资讯并入本段并标红）\n"
     "**每行一条，以 `- ` 开头，条与条之间不要空行**。格式固定为：`- 月-日 · 事件 · 验证状态`\n"
     "- **日期写法**：同一份报告里年份只出现一次。**首条**写 `2026-10-30`，"
     "其后各条一律只写 `10-31`、`11-06`，**不许再重复 2026**。跨年时才重新写年份。\n"
@@ -2403,13 +2558,16 @@ _RESEARCH_PROMPT_TMPL = (
     "PR/issue 编号（如 `Merge pull request #1177 from…`）。只有仓库名、子网名、人名可保留英文。\n"
     "- **时间线不止群聊**：官方 X 帖、生态账号提及、新闻、官网更新、GitHub release 都要按真实日期进时间线，"
     "不要只写群里说过什么。\n"
+    "- **外部资讯条目写成红色加粗**：来自 X / 新闻 / 官网 / GitHub / 搜索 的事件，正文用 "
+    "`<font color=\"red\">**📰 事件正文**</font>` 标红加粗，日期和验证状态留在红字外；"
+    "格式：`- 11-18 · <font color=\"red\">**📰 官方发帖宣布新合作 [X]**</font> · ✅已验证（官方X+官网）`。"
+    "群聊内部消息、收入数字不要标红。\n"
+    "- **所有外部源都没抓到**时，在时间线里写一条 `- 本期无外部资讯（X/新闻/官网 均未获取）· ⚠️未验证`，"
+    "如实写清哪个源失败；**不许**在明明抓到内容的情况下留空或写「无」。\n"
+    "- **时间线末尾固定写一行注明**（紧跟最后一条事件，独占一行）："
+    "`<font color=\"red\">红色加粗</font>条目为最新资讯`。这行是图例，不参与事件计数。\n"
     "\n**📊 当前数据**（只保留**当前价格**，一行即可；不要市值/池子/emission/tempo/epoch 等任何其它指标。"
     "价格必须照抄抓取原文，不许换算；抓不到就写「当前价格：未获取」。格式：`当前价格：0.002504 τ [bittensor.ai]`）\n"
-    "\n**📰 最新资讯**（外部世界最近说了什么；2-6 条，每条一行，格式 `- 月-日 · @账号/媒体 · 要点 [X]`）\n"
-    "- 这一段的唯一职责是**补群聊看不到的信息**：官方发帖、合作、上线、媒体报道、生态账号点名、"
-    "GitHub 发版。已经写进时间线的同一事件，这里只补一句「详见时间线」，或换个角度写影响；不要整段复述。\n"
-    "- **所有源都没抓到**才写「本期无外部资讯（X/新闻/官网 均未获取）」，并如实写清哪个源失败；"
-    "**不许**在明明抓到内容的情况下留空或写「无」。\n"
     "\n**💰 收入与回购**（用户明确要求必须有这一段；3-6 行，每行一条，格式 `- 项目：数值 · 变化说明`）\n"
     "- **必须回答三件事**：① 收入多少（所有者抽成比例 + 每日收入 τ）② 趋势如何（协议回购上升/下降/持平）"
     "③ 有没有回购、回购多少（协议回购 vs 所有者回购**分开写**，别混成一句）。\n"
@@ -3317,21 +3475,22 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     except Exception as e:
         log("投研校对跳过（%s）" % e)
     digest = (digest or "").strip()
-    # 字数闸门：只限上限 1600 字（第四段「最新资讯」要留出空间），不设下限。
+    # 字数闸门：只限上限 1600 字（时间线里的红色资讯条目要留出空间），不设下限。
     # rounds=3：模型每轮只删一部分，两轮常常压不到位（实测 5061→3465），三轮才收得住。
     try:
         digest = pipeline.compress_digest(cfg, digest, 0, 1600, rounds=3,
                                           system_prompt=RESEARCH_COMPRESS_PROMPT,
                                           sanitize_fn=lambda s: pipeline.strip_length_tags(s),
-                                          cut_hint="报告只有五段（时间线 / 当前数据 / 最新资讯 / 收入与回购 / 预期跟踪）。"
+                                          cut_hint="报告只有四段（时间线 / 当前数据 / 收入与回购 / 预期跟踪）。"
                                                    "压缩顺序：① 先删时间线里最不重要的整条事件（合并同类、去掉铺垫词）；"
                                                    "② 每条事件压到一行、去掉形容词与重复解释，**但日期、事件核心、"
                                                    "✅已验证/⚠️未验证标记必须留着**；"
                                                    "③ 预期跟踪压到 4 条；"
-                                                   "④ 「当前价格」「最新资讯」「💰 收入与回购」三段**永远不许删**"
+                                                   "④ 「当前价格」「💰 收入与回购」两段**永远不许删**"
                                                    "（收入段是用户点名要求的）；收入段最多把相近项合并成一行，"
                                                    "但收入额、回购金额、变化百分比一个都不许丢；"
-                                                   "⑤ 删掉时间线与最新资讯之间完全重复的表述，只留一处。"
+                                                   "⑤ 时间线末尾的红色图例注明行、以及带 <font color=\"red\">📰</font> 的"
+                                                   "红色资讯条目**不许删**。"
                                                    "全部数字、来源标记、人名、SN 编号、<font color=\"red\"> 标红必须原样保留。")
     except Exception as e:
         log("投研压缩跳过（%s）" % e)
@@ -3372,6 +3531,14 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
                 log("⚠️ 改写后仍有 %d 行引用失败源（已保留，人工复核）" % len(still))
     except Exception as e:
         log("来源引用校验跳过（%s）" % e)
+    # 最新资讯并入时间线（v1.15.0）：放在所有「会重写整篇」的步骤之后，
+    # 否则 rewrite_bad_sources / polish 用模型重写时可能又吐回旧的五段格式，把标红结果覆盖掉。
+    try:
+        digest, _nfix = tidy_news_in_timeline(digest, log=log)
+        if _nfix:
+            log("资讯/时间线整理：%d 处调整" % _nfix)
+    except Exception as e:
+        log("资讯并入时间线跳过（%s）" % e)
     title = "🔬 SN%d %s · 重要事件跟踪报告（%s）" % (
         sn, meta["name"] or "未收录", datetime.datetime.now(TZ).strftime("%m-%d"))
     d = A.sn_dir(arc_dir, sn)

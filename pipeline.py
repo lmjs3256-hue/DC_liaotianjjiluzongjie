@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.17.0"
+__version__ = "1.18.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -2362,9 +2362,11 @@ def push_feishu(cfg, title, digest):
     _post_json(url, card)
     log("飞书推送完成")
 
-# 红色标注：飞书 lark_md 支持 <font color='red'>，TG 旧版 Markdown 完全不支持颜色。
-# 所以同一条稿子要分两条通道处理：飞书原样保留（真红字），TG 降级成「▲/▼ + 粗体」，
-# 保证两边都能一眼看出「哪里变了」，而不是 TG 侧露出一坨 HTML 标签。
+# 红色标注：飞书 lark_md 支持 <font color='red'>，TG 旧版 Markdown 完全不支持给文字上色。
+# 所以同一条稿子要分两条通道处理：飞书原样保留（真红字），
+# TG 降级成「🔴涨 / 🟢跌 / ⚪中性 + 粗体」——用 emoji 自带的颜色绕过 TG 不能上色的限制，
+# 比原来的 ▲/▼ 更醒目，且不受客户端深浅主题影响。两边都能一眼看出「哪里变了」，
+# 而不是 TG 侧露出一坨 HTML 标签。
 _RED_RE = re.compile(r"<font\s+color=[\"']?red[\"']?\s*>(.*?)</font>", re.I | re.S)
 
 
@@ -2378,10 +2380,12 @@ def mark_changes_feishu(text):
 
 
 def mark_changes_tg(text):
-    """TG 通道：红色标签降级成「▲新值」粗体，并去掉 HTML 残渣。
+    """TG 通道：红色标签降级成「彩色圆点 + 新值」粗体，并去掉 HTML 残渣。
 
     TG 旧版 Markdown 里没有颜色，硬塞 <font> 会原样显示成文字；
-    用 ▲（上升）/ ▼（下降）替代颜色语义，配合粗体足够醒目。
+    用 emoji 色块替代颜色语义（🔴 涨 / 🟢 跌 / ⚪ 中性，国内涨红跌绿习惯），
+    配合粗体足够醒目。emoji 是普通 Unicode 字符，不受客户端深浅主题影响，
+    也不会被 _tg_md 的转义规则破坏。
     """
     if not text:
         return text
@@ -2389,13 +2393,13 @@ def mark_changes_tg(text):
     def _sub(m):
         inner = m.group(1).strip()
         # 无数字的标红（最新资讯 📰 条目、图例「红色加粗」）不是数值变化：
-        # TG 没有颜色，降级成纯加粗即可。绝不能按 +/- 加箭头——否则事件日期里的
-        # "-"（如 11-18）会被误判成 ▼ 下降，语义全错。
+        # 降级成纯加粗即可。绝不能按 +/- 加色块——否则事件日期里的
+        # "-"（如 11-18）会被误判成 🟢 下跌，语义全错。
         has_number = bool(re.search(r"\d", inner))
         if "📰" in inner or not has_number:
             return inner if "**" in inner else "**%s**" % inner
-        arrow = "▲" if "+" in inner else ("▼" if "-" in inner or "−" in inner else "●")
-        return "**%s %s**" % (arrow, inner)
+        dot = "🔴" if "+" in inner else ("🟢" if "-" in inner or "−" in inner else "⚪")
+        return "**%s %s**" % (dot, inner)
 
     out = _RED_RE.sub(_sub, text)
     # 清掉任何漏网的 font 标签，避免 TG 侧露出 HTML

@@ -8,9 +8,25 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.15.0** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.16.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.16.0 — 2026-11-20
+
+**子网档案新增「回购地址」字段：能查到的自动收录、查不到放空、人工补录不被覆盖**
+
+用户提出 SN53 群里有回购钱包、但数据站「所有者回购近 30 天为零」，需要一个地方把回购地址记下来供后续核对。本次给每个子网档案增加 `buyback_wallets` 字段，并把这条线索接进投研。
+
+- **数据结构**：`archive.json` 新增 `buyback_wallets` 列表，每条含 `address`（ss58）、`source`（`auto_chat` 群聊推断 / `manual` 人工补录）、`note`、`evidence_id` / `evidence_date` / `src`（可溯源）。`archive.md` 增「💰 回购地址」段，按来源展示；查不到显示占位说明「未查到不等于没有回购」，绝不编地址。
+- **自动提取**（`scan_wallet_addresses`）：从**原始导出**扫地址，而非归档后的 days——群友贴地址那条常是纯链接（`tao.app/portfolio/<addr>/trades`），会被 NOISE 过滤不进档案正文，所以用 ±4 条窗口把「地址」和「回购语境 / 子网归属」拼起来（SN53 实测就是拆成两条）。保守规则：`buyback/buy back/回购/recycle/burn wallet` 语境必须命中；`operator share / 公司钱包 / 缴税` 明确排除（SN92 的 owner 钱包正确排除）；同一地址去重。
+- **人工补录**：新增命令 `python pipeline.py wallet <子网> <地址> [备注]`，写入标 `source=manual`。归档是反复 load→save 的，`merge_buyback_wallets` 按地址去重并**永远保留 manual 条目**，自动扫描不会覆盖人工结论。
+- **投研引用**（`_wallet_block` + 提示词）：档案有地址时注入「档案登记的回购地址」段并注明未经链上核实；收入与回购段新增硬要求——数据站所有者回购为零、但档案登记了地址时，**必须并列写出冲突、待核**，不许二选一、不许因数据站为零就删线索。这直接解决 SN53 那类「群里说有、数据站说零」被一边倒写成「团队没回购」的问题。
+- **CLI**：`pipeline.py` mode 增加 `wallet`；help 同步。
+- **数据**：全量建档一次，SN53 收录 Banana 11-17 提到的 engy 回购钱包 `5Ccg2rH1xWZ8cgDoQy8fbhyfjTCwffeBChGpyNrcDYcinpLZ`，SN92 等保持空。
+- 验证：py_compile 通过；扫描只命中 SN53、排除 SN92；人工补录/反复归档不覆盖/自动与人工共存三项测试通过；档案 json 与 md、投研输入段均核对无误。
 
 ---
 

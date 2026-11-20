@@ -55,6 +55,20 @@ STRONG_CTX = re.compile(
 NOISE = re.compile(
     r"^(\s*(https?://\S+\s*)+|(\:\w+:\s*)+|(\[(?:attachment|embed)\]\s*)+|<@[!&]?\d+>|@\S+)$", re.I)
 
+# ---------------------------------------------------------------- 回购/钱包地址识别
+# ss58 地址（Bittensor/Substrate）：5 开头，base58 字符集，48 字符。
+# 用于「能查到的回购地址写进档案」——从群聊原话里抽地址，必须搭配回购语境才算。
+SS58 = re.compile(r"\b5[1-9A-HJ-NP-Za-km-z]{47}\b")
+# 明确指向「回购/回购钱包」的语境词：只有地址 + 这些词同现（同一条或紧邻几条）才收录。
+# 排除 SN92 那种「owner wallet / operator share / 转账缴税」——它含 wallet 但不是回购。
+BUYBACK_CTX = re.compile(
+    r"(?i)(buy\s*-?\s*back|buyback|回购|recycl\w*|burn\s*(?:wallet|address)|"
+    r"buy\s+back\s+wallet|回购钱包)")
+# 反向排除：明确说这是 owner 份额/公司钱包/缴税，而非回购用途。
+NOT_BUYBACK_CTX = re.compile(
+    r"(?i)(operator\s+share|company(?:'s)?\s+(?:reax\s+)?wallet|income\s+tax|"
+    r"my\s+salary|owner\s+(?:slot|wallet)\s+went|staked)")
+
 # 常见希腊/拉丁同形字母折叠，让 hoτfloaτ 能用 hotfloat 命中
 _FOLD = {"τ": "t", "ο": "o", "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v",
          "ρ": "p", "υ": "u", "χ": "x", "η": "n", "μ": "m", "σ": "s", "γ": "y",
@@ -284,6 +298,149 @@ def scan_files(json_paths, nidx, log=print):
     return bucket
 
 
+def _wallet_ctx_note(ctx, fallback):
+    """给抽到的地址写一句人话备注：去掉 URL/裸地址后，取回购词附近的短语。"""
+    s = re.sub(r"https?://\S+", " ", ctx or "")
+    s = re.sub(r"\b5[1-9A-HJ-NP-Za-km-z]{40,}\b", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    m = BUYBACK_CTX.search(s)
+    if m:
+        lo, hi = max(0, m.start() - 40), min(len(s), m.end() + 20)
+        frag = s[lo:hi].strip()
+        # 从最近的逗号/句号后接起，避免留下「m later ,」这种半截开头
+        cut = max(frag.rfind(",", 0, 40), frag.rfind("，", 0, 40))
+        return (frag[cut + 1:].strip() if cut >= 0 else frag)
+    return re.sub(r"\s+", " ", (fallback or "")).strip()[:120]
+
+
+def scan_wallet_addresses(json_paths, nidx, log=print):
+    """从**原始导出**里扫「回购语境下的 ss58 地址」，返回 {sn: [addr_item, ...]}。
+
+    为什么不用归档后的 days：群里那条带地址的消息常是纯链接
+    （如 `https://www.tao.app/portfolio/<addr>/trades`），会被 NOISE 过滤、不进档案；
+    而点明「这是 engy buy back wallet」的是紧邻的下一句。所以必须在原始 messages 上
+    用 ±窗口把「地址」和「回购语境 / 子网归属」拼起来（SN53 实测就是拆成两条的情况）。
+
+    保守规则，宁缺勿滥：
+      - 必须有 BUYBACK_CTX 才收；「owner 份额 / 公司钱包 / 缴税」明确排除（SN92 那种）；
+      - 地址消息自身或窗口内消息要能强命中某子网；
+      - 同一地址跨多条重复出现只留一条。
+    """
+    found = {}
+    for jp in (json_paths or []):
+        try:
+            with open(jp, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            log("地址扫描：读取失败 %s（%s）" % (os.path.basename(jp), e))
+            continue
+        msgs = data.get("messages") or []
+
+        def _au(x):
+            return ((x.get("author") or {}).get("id")
+                    or (x.get("author") or {}).get("name") or "")
+
+        for i, m in enumerate(msgs):
+            c = (m.get("content") or "").strip()
+            addrs = SS58.findall(c)
+            if not addrs:
+                continue
+            win = msgs[max(0, i - 4): min(len(msgs), i + 5)]
+            author = _au(m)
+            same = [x for x in win if _au(x) == author]
+            ctx_same = " ".join((x.get("content") or "") for x in same)
+            ctx_all = " ".join((x.get("content") or "") for x in win)
+            ctx = ctx_same if BUYBACK_CTX.search(ctx_same) else ctx_all
+            if not BUYBACK_CTX.search(ctx):
+                continue
+            if NOT_BUYBACK_CTX.search(ctx) and not re.search(r"(?i)buy\s*-?\s*back", ctx):
+                continue
+            # 子网归属：地址消息自身命中优先，否则取窗口里最近一条强命中
+            sn, via = None, ""
+            for x in [m] + list(reversed(win)):
+                hits = classify((x.get("content") or ""), nidx)
+                strong = [(n, v) for n, (k, v) in hits.items() if k == "strong"]
+                if strong:
+                    sn, via = strong[0]
+                    break
+            if not sn:
+                continue
+            e = _entry(m, jp, "strong", via)
+            note = _wallet_ctx_note(ctx, c)
+            for addr in addrs:
+                item = {
+                    "address": addr,
+                    "source": "auto_chat",
+                    "note": "%s %s·%s" % (e["author"], e["date"][5:], note),
+                    "evidence_id": e["id"],
+                    "evidence_date": e["date"],
+                    "src": e["src"],
+                }
+                found.setdefault(sn, {})[addr] = item
+    return {sn: list(v.values()) for sn, v in found.items()}
+
+
+def merge_buyback_wallets(arc, auto_items, log=print):
+    """把扫到的地址合并进 arc（不写盘），返回新增条数。
+
+    铁律：source=manual 的人工条目永远原样保留——归档是反复 load→save 的，
+    人工补的地址绝不能被自动流程冲掉。查不到时保持空列表（放空），不编造。
+    """
+    existing = arc.get("buyback_wallets")
+    if not isinstance(existing, list):
+        existing = []
+    by_addr = {}
+    for w in existing:
+        a = (w.get("address") or "").strip()
+        if a:
+            by_addr[a] = w
+    added = 0
+    for item in (auto_items or []):
+        a = (item.get("address") or "").strip()
+        if not a or a in by_addr:
+            continue
+        by_addr[a] = item
+        added += 1
+    merged = sorted(by_addr.values(),
+                    key=lambda w: (0 if w.get("source") == "manual" else 1,
+                                   w.get("address", "")))
+    arc["buyback_wallets"] = merged
+    return added
+
+
+def add_manual_wallet(arc_dir, sn, address, note="", log=print):
+    """人工补录一个回购地址（source=manual），自动归档不会覆盖它。"""
+    arc = load_archive(arc_dir, sn)
+    if not arc:
+        raise RuntimeError("SN%s 还没有档案，先跑一次建档再补录地址" % sn)
+    address = (address or "").strip()
+    if not SS58.fullmatch(address):
+        raise RuntimeError("地址格式不对：要 5 开头、48 位的 ss58 地址（Bittensor钱包）")
+    existing = [w for w in (arc.get("buyback_wallets") or [])
+                if isinstance(w, dict)]
+    hit = next((w for w in existing if w.get("address") == address), None)
+    now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+    if hit:
+        # 已存在：人工补录优先级最高，升级成 manual 并更新备注
+        hit["source"] = "manual"
+        if note:
+            hit["note"] = note
+        hit["manual_added_at"] = now
+    else:
+        existing.append({
+            "address": address,
+            "source": "manual",
+            "note": note or "人工补录的回购地址",
+            "manual_added_at": now,
+        })
+    arc["buyback_wallets"] = existing
+    arc["updated_at"] = now
+    save_archive(arc_dir, arc)
+    save_md(arc_dir, arc)
+    log("SN%d 人工补录回购地址：%s" % (int(sn), address))
+    return address
+
+
 # ---------------------------------------------------------------- 译文
 def _cache_path(arc_dir):
     return os.path.join(arc_dir, "_trans_cache.json")
@@ -491,6 +648,22 @@ def build_md(arc, max_lines_per_day=400):
         meta.append("**代码库**：%s" % arc["github"])
     if meta:
         lines += meta + [""]
+
+    # 回购地址（能查到的写进来；查不到放空并显示占位说明，不编造）
+    wallets = [w for w in (arc.get("buyback_wallets") or []) if isinstance(w, dict)]
+    lines += ["## 💰 回购地址", ""]
+    if wallets:
+        lines.append("> 群聊里提到的回购/销毁钱包地址；`群聊推断` 来自原话自动提取、未经链上核实，"
+                     "`人工补录` 为人工确认。地址只作追踪线索，不单凭它下结论。")
+        lines.append("")
+        for w in wallets:
+            src = "人工补录" if w.get("source") == "manual" else "群聊推断"
+            note = (w.get("note") or "").strip() or "（无备注）"
+            lines.append("- `%s` · %s · %s" % (w.get("address") or "", src, note))
+    else:
+        lines.append("> 暂未获取到回购地址（群聊原话未提及 / 未人工补录）。未查到不等于没有回购。")
+    lines.append("")
+
     span = ("%s → %s" % (st["first"], st["last"])) if st["first"] else "暂无"
     if st["strong"] or st["weak"]:
         head_line = ("> 建档时间：%s · 归档条目 **%d** 条（另有裸编号疑似提及 %d 条）"
@@ -623,6 +796,7 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
             "days": {},
             "weak_days": {},
             "reports": [],
+            "buyback_wallets": [],
             "note": "本档案由投研报告创建（尚无群聊归档）",
         }
     else:
@@ -765,6 +939,13 @@ def archive_files(cfg, json_paths, log=print, llm=None, translate=False):
     bucket = scan_files(json_paths, nidx, log=log)
     if not bucket:
         return {"subnets": 0, "new": 0, "index": load_all_index(arc_dir), "arc_dir": arc_dir}
+    # 回购地址：从原始导出里扫（含被 NOISE 过滤的纯链接消息），按 SN 归并。
+    # 只在这些子网里更新；查不到的子网保持空列表，不编造。
+    try:
+        wallet_by_sn = scan_wallet_addresses(json_paths, nidx, log=log)
+    except Exception as e:
+        log("地址扫描异常（忽略）：%s" % e)
+        wallet_by_sn = {}
 
     now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
     total_new, touched = 0, []
@@ -780,6 +961,7 @@ def archive_files(cfg, json_paths, log=print, llm=None, translate=False):
             "created_at": now,
             "days": {},
             "weak_days": {},
+            "buyback_wallets": [],
         }
         # 知识库更新后同步元信息（名称/业务可能被官方改过）；占位值不回写，避免覆盖已有的真名
         if real_name(meta):
@@ -800,6 +982,10 @@ def archive_files(cfg, json_paths, log=print, llm=None, translate=False):
             arc["github"] = real_url(meta.get("github"))
         elif "deprecated" in (arc.get("github") or "").lower():
             arc["github"] = ""
+        # 回购地址：合并自动扫描结果（manual 条目由 merge 保留）；字段缺失也补成 []
+        _nw = merge_buyback_wallets(arc, wallet_by_sn.get(sn), log=log)
+        if _nw:
+            log("   SN%d 新增回购地址 %d 个" % (sn, _nw))
         arc["updated_at"] = now
         before = sum(len(v) for v in (arc.get("days") or {}).values())
         _merge_days(arc, b["strong"], b["weak"])

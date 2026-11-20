@@ -2579,6 +2579,10 @@ _RESEARCH_PROMPT_TMPL = (
     "就只写本次绝对值，并在末尾加一句「首次记录，下次投研起可对比变化」。\n"
     "- 若所有者回购为**零**，必须明确写「所有者回购：零（团队未用 owner cut 回购）」，"
     "**不要**含糊带过——零回购本身是重要结论。\n"
+    "- **零回购 + 档案有回购地址时必须并列写冲突**：若输入里有【档案登记的回购地址】段、"
+    "而数据站所有者回购为零，不要二选一，两条都写——"
+    "「数据站口径下所有者回购为零，但群聊/人工登记了回购钱包 <地址>（未链上核实），冲突待核」。"
+    "**不许**因为数据站是零就删掉地址线索，也**不许**反过来把数据站改成非零。\n"
     "- 抓不到收入数据（输入里没有该段）就整段写「收入与回购：未获取（数据源未返回）」，不要留空、不要编数字。\n"
     "\n**📌 预期跟踪**（先逐条结清上次的，再写本次新增的；合计 4-7 条）\n"
     "**若输入里有【上次跟踪事项（逐条回答）】段，必须先逐条给结论**，一条都不许漏：\n"
@@ -3167,6 +3171,25 @@ def income_block(inc, prev_snap=None, source_tag="[bittensor.ai]"):
     return "\n".join(L), income_snapshot(inc)
 
 
+def _wallet_block(arc):
+    """把档案里登记的回购地址拼成提示词小段（仅线索，供冲突核对）。"""
+    if not arc:
+        return ""
+    wallets = [w for w in (arc.get("buyback_wallets") or []) if isinstance(w, dict)]
+    if not wallets:
+        return ""
+    L = ["档案登记回购地址 %d 个（群聊推断 / 人工补录，均**未经链上核实**）：" % len(wallets)]
+    for w in wallets:
+        src = "人工补录" if w.get("source") == "manual" else "群聊推断"
+        note = (w.get("note") or "").strip() or "无备注"
+        L.append("- `%s`（%s）：%s" % (w.get("address") or "", src, note))
+    L.append("**使用规则**：这些数据站可能没归集。若「收入与回购」段里所有者回购为零、"
+             "而这里登记了回购地址，不要二选一，必须**并列写出冲突**——"
+             "例如「数据站口径下所有者回购为零，但群聊提及回购钱包 <地址>（未链上核实），待核」。"
+             "禁止把地址当成已确认回购，也禁止因数据站为零就删掉这条线索。")
+    return "\n".join(L)
+
+
 def _signal_block(sources):
     """硬规则信号：由代码判定、直接写进提示词，不允许模型忽略。
 
@@ -3260,6 +3283,9 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
                 _prev_snap = _x["snapshot"]
                 break
     inc_txt, inc_snap = income_block(_inc, prev_snap=_prev_snap)
+    # 档案里登记的回购地址（群聊推断 / 人工补录）：仅作线索。数据站零回购但档案有地址时，
+    # 必须并列呈现冲突，不能一边倒写「团队没回购」。
+    _wallet_txt = _wallet_block(_pa)
     body = ("\n===== 一、链上/数据站事实（抓取原文）=====\n" + _ext_block(sources, meta)
             + "\n\n===== 二、交叉验证矩阵（同指标多源并列）=====\n" + _consensus_block(build_consensus(sources)))
     if n:
@@ -3268,6 +3294,8 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
                 + "\n\n===== 三、交叉验证矩阵（同指标多源并列）=====\n" + _consensus_block(build_consensus(sources)))
     if inc_txt:
         body += "\n\n===== 收入与回购（链上口径，报告必须单独成段）=====\n" + inc_txt
+    if _wallet_txt:
+        body += "\n\n===== 档案登记的回购地址（仅线索，不代表已链上确认）=====\n" + _wallet_txt
     if hist:
         body += "\n\n===== 此前投研结论（历史留档）=====\n" + hist
     # 上次的「预期跟踪」逐条清单：报告必须逐条打钩（兑现/证伪/未触发）

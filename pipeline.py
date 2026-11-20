@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.16.0"
+__version__ = "1.17.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1126,6 +1126,13 @@ SYSTEM_PROMPT = (
     "时间带「次日」前缀的消息发生在**总结日的下一天（今天凌晨到现在）**。"
     "这些消息可以写进日报，但必须标注「今晨」，不得当成总结日当天的事件，"
     "也不得与总结日的事件拼接因果（例：昨日 23:00 的表态和今晨 08:00 的砸盘是两件事）。\n"
+    "26. **投研报告只作交叉核对，绝不全信**：输入里可能附有【投研报告参考 —— 历史快照】小节，"
+    "那是过去某一天写的判断，**可能已过时、被推翻，或本身就是未核实的推测**。"
+    "① 不得把其中任何内容/数字当成今天的事实写进日报；"
+    "② 只有当**今日群聊或数据与其明显矛盾**时（如当初说「未回购」今天说「已回购」、"
+    "当初说「团队匿名」今天出现实名信息），才在该条附近用一句话标注："
+    "「⚠️ 待人工确认：投研（日期）称 X，但今日 Y」——把冲突交给人工，不自行采信任何一方；"
+    "③ 没有构成矛盾就一个字都别提这些旧报告。\n"
     "\n"
     "【稳定性要求】相同输入应给出相同结论：优先复述原文事实，不做发散联想；"
     "对同一事件的定性只有一种写法，不要在不同表述之间摇摆。\n"
@@ -2977,6 +2984,157 @@ def build_subnet_context_block(cfg, items, day_str=None, max_sn=10, max_chars=12
             + "\n".join(lines))
 
 
+# ---- 日报参考：子网投研报告（历史快照，不可全信）--------------------
+_REPORT_DATE_RE = re.compile(r"(20\d{2}-\d{2}-\d{2})")
+
+
+def _extract_report_gist(path, max_chars=320):
+    """从一份投研报告 md 里抽「结论要点」，容忍两种格式：
+      · 本项目 research_*.md：取「📌 预期跟踪」/「💰 收入与回购」判断句；
+      · 仓库 SNxx_日期.md（8 板块）：取「一句话本质」+「最需要担心的两三件事」。
+    抽不到就退回标题 + 前几行正文。纯参考，截断控制成本。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            txt = f.read()
+    except Exception:
+        return ""
+    title = ""
+    m = re.search(r"^#\s+(.+)$", txt, re.M)
+    if m:
+        title = _clip_flat(re.sub(r"[*#`]", "", m.group(1)), 60)
+    picks = []
+    # 仓库深度报告：大白话速读里的「最需要担心」
+    m = re.search(r"最需要担心的?[^\n]*?(?:\*\*)?\n((?:[-0-9].+\n?){1,6})", txt)
+    if m:
+        for ln in m.group(1).splitlines():
+            ln = _clip_flat(re.sub(r"^\s*[-0-9.、]+\s*", "", ln), 110)
+            if ln:
+                picks.append("风险：" + ln)
+    # 本项目报告：预期跟踪的状态判断（已兑现/进行中/条件未触发）
+    if not picks:
+        m = re.search(r"\*\*📌[^\*]*\*\*[^\n]*\n((?:[-•].+\n?)+)", txt)
+        if m:
+            for ln in m.group(1).splitlines():
+                ln = re.sub(r"^[-•]\s*", "", ln)
+                ln = _clip_flat(re.sub(r"</?font[^>]*>", "", ln), 110)
+                if ln:
+                    picks.append(ln)
+    if not picks:
+        # 兜底：正文前几行非元信息行
+        for ln in txt.splitlines():
+            ln = ln.strip()
+            if ln and not ln.startswith(("#", ">", "|", "---")) and len(ln) > 12:
+                picks.append(_clip_flat(re.sub(r"[*`]", "", ln), 110))
+            if sum(len(p) for p in picks) >= max_chars:
+                break
+    gist = "；".join(picks)
+    return (title + "：" if title else "") + _clip_flat(gist, max_chars)
+
+
+def build_research_ref_block(cfg, items, day_str=None, max_sn=8, max_chars=1800):
+    """给日报补一层「投研报告参考」：当日聊到的子网，若有历史投研报告，
+    把每份的结论要点列出来，**明确标注为历史快照、未经本次验证、不可全信**。
+
+    日报主体永远是当天话题；这层只用于让模型发现「今天的事实是否推翻/印证了当初的判断」，
+    并在矛盾时按提示词要求标「⚠️ 待人工确认」。
+
+    两个来源（去重、容错，任一不可用不影响其它）：
+      1. 本项目档案目录 archive_dir/SNxx/ 下的 research_*.md（经 archive.json 的 reports 拿元信息）；
+      2. config.research_ref_dirs 里每个目录下的 SNxx/SNxx_*.md（另一套独立投研库）。
+    """
+    if not items:
+        return ""
+    try:
+        import subnet_archive as SA
+    except Exception:
+        return ""
+    try:
+        arc_dir = SA.get_arc_dir(cfg)
+        kb = SA.load_kb()
+        nidx = SA.name_index(kb)
+    except Exception as e:
+        log("投研参考：初始化失败（%s），本次不注入" % e)
+        return ""
+
+    # 当日聊到的子网（强命中）+ 提及次数，排序稳定
+    cnt = {}
+    for _r, _t, _a, c in items:
+        try:
+            hits = SA.classify(c or "", nidx) or {}
+        except Exception:
+            continue
+        for sn, (kind, _via) in hits.items():
+            if kind == "strong":
+                cnt[sn] = cnt.get(sn, 0) + 1
+    if not cnt:
+        return ""
+    ranked = sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))[:max_sn]
+
+    lines, used, n_report = [], 0, 0
+    ref_dirs = [d for d in (cfg.get("research_ref_dirs") or []) if d]
+    for sn, _times in ranked:
+        found = []          # [(source_label, date, gist)]
+        # 来源1：本项目档案 reports（结构化，最省）
+        try:
+            arc = SA.load_archive(arc_dir, sn)
+            for r in reversed(arc.get("reports") or []):
+                d = r.get("date") or ""
+                if day_str and d >= day_str:
+                    continue
+                gist = _clip_flat(r.get("conclusion") or r.get("title") or "", 200)
+                if gist:
+                    found.append(("本项目档案", d, gist))
+                if len(found) >= 2:
+                    break
+        except Exception:
+            pass
+        # 来源2：配置的参考目录（另一套投研库），取最近 1 份
+        for rd in ref_dirs:
+            sn_dir = os.path.join(rd, "SN%d" % int(sn))
+            if not os.path.isdir(sn_dir):
+                continue
+            files = sorted(glob.glob(os.path.join(sn_dir, "*.md")))
+            if not files:
+                continue
+            p = files[-1]
+            dm = _REPORT_DATE_RE.search(os.path.basename(p)) or _REPORT_DATE_RE.search(
+                " ".join(files[-3:]))
+            date = dm.group(1) if dm else "日期未标注"
+            if day_str and date >= day_str:
+                continue
+            gist = _extract_report_gist(p)
+            if gist:
+                found.append(("外部投研库", date, gist))
+        if not found:
+            continue
+        head = "- **SN%d** 历史投研（%d 份）" % (sn, len(found))
+        block_lines = [head]
+        for src, d, gist in found[:3]:
+            block_lines.append("  · [%s %s] %s" % (src, d, gist))
+        block = "\n".join(block_lines)
+        if used + len(block) > max_chars:
+            break
+        lines.append(block)
+        used += len(block)
+        n_report += len(found)
+
+    if not lines:
+        return ""
+    log("投研参考：当日 %d 个子网，注入 %d 份历史投研要点，共 %d 字"
+        % (len(cnt), n_report, used))
+    return ("【投研报告参考 —— 历史快照，仅供交叉核对，不可当成今天的事实】\n"
+            "下面是当日聊到子网的历史投研结论要点（来自本项目档案与配置的外部投研库）。"
+            "**这些是过去某一天的快照，可能已过时、被后续事实推翻，或本身就是未核实的推测**——"
+            "只用来帮你发现「今天群里说的是不是印证/推翻了当初的判断」。硬性要求：\n"
+            "① **绝不**把这里的内容当成今天发生的事写进日报，也不引用其中的数字当今日数据；\n"
+            "② 若今日群聊/数据与某条历史结论**明显矛盾**（如当初说「未回购」今天说「已回购」、"
+            "当初说「团队匿名」今天有实名信息），必须在该条附近写「⚠️ 待人工确认："
+            "投研（日期）称 X，但今日 Y」，把冲突交给人工判断，不要自行采信任何一方；\n"
+            "③ 没有矛盾就一个字都别提这些旧报告。日报主体永远是当天话题。\n"
+            + "\n".join(lines))
+
+
 def _build_full_text_block(cfg, channel_name, day_str, items):
     """组装完整的输入文本块：当日记录 + 前几天聊天记录 + 聊到的子网档案。
 
@@ -2990,6 +3148,10 @@ def _build_full_text_block(cfg, channel_name, day_str, items):
     sn_block = build_subnet_context_block(cfg, items, day_str=day_str)
     if sn_block:
         text_block += "\n\n" + sn_block
+    # 投研报告参考（历史快照，供交叉核对；矛盾时提示词要求标「待人工确认」）
+    rr_block = build_research_ref_block(cfg, items, day_str=day_str)
+    if rr_block:
+        text_block += "\n\n" + rr_block
     return text_block
 
 
@@ -3137,6 +3299,25 @@ def run_one_day(cfg, after_dt, before_dt):
         except Exception as e:
             log("%s归属核验异常（忽略）：%s" % (tag, e))
 
+    # 投研交叉核对：日报里出现「⚠️ 待人工确认」= 今日事实与历史投研结论冲突。
+    # 这类冲突不该被自动采信，所以醒日志 + 推送标题打标 + 正文顶部加提示，交人工判断。
+    _pending_by_label = {}
+    for r in results:
+        tag = ("【%s】" % r["label"]) if r["label"] else ""
+        _flags = [ln.strip() for ln in (r["digest"] or "").splitlines()
+                  if "待人工确认" in ln]
+        if _flags:
+            _pending_by_label[r["label"]] = _flags
+            log("%s⚠️⚠️ 投研交叉核对：日报含 %d 处「待人工确认」（今日事实与历史投研冲突），"
+                "需人工复核：%s" % (tag, len(_flags), " | ".join(_flags[:5])))
+            # 正文顶部插一条醒目提示（不新增事实，只提醒核对）
+            _notice = ("⚠️ **本篇含 %d 处与历史投研结论冲突的信息，已标注「待人工确认」，"
+                       "请人工核对后再采信。**\n\n" % len(_flags))
+            if not (r["digest"] or "").startswith("⚠️ **本篇含"):
+                r["digest"] = _notice + (r["digest"] or "")
+        else:
+            log("%s✅ 投研交叉核对：未发现今日事实与历史投研结论的冲突" % tag)
+
     base_title = "🤖 DTAO price-talk 日报 · %s" % day_str
 
     # 3) 推送（对比模式：每个模型各推一条，标题带版本标签，方便对照）
@@ -3145,6 +3326,8 @@ def run_one_day(cfg, after_dt, before_dt):
         for i, r in enumerate(results):
             rcfg = r["cfg"]
             title = base_title + ((" ｜ %s" % r["label"]) if r["label"] else "")
+            if r["label"] in _pending_by_label:
+                title += " ⚠️待人工核对"
             try:
                 push_feishu(rcfg, title, r["digest"])
             except Exception as e:
@@ -3176,6 +3359,8 @@ def run_one_day(cfg, after_dt, before_dt):
     else:
         for r in results:
             title = base_title + ((" ｜ %s" % r["label"]) if r["label"] else "")
+            if r["label"] in _pending_by_label:
+                title += " ⚠️待人工核对"
             log("push_enabled=false，仅打印不推送：\n" + title + "\n" + r["digest"])
 
     # 3) 子网建档（自动，增量）：把本日导出里提到的子网写进各自档案。

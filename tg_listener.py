@@ -15,6 +15,7 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /repush 2026-10-23           补推（飞书+TG）
   /repush 2026-10-23 tg        仅补推 TG
   /repush 2026-10-23 feishu    仅补推飞书
+  <ss58地址>，<SN编号> <备注>  补录回购地址（如 5FX6...，8回购地址）
 
 授权规则（开放模式）：
   - 任意会话、任意用户发来的指令都会被处理（已取消「仅本人可触发」限制）。
@@ -58,6 +59,15 @@ def log(msg):
         pass
 
 
+def _arc_label():
+    """给回执用的档案路径文字（跟随 config.archive_dir，避免写死旧路径）。"""
+    try:
+        import subnet_archive as SA
+        return SA.get_arc_dir(P._CFG)
+    except Exception:
+        return "config.json 里的 archive_dir"
+
+
 HELP = (
     "🤖 DTAO 日报指令\n"
     "/digest 导出前一天并双推\n"
@@ -76,6 +86,8 @@ HELP = (
     "   报告内容：先调本地子网档案，再结合官网/推特/GitHub/新闻/全网检索交叉核验，\n"
     "   分 7 段（结论/事实基线/时间线/交叉验证/预期差/风险/跟踪清单）并双推\n"
     "/档案 列出所有已建档子网（不知道编号先发这个）；/档案 29 看某子网档案\n"
+    "★ 补录回购地址：直接发「ss58地址，SN编号 备注」，如\n"
+    "   5FX6...Ehk2，8回购地址  → 自动收录为 SN8 的回购地址（人工补录，不会被覆盖）\n"
     "📚 /kb 子网知识库周更状态（排程/上次更新/待补跑）；/kb update 立即校对\n"
     "   （每周自动跑一次：拉链上身份核对子网名与业务，并同步到已建档案）\n"
     "━━ 其它 ━━\n"
@@ -576,15 +588,15 @@ def _run_pipeline_sync(args, chat_id):
             m = re.search(r"子网建档完成：\d+ 个子网有档案，本次新增 (\d+) 条（累计 (\d+) 条）", out)
             detail = ("\n📊 本次新增 %s 条，档案累计 %s 条" % (m.group(1), m.group(2))) if m else ""
             safe_send(chat_id, "✅ 子网建档完成%s\n"
-                          "按 SN 编号逐个存放于 subnet_archive/SNxx/（archive.json + archive.md，"
+                          "按 SN 编号逐个存放于 %s\\SNxx\\（archive.json + archive.md，"
                           "含原文与中文译文、按时间排序的人物观点索引）。\n"
-                          "发 /档案 看清单，发 /投研 29 做单子网跟踪报告。" % detail)
+                          "发 /档案 看清单，发 /投研 29 做单子网跟踪报告。" % (detail, _arc_label()))
             return
         if args and args[0] == "research":
             m = re.search(r"报告已存：(.+?)（(\d+) 字）", out)
             detail = ("\n📄 %s\n📝 %s 字" % (m.group(1), m.group(2))) if m else ""
             safe_send(chat_id, "✅ 子网投研报告已生成并推送（飞书 + TG）%s\n"
-                          "已归档到 subnet_archive/（下次同子网可直接复用档案）。" % detail)
+                          "已归档到 %s（下次同子网可直接复用档案）。" % (detail, _arc_label()))
             return
         stat = ""
         m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
@@ -892,6 +904,77 @@ def parse_bare_sn(text):
     return sn, m.group(2)
 
 
+# ---- 发地址自动收录回购地址 -------------------------------------------
+# 格式：ss58 地址 + SN 编号 + 可选备注。例：
+#   5FX6...Ehk2，8回购地址       -> SN8, 备注「回购地址」
+#   5FX6...Ehk2 SN8 回购钱包     -> SN8, 备注「回购钱包」
+#   5FX6...Ehk2 #8 已链上核对     -> SN8, 备注「已链上核对」
+# 必须同时给出地址与 SN 编号才收录；只有地址、没编号时不处理（避免误判）。
+_WALLET_SS58 = re.compile(r"\b5[1-9A-HJ-NP-Za-km-z]{47}\b")
+_WALLET_SN = re.compile(r"(?:SN\s*|#\s*)?(\d{1,3})(?![\dA-Za-z])", re.I)
+_WALLET_SEP = re.compile(r"[\s,，;；:：|、]+")
+
+
+def parse_wallet_add(text):
+    """从一条消息里解析「ss58地址 + SN编号 + 备注」，返回 (sn, address, note) 或 None。
+
+    保守规则：
+      · 必须有且只有一个合法 ss58 地址（严格 48 位，与 archive 的 SS58 一致）；
+      · SN 编号只能出现在**地址之后**的文本里，范围 1-255；
+      · 备注取 SN 编号之后的文字（去掉分隔符），没有就填默认值。
+    """
+    t = (text or "").strip()
+    addrs = _WALLET_SS58.findall(t)
+    if len(addrs) != 1:
+        return None
+    addr = addrs[0]
+    tail = t[t.index(addr) + len(addr):]           # 只看地址后面的文字
+    tail = tail.strip(" \t,，;；:：|、-—")
+    if not tail:
+        return None
+    m = _WALLET_SN.search(tail)
+    if not m:
+        return None                # 没写子网编号，不猜
+    sn = int(m.group(1))
+    if not (1 <= sn <= 255):
+        return None
+    note = tail[m.end():].strip(" \t,，;；:：|、-—")
+    note = re.sub(r"\s+", " ", note)[:120] or "TG 补录的回购地址"
+    return sn, addr, note
+
+
+def _wallet_add(sn, address, note, chat_id):
+    """把地址收录到 SN 档案（无档案则先建最小档案），并给 TG 回执。"""
+    import subnet_archive as SA
+    cfg = P.load_config()
+    arc_dir = SA.get_arc_dir(cfg)
+    arc = SA.load_archive(arc_dir, sn)
+    if not arc:
+        # 无档案：建一个最小档案，保证「发地址即收录」不因没建档而失败
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        arc = {
+            "sn": int(sn), "created_at": now, "updated_at": now,
+            "name": "", "biz": "", "url": "", "github": "",
+            "days": {}, "weak_days": {}, "reports": [], "buyback_wallets": [],
+            "note": "本档案由 TG 补录回购地址时自动创建（尚无群聊归档）",
+        }
+        SA.save_archive(arc_dir, arc)
+        SA.save_md(arc_dir, arc)
+    before = len(arc.get("buyback_wallets") or [])
+    SA.add_manual_wallet(arc_dir, sn, address, note=note, log=log)
+    arc2 = SA.load_archive(arc_dir, sn) or {}
+    after = len(arc2.get("buyback_wallets") or [])
+    existed = before >= after          # 地址已存在时只是升级/改备注，数量不变
+    name = (arc2.get("name") or "").strip()
+    tag = ("SN%d %s" % (sn, name)) if name else ("SN%d" % sn)
+    safe_send(chat_id,
+              "✅ 已收录回购地址 → **%s**\n"
+              "地址：`%s`\n备注：%s\n%s"
+              % (tag, address, note,
+                 "（该地址此前已登记，本次按人工补录更新）" if existed else
+                 "（来源标记为人工补录 source=manual，后续自动归档不会覆盖）"))
+
+
 def handle(text, chat_id):
     text = (text or "").strip()
     if not text:
@@ -899,6 +982,18 @@ def handle(text, chat_id):
     parts = text.split()
     # 群里发指令可能带 @机器人名（/digest@Dtao_ribao_bot），剥掉后缀再匹配
     cmd = parts[0].lstrip("/").lower().split("@")[0]
+    # 发「ss58地址 + SN编号 + 备注」= 自动收录为该子网的回购地址（人工补录）。
+    # 放在裸编号之前：地址消息含数字，先让地址解析器判定，避免任何歧义。
+    if not parts[0].startswith("/"):
+        wa = parse_wallet_add(text)
+        if wa:
+            sn, address, note = wa
+            try:
+                _wallet_add(sn, address, note, chat_id)
+            except Exception as e:
+                log("TG 地址收录失败：%s" % e)
+                safe_send(chat_id, "❌ 回购地址收录失败：%s" % e)
+            return
     # 裸编号 = 子网投研：整条消息只有「29」/「SN29」/「#29」/「29 30」时直接开工。
     # 不带斜杠是为了手机上少打几个字（用户原话：从 TG 发子网编号就触发该子网投研）。
     if not parts[0].startswith("/"):
@@ -997,7 +1092,7 @@ def handle(text, chat_id):
                      "群聊条目：%d 条（疑似裸编号 %d 条）· 覆盖 %s ~ %s · %d 人"
                      % (st["strong"], st["weak"], st["first"] or "-", st["last"] or "-", st["people"]),
                      "投研报告：%d 份%s" % (len(rep), ("（最近 %s）" % rep[0].get("date")) if rep else ""),
-                     "档案：subnet_archive/SN%d/archive.md" % sn, "", "近期要点："]
+                     "档案：%s\\SN%d\\archive.md" % (arc_dir, sn), "", "近期要点："]
             recent = []
             for day in sorted(arc.get("days") or {})[-2:]:
                 for e in (arc["days"][day] or [])[-4:]:

@@ -40,12 +40,15 @@
   "topic_max_items_per_day": 250,
   "chat_max_items": 500,
   "archive_auto": true,
-  "archive_dir": "subnet_archive",
+  "archive_dir": "E:/子网投研档案/subnet_archive",
   "archive_translate": true,
   "research_days": 14,
   "research_max_items_per_day": 260,
   "kb_auto_update": true,
   "kb_update_weekday": 0,
   "kb_update_hour": 9,
-  "kb_update_notify": true
+  "kb_update_notify": true,
+  "research_ref_dirs": [
+    "E:/子网投研档案/bittensor-subnet-research"
+  ]
 }

@@ -22,6 +22,7 @@
 """
 
 import datetime
+import difflib
 import hashlib
 import html
 import json
@@ -3418,12 +3419,19 @@ _PEOPLE_SUMMARY_PROMPT = (
     "2. 内容点名本子网项目名、SN 编号或官方账号；\n"
     "3. 内容的议题与「本子网当日社区消息」背景里的事件是同一件"
     "（同一个性能对比、争议、训练进度、合作、回购等）。\n"
+    "   **注意**：同一件事的评论常不重复项目名——例如背景在说「SN91 Cascade 用 19 天"
+    "击败 Salesforce 达到 SOTA」，某人只说「19 days is slow, SOTA should take hours」"
+    "也是在评论**同一件事**，必须算相关、按人名写出来；不能因为它没写项目名就丢掉。\n"
     "\n"
     "【必须剔除——哪怕发言人是创始人】\n"
     "- 明确属于别的子网的（线索标了别的 SN，或内容在谈别的项目/争议）；\n"
     "- 与本子网议题无关的泛泛发言（别的子网进展、隐私推理、日常寒暄、纯链接）。\n"
     "\n"
     "【其它硬规则】\n"
+    "- **线索里 `[标本SN]` 与 `[★创始人]` 的消息必须逐条覆盖**：它们已由代码判定为"
+    "本子网强相关（标了本 SN 或点名了项目名），哪怕内容只是一个 👌 加链接，"
+    "也要写出「某人 转推/表示：链接谈及的具体内容要点」，**不得整条漏掉**；"
+    "同一人多条同观点才合并。\n"
     "- 写内容要点、不是抄原文：抓结论/数字/态度，一句话讲清；"
     "**不许贴任何 URL、t.co 链接、x.com 链接**。同一人同一观点合并成一条。\n"
     "- 人名**直接写纯文本**（如 `const 表示：`、`cats 转推 @MSBIntel：`），"
@@ -3438,19 +3446,68 @@ _PEOPLE_SUMMARY_PROMPT = (
 )
 
 
+def _sn_event_anchors(events, cfg=None, sn=None, max_terms=40):
+    """从当日 dtt 消息里抽「本子网当日专属议题词组」，作为未标 SN 消息的捞回线索。
+
+    为什么需要：const 的「19 days is actually quite slow. SOTA is achievable in hours」
+    既没写 cascade、也没标 SN，但它紧跟 cats 那条 cascade/Gscade + X帖（Cascade 19 天
+    击败 Salesforce 的 Moirai 2.0）之后，是**同一件事的评论**。用户 2026-11-22 明确：
+    SN91 上一份报告里 const/cats 的动态就是和 91 有关的，不能因「只按编号+字面名」
+    漏掉。这里把当日已明确归属本 SN 的消息里的专名/产品名/议题词抽出来，
+    让「提到同一件事」的未标注发言能被捞回——但**只在已确认本 SN 有相关消息的
+    前提下**启用，且命中必需是专名级（非通用词），SN25 那种无命中日的子网不会
+    被凭空塞入 const 的无关动态。
+    """
+    import community_digest as CD
+    terms = {}
+    for e in events or []:
+        if sn is not None and str(sn) not in [str(x) for x in (e.get("sn") or [])]:
+            continue
+        c = re.sub(r"https?://\S+", " ", e.get("content") or "")
+        if not c:
+            continue
+        # 专名/产品名：首字母大写的词（单个或连续词组合）。const 的评论常只重复
+        # 其中一个词（如「19 days … SOTA」只呼应 Aph 的「Beating SOTA …」），
+        # 所以既收词组、也收其中的单个大写词，否则捞回规则形同虚设。
+        for m in re.finditer(r"(?<![a-z0-9])([A-Z][A-Za-z0-9]{2,}(?:[\s\-][A-Z0-9][A-Za-z0-9.]*){0,2})", c):
+            phrase = m.group(1).strip()
+            for t in [phrase] + re.findall(r"[A-Z][A-Za-z0-9.]{2,}", phrase):
+                if len(t) < 4 or t.lower() in _GENERIC_ANCHOR_STOP:
+                    continue
+                terms.setdefault(t.lower(), t)
+        # 关键词监控命中的词条本身（dtt 按关键词抓，命中词就是议题词）
+        kw = (e.get("keyword") or e.get("matchedKeyword") or "")
+        if kw and str(kw).strip():
+            terms.setdefault(str(kw).strip().lower(), str(kw).strip())
+    return sorted(terms.values(), key=lambda s: -len(s))[:max_terms]
+
+
+_GENERIC_ANCHOR_STOP = {
+    "the", "and", "for", "with", "that", "this", "from", "have", "has", "was",
+    "are", "not", "but", "you", "your", "its", "our", "all", "can", "will", "just",
+    "yes", "time", "day", "days", "into", "out", "now", "new", "one", "two", "how",
+    "what", "why", "who", "rt", "subnet", "bittensor", "tao", "message", "very",
+    "get", "got", "let", "use", "using", "make", "made", "top", "best", "more",
+    "still", "even", "only", "over", "back", "they", "them", "their", "about",
+    "than", "then", "when", "where", "which", "there", "here", "some", "much",
+}
+
+
 def _sn_related_events(events, sn, sn_name, cfg=None, context=""):
     """从当日 dtt 全部消息里，筛出与当前子网**强相关**的（供子网报告社区动态用）。
 
-    口径（用户 2026-11-22 确认）：「明确归属 + 强证据捞回」，绝不靠弱信号凑数。
-    社区日报=生态全量所有人都列；这里=只留跟本 SN 明确有关的，避免 SN25 报告
-    混入一整屏 SN8/SN64/SN120/Openrouter 等无关 const 动态。
+    口径（用户 2026-11-22 两次确认）：「明确归属 + 名称/专名/同议题强证据捞回」，
+    绝不靠弱信号凑数。
+      社区日报=生态全量所有人都列；这里=只留跟本 SN 明确有关的，避免 SN25 报告
+      混入一整屏 SN8/SN64/SN120/Openrouter 等无关 const 动态。
 
     命中任一即保留（强证据）：
       1. dtt 的 sn 归属里明确含本 SN；
-      2. 内容直接点名本子网项目名 / SN 编号 / 官方 handle（如 cascade_sn91）。
-    唯一允许的「捞回」：本项目配置里登记的**精确专名锚点**（如项目全名、产品名），
-    出现在未标 SN 的消息里——必须有 config.research_sn_anchors 显式登记才算，
-    不靠背景词/通用数字猜测（那正是 SN25 误命中 49 条的根源）。
+      2. 内容词边界点名本子网项目名（含大小写/拼写变体、官方 handle）；
+      3. 内容命中 config.research_sn_anchors[SN] 登记的精确专名（如 moirai/gift-eval）；
+      4. **同议题捞回**：未标 SN 的消息，命中本 SN 当日已确认相关消息的
+         专名词组（如 const 的 "19 days SOTA" 呼应 cascade 击败 Salesforce 的
+         当日事件）——仅在本 SN 当日确实有相关消息时启用，且只捞「专名级」命中。
     明确标了别的 SN 的消息一律排除，除非同时点名了本子网。
     """
     import community_digest as CD
@@ -3458,30 +3515,56 @@ def _sn_related_events(events, sn, sn_name, cfg=None, context=""):
     sn_s = str(sn)
     name = (sn_name or "").strip()
 
-    # 本子网标识：用「词边界」匹配，避免短名/通用名（如 SN25 的 "UR"）在
-    # "your"/"architecture" 里到处误命中——那正是 SN25 误捞 49 条的根源。
-    # 编号类（sn25/#25/sn:25）用子串即可，本身足够独特。
-    name_patterns = []
-    if name and len(name) >= 2:
-        # 项目名按词边界匹配；允许常见的 `@项目名_sn号` handle 形态
-        name_patterns.append(re.compile(r"(?<![a-z0-9])" + re.escape(name.lower()) + r"(?![a-z0-9])"))
+    # 本子网标识：编号子串 + 项目名词边界。项目名短（如 SN25 的 "UR"）仍用词边界，
+    # 避免在 "your"/"architecture" 里误命中。名称同时生成「容忍首尾一个字符差」的
+    # 变体（Gscade↔Cascade 这类手写/拼写变体），但只对够长的名字启用，短名不开。
     num_tokens = []
     for tok in ("sn%d" % sn, "#%d" % sn, "sn %d" % sn, "子网%d" % sn, "sn:%d" % sn):
         num_tokens.append(tok.lower())
 
-    def _names_me(text):
-        low = text.lower()
-        if any(t in low for t in num_tokens):
-            return True
-        return any(p.search(low) for p in name_patterns)
+    name_patterns = []
+    if name and len(name) >= 2:
+        name_patterns.append(re.compile(r"(?<![a-z0-9])" + re.escape(name.lower()) + r"(?![a-z0-9])"))
 
-    # 精确专名锚点：只认 config 里显式登记的，避免泛化词误命中。
-    # 例如 SN91 的 "Moirai"/"GIFT-Eval" 若要捞 const 的未标注发言，需在此登记。
+    # 精确专名锚点：config 显式登记的才算，避免泛化词误命中。
     anchors = []
     for a in (cfg.get("research_sn_anchors") or {}).get(sn_s, []) or []:
         a = str(a).strip().lower()
         if a and len(a) >= 3:
             anchors.append(re.compile(r"(?<![a-z0-9])" + re.escape(a) + r"(?![a-z0-9])"))
+
+    # 同议题词组：只从「明确标本 SN」的消息里抽，且需本 SN 当日确有命中才启用。
+    # 这样 SN25 那种当日 0 命中的子网不会被凭空塞 const 动态。
+    own_events = [e for e in events or []
+                  if sn_s in [str(x) for x in (e.get("sn") or [])]]
+    topic_terms = _sn_event_anchors(own_events, cfg, sn=sn) if own_events else []
+
+    def _names_me(text):
+        low = text.lower()
+        if any(t in low for t in num_tokens):
+            return True
+        if any(p.search(low) for p in name_patterns):
+            return True
+        # 子网名称的手写/拼写变体（Gscade↔cascade）：只对够长的名字（≥5）启用，
+        # 且按词逐个比对、相似度阈值 0.72。SN25 的 "UR" 这种短名绝不走模糊，
+        # 否则会在 your/architecture 里到处误命中（v1.22.1 修过的坑）。
+        if len(name) >= 5:
+            nl = name.lower()
+            for tok in re.findall(r"[a-z][a-z0-9]{3,}", low):
+                if abs(len(tok) - len(nl)) > 2:
+                    continue
+                if difflib.SequenceMatcher(None, tok, nl).ratio() >= 0.72:
+                    return True
+        return False
+
+    def _topic_hits(text):
+        """返回命中的本 SN 当日专属议题词个数（专名级，词边界）。"""
+        if not topic_terms:
+            return 0
+        low = text.lower()
+        return sum(1 for t in topic_terms
+                   if len(t) >= 4 and re.search(r"(?<![a-z0-9])" + re.escape(t.lower())
+                                                + r"(?![a-z0-9])", low))
 
     hits = []
     for e in events or []:
@@ -3497,12 +3580,19 @@ def _sn_related_events(events, sn, sn_name, cfg=None, context=""):
         # ② 明确标了别的 SN → 一律排除（除非内容又点名本子网）
         if tags and not names_me:
             continue
-        # ③ 内容点名本子网项目名/SN编号/handle → 保留
+        # ③ 内容点名本子网项目名/SN编号 → 保留
         if names_me:
             hits.append(e)
             continue
-        # ④ 未标 SN：仅当命中显式登记的精确专名锚点（词边界，强证据）→ 保留
+        # ④ 未标 SN：命中显式登记的精确专名锚点 → 保留
         if anchors and any(p.search(low) for p in anchors):
+            hits.append(e)
+            continue
+        # ⑤ 未标 SN：命中本 SN 当日专属议题词组 → 保留（const「19 days/SOTA」这类）。
+        #    防误捞：单个泛化议题词只有**关键人物**发言才算；非关键人物必须命中
+        #    至少 2 个专属词（同一件事的多个专名），避免 SN25 式误命中。
+        ntopic = _topic_hits(content)
+        if ntopic and (CD._key_author_hit(e, cfg) or ntopic >= 2):
             hits.append(e)
     return hits
 

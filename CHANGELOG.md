@@ -8,9 +8,32 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.22.2** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.22.3** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.22.3 — 2026-11-22
+
+**修复：SN91 社区动态只认编号、漏掉 const / cats（匹配维度扩到「编号 + 名称 + 专名 + 同议题」）**
+
+- 根因：v1.22.1 强证据筛选只认 dtt 的 SN 编号 tag、项目名词边界和 `research_sn_anchors`，
+  cats 那条 `Gscade 👌` 靠 tag 进来但「Gscade」是 Cascade 的手写变体、const 那条
+  「19 days is actually quite slow. SOTA is achievable in hours」没写项目名也没标 SN，
+  于是上一份报告里明明和 91 有关的两条动态被整节筛掉。
+- `_sn_related_events()` 四层命中：① SN 编号 ② 项目名（长名容忍一个字符差的手写变体，
+  `Gscade↔cascade`；短名如 SN25 的 `UR` 仍严格词边界，不回退 your 误命中）
+  ③ `research_sn_anchors` 显式专名 ④ **同议题词组**——从当日已明确归属本 SN 的消息里
+  抽专名（`SOTA` / `GIFT-Eval` / `Benioff` / `Gscade` 等），未标 SN 的发言只要命中
+  关键人物（const）或 ≥2 个专名即算相关；**仅在本 SN 当日确有相关消息时启用**，
+  SN25 那种 0 命中日照样一条不塞。
+- 明确标了别的 SN 的消息仍一律排除（除非内容又点名本子网），SN25 回归测试 0 命中。
+- 提炼提示词补硬规则：线索里 `[标本SN]` / `[★创始人]` 的消息必须逐条覆盖，
+  内容只是 👌 加链接也要写「转推/表示 + 链接内容要点」，不得整条漏掉；
+  并举例说明「同一件事的评论不重复项目名也算相关」（19 天 / SOTA）。
+- 实测 SN91：const、Aph、cats 三条全部提炼成中文短句（const 排最前、无链接、备注名）；
+  SN25 仍为「本节从略」。
 
 ---
 

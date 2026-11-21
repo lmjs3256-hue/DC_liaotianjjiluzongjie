@@ -3426,9 +3426,12 @@ _PEOPLE_SUMMARY_PROMPT = (
     "【其它硬规则】\n"
     "- 写内容要点、不是抄原文：抓结论/数字/态度，一句话讲清；"
     "**不许贴任何 URL、t.co 链接、x.com 链接**。同一人同一观点合并成一条。\n"
-    "- 人名只用线索 `<>` 里的显示名（如 const、cats），禁止 @handle、consttt、"
-    "_数字后缀、备注标签；被转推/回复的对象若是关键人物用 @显示名（@const），"
-    "其他对象保留其 @handle。\n"
+    "- 人名**直接写纯文本**（如 `const 表示：`、`cats 转推 @MSBIntel：`），"
+    "**输出里绝对不要带尖括号 `<` `>`**——输入线索里的 `<cats>` 只是标记显示名的格式，"
+    "不是让你把尖括号抄进结果。禁止 @handle 当人名、consttt、_数字后缀、备注标签；"
+    "被转推/回复的对象若是关键人物用 @显示名（@const），其他对象保留其 @handle。\n"
+    "- 只写消息里明确有的内容，**不许臆测技术细节**（如模型类型、架构、参数规模）；"
+    "原文只说「击败 Salesforce」就只写到这，不要自行补成「多模态大模型」之类。\n"
     "- 相关发言人里 const（创始人）排最前，其余按发言份量排；"
     "每人 1-2 条、每条不超过 45 字；相关发言很少就少写，一条都没有就只输出「无」。\n"
     "- 只输出要点行，不要标题、解释、总数统计。\n"
@@ -3582,6 +3585,10 @@ def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
     for ln in out.splitlines():
         ln = re.sub(r"^\s*[-•*]\s*", "", ln).strip()
         ln = re.sub(r"https?://\S+", "", ln).strip()  # 兜底删链接
+        # 兜底：模型可能把输入线索里的 `<cats>...</cats>` 当 XML 标签抄进来，
+        # 先去掉闭合标签 `</x>`，再去掉裸尖括号。
+        ln = re.sub(r"</[^>]+>", "", ln)
+        ln = re.sub(r"[<>]", "", ln).strip()
         for alias, canon in key_alias.items():
             ln = re.sub(r"@" + re.escape(alias) + r"\b", "@" + canon, ln, flags=re.I)
         # 兜底：清掉行内残留的 emoji / 希腊字母装饰（τ、🌊、✠ 等），保留 ASCII handle

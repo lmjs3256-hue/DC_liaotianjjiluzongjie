@@ -62,10 +62,15 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.22.3"
+__version__ = "1.22.4"
 import urllib.request
 import urllib.error
 import urllib.parse
+
+# Windows 下从 pythonw（无控制台）拉起 netstat/tasklist/DCE 等控制台子进程时，
+# 系统会临时弹黑色命令窗口、子进程退出后又自动关掉，打断办公。加 CREATE_NO_WINDOW
+# 彻底消除闪窗，不影响 PIPE/capture_output 捕获输出。非 Windows 平台为 0（无副作用）。
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -232,7 +237,7 @@ def _listening_ports():
     try:
         cp = subprocess.run(["netstat", "-ano", "-p", "tcp"],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            timeout=6)
+                            timeout=6, creationflags=NO_WINDOW)
         out = cp.stdout.decode("utf-8", "replace")
     except Exception:
         return []
@@ -259,7 +264,7 @@ def _pid_names():
     try:
         cp = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            timeout=6)
+                            timeout=6, creationflags=NO_WINDOW)
         out = cp.stdout.decode("utf-8", "replace")
     except Exception:
         return {}
@@ -671,7 +676,7 @@ def run_export(cfg, after_dt, before_dt, out_json):
     failed = None
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           env=env, timeout=dce_timeout)
+                           env=env, timeout=dce_timeout, creationflags=NO_WINDOW)
         if r.returncode != 0:
             failed = "DiscordChatExporter 退出码 %s：%s" % (r.returncode, ((r.stderr or r.stdout or "")[:300]))
         elif not os.path.exists(out_json):

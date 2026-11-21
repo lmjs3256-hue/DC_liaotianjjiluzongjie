@@ -80,7 +80,7 @@ def _kill(pid):
         return False
     try:
         subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                       capture_output=True, timeout=20)
+                       capture_output=True, timeout=20, creationflags=NO_WINDOW)
         return True
     except Exception:
         return False
@@ -124,7 +124,7 @@ def _procs(keyword):
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True, text=True, timeout=25,
+            capture_output=True, text=True, timeout=25, creationflags=NO_WINDOW,
         ).stdout
         for line in out.splitlines():
             line = line.strip()

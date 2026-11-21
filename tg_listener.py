@@ -52,6 +52,10 @@ sys.path.insert(0, HERE)
 import pipeline as P
 import llm_profiles as LP
 
+# 与 pipeline/community_fetch 一致：从 pythonw（无控制台）拉起 powershell/taskkill/
+# pipeline 等控制台子进程时抑制黑色命令窗口闪现，不影响 PIPE 捕获输出。
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
 def log(msg):
     """只写文件，不 print。
 
@@ -225,7 +229,7 @@ def _enum_listener_pids():
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-            capture_output=True, text=True, timeout=25,
+            capture_output=True, text=True, timeout=25, creationflags=NO_WINDOW,
         ).stdout
         for line in out.splitlines():
             line = line.strip()
@@ -652,7 +656,7 @@ def _kill_proc_tree(proc):
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=30)
+                           capture_output=True, timeout=30, creationflags=NO_WINDOW)
         else:
             proc.kill()
     except Exception as e:
@@ -677,7 +681,8 @@ def _run_pipeline_sync(args, chat_id):
     env["PYTHONUTF8"] = "1"
     env["PYTHONFAULTHANDLER"] = "1"   # 进程级崩溃时能留下堆栈，便于排查
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, encoding="utf-8", errors="replace", env=env)
+                            text=True, encoding="utf-8", errors="replace", env=env,
+                            creationflags=NO_WINDOW)
     timeout = _SLOW_CMDS.get(args[0] if args else "", PIPELINE_TIMEOUT)
     try:
         out, _ = proc.communicate(timeout=timeout)

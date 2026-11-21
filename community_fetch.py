@@ -47,6 +47,11 @@ TZ = datetime.timezone(datetime.timedelta(hours=8))
 # 单次取数最多翻多少页（100 条/页，60 页 = 6000 条，足够覆盖单日 712 条量级）
 MAX_PAGES = 60
 
+# Windows 下从 pythonw（无控制台）监听拉起 node 等控制台子进程时，系统会自动弹一个
+# 黑色命令窗口、进程退出后又自动关掉——会打断办公。加 CREATE_NO_WINDOW 彻底消除闪窗，
+# 不影响 capture_output/PIPE 捕获输出。非 Windows 平台为 0（无副作用）。
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
 
 def _pw_cli(cfg=None):
     return (cfg or {}).get("pw_browser_cli") or _DEFAULT_PW_CLI
@@ -145,7 +150,8 @@ def _run_cli(cli, code, timeout=180):
     cmd = base + ["run-code", code]
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout, env=env)
+                           encoding="utf-8", errors="replace", timeout=timeout, env=env,
+                           creationflags=NO_WINDOW)
     except FileNotFoundError:
         raise RuntimeError("找不到浏览器 CLI：%s（检查 config.pw_browser_cli 或技能是否安装）" % cli)
     except subprocess.TimeoutExpired:

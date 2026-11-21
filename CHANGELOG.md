@@ -8,9 +8,29 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.22.3** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.22.4** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.22.4 — 2026-11-22
+
+**优化：dtt 日报生成时不再弹黑色命令窗口（所有子进程统一 CREATE_NO_WINDOW）**
+
+- 根因：TG 监听以 `pythonw.exe`（无控制台）运行，触发日报时 `community_fetch._run_cli()`
+  用 `subprocess.run(["node", ...])` 拉起 node 控制台程序却没带 `CREATE_NO_WINDOW`；
+  Windows 会为控制台子进程临时新建一个黑色命令窗口、进程退出后自动关掉，反复闪窗打断办公。
+  取数要多次 run-code（登录态检查 + 分页抓取），于是闪好几次。
+- 修复：全部从 pythonw 拉起的控制台子进程统一加 `creationflags=CREATE_NO_WINDOW(0x08000000)`
+  （非 Windows 为 0，无副作用），且**不影响** `capture_output/PIPE` 捕获输出：
+  - `community_fetch.py`：`_run_cli()` 的 node run-code（核心闪窗源）；
+  - `pipeline.py`：`_listening_ports()` 的 netstat、`_pid_names()` 的 tasklist、
+    DiscordChatExporter 导出；
+  - `tg_listener.py`：启动 pipeline.py 子进程的 Popen、查进程的 powershell、超时的 taskkill；
+  - `tgctl.py`：taskkill 与查进程的 powershell（此前仅 Popen 带 NO_WINDOW，这两处漏加）。
+- 验证：`py_compile` 全通过；14 处子进程调用点全部带 flags；`auth_status()` 通过 run-code
+  正常读到已登录会话；`fetch_day('2026-11-22')` 端到端取数正常（node 在 NO_WINDOW 下管道通信不受影响）。
 
 ---
 

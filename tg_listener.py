@@ -9,6 +9,8 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /digest 2026-10-23           导出指定日
   /digest 2026-10-22 2026-10-23 一次导出多天（逐日推送）
   /weekly                       周报
+  /社区今日（/community_today） 今日社区日报：今日00:00→当前
+  /社区昨日（/community_yesterday） 昨日社区日报：昨日00:00→当前
   /水聊（/water）                水聊侧记：只挑被日报过滤掉的闲聊，单独成一条
   /水聊 昨日 3                   指定日期 / 连续天数（只读已有导出，不重新导出）
   /watch                       查看潜力观察（默认最新一天，可跟天数 /watch 7 或 /watch all；同步推飞书）
@@ -77,6 +79,10 @@ HELP = (
     "/water 或 /水聊 水聊侧记（群里闲聊/梗/跑题，单独一条，不写投研）\n"
     "   /水聊 昨日 指定日期；/水聊 昨日 3 连续 3 天（只读已有导出，不重新导出）\n"
     "/weekly 周报\n"
+    "🌐 /社区今日、/社区昨日 Bittensor社区消息日报（dtt版），命令触发不定时：\n"
+    "   /社区今日     取今日00:00→当前，总结后飞书+TG双推\n"
+    "   /社区昨日     取昨日00:00→当前（/社区 不带参数也=昨日）\n"
+    "   可加日期：/社区 2026-11-20；末尾加 nopush 只生成不推送\n"
     "━━ 子网档案 / 投研 ━━\n"
     "（建档全自动：每次导出日报时自动把提到的子网存档，已建档的增量补充、\n"
     "  未建档的自动新建，无需手动操作）\n"
@@ -446,7 +452,9 @@ _KEYBOARD = {
     "keyboard": [
         ["/digest 昨日", "/repush 最新"],
         ["/投研 29", "/档案"],
-        ["/watch 7", "/weekly"]
+        ["/社区今日", "/社区昨日"],
+        ["/watch 7", "/weekly"],
+        ["/keyboard", "/help"]
     ],
     "resize_keyboard": True
 }
@@ -1037,6 +1045,22 @@ def handle(text, chat_id):
     elif cmd == "weekly":
         send_async(chat_id, "📅 收到，正在生成周报，稍等…")
         run_pipeline(["weekly"], chat_id, quiet=True)
+    elif cmd in ("community", "社区", "社区日报", "dtt",
+                 "社区昨日", "社区昨天", "community_yesterday",
+                 "社区今日", "社区今天", "community_today"):
+        # Bittensor社区消息日报（dtt版）：命令触发，不定时推送。
+        # 区分昨日/今日：/社区 默认昨日；/社区今日（或 /社区 今日）取今日；
+        # /社区昨日 显式昨日。其余参数（日期/nopush）原样透传 pipeline.py community。
+        _today_cmds = ("社区今日", "社区今天", "community_today")
+        _yest_cmds = ("社区昨日", "社区昨天", "community_yesterday")
+        if cmd in _today_cmds:
+            preset = ["今日"]
+        elif cmd in _yest_cmds:
+            preset = ["昨日"]
+        else:
+            preset = []
+        send_async(chat_id, "🌐 收到，正在生成 Bittensor 社区消息日报（dtt版），稍等…")
+        run_pipeline(["community"] + preset + parts[1:], chat_id, quiet=True)
     elif cmd in ("chat", "shuichat", "water", "水聊", "闲聊", "水贴"):
         # /水聊                  -> 最近一份导出记录的水聊侧记
         # /水聊 昨日              -> 指定日期（可跟天数：/水聊 昨日 3）

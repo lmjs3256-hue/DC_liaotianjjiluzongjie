@@ -8,9 +8,30 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.20.0** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.20.2** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.20.2 — 2026-11-21
+
+**修复 TG 触发社区日报失败：守护离线自动拉起 + 自动登录修复；昨日/今日命令一眼可辨**
+
+- **失败根因**：浏览器守护（pw-browser，端口 19223）默认 15 分钟空闲退出，内存会话随之清空，TG 触发取数时连不上 → `ECONNREFUSED 19223`。取数前新增 `ensure_ready()`：守护离线就按需拉起一次（Edge、脱离进程、不常驻），浏览器不在 dtt 站点就 open 过去，会话失效用本地凭据自动登录。
+- **修复自动登录隐藏 bug**：`_JS_LOGIN` 原在 `page.evaluate` 里调 `page.goto/waitForTimeout`（页面上下文无 page 对象）、对 DOM 元素 `await el.fill()`（DOM 无 fill 方法）——此前会话一直有效未走到该分支。重写为：导航/等待在 daemon 沙箱、填表在页面上下文用原生 setter + input 事件。
+- **昨日/今日命令区分**：新增独立命令 `/社区今日`（别名 `/community_today`）、`/社区昨日`（`/community_yesterday`），默认 `/社区` 仍=昨日；HELP、顶部指令表、底部按钮栏同步。
+- 实测：守护离线→拉起→登录→今日取数 497 条，端到端通过。
+
+---
+
+## v1.20.1 — 2026-11-21
+
+**TG 窗口新增 `/社区` 指令：像 `/digest` 一样发命令触发社区日报**
+
+- `tg_listener.py`：新增 `/社区`（别名 `/community`、`/社区日报`、`/dtt`），参数原样透传 `pipeline.py community`（昨日/今日/日期/nopush，默认昨日）；HELP、顶部指令表、底部按钮栏同步加入。
+- README：`/setcommands` 命令菜单补齐整套指令（community/research/archive_list/kb/keyboard 等），社区日报段落补充 TG 用法。
+- 仅 TG 入口变更，`community` 取数/生成/落档逻辑不变。
 
 ---
 

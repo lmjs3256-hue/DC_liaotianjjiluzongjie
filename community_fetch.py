@@ -30,6 +30,7 @@ import datetime
 import json
 import os
 import subprocess
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -179,47 +180,57 @@ _PASSWORD_SELECTORS = (
 # 站点 token 有效期由服务端签发（实测约 7 天，本地无法改）；凭据填本地后，
 # 会话失效可自动重登，用户实际「登录一次」即可长期免手动干预，等价于更长周期。
 _JS_LOGIN = r"""
-const r = await page.evaluate(async (args) => {
+// 导航/等待在 daemon 沙箱里做（这里才有 page）；DOM 操作在页面上下文里做。
+// 注意：page.evaluate 里没有 page 对象，也不能 await DOM 方法——之前的实现踩了这两个坑。
+const sess0 = await page.evaluate(() => JSON.parse(localStorage.getItem('session') || 'null'));
+if (sess0 && sess0.token) return { ok: true, already: true };
+// 确保在登录页
+const host = await page.evaluate(() => location.hostname);
+if (!host) {
+  await page.goto(__SITE__, { waitUntil: 'domcontentloaded', timeout: 60000 });
+}
+if (await page.evaluate(() => location.pathname) !== '/login') {
+  await page.goto(__SITE__ + '/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(800);
+}
+// 在页面里填表并点击（纯同步 DOM 操作 + 原生 setter，兼容 React/Vue）
+const fill = await page.evaluate((args) => {
   const pick = (sels) => {
-    for (const s of sels) {
-      const el = document.querySelector(s);
-      if (el) return el;
-    }
+    for (const s of sels) { const el = document.querySelector(s); if (el) return el; }
     return null;
   };
-  // 已登录则直接成功
-  let sess = JSON.parse(localStorage.getItem('session') || 'null');
-  if (sess && sess.token) return { ok: true, already: true };
-  try {
-    if (location.pathname !== '/login') {
-      await page.goto(location.origin + '/login', { waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(600);
-    }
-    const u = pick(args.userSels);
-    const p = pick(args.pwdSels);
-    if (!u || !p) return { ok: false, err: '找不到登录输入框（页面结构可能变了）' };
-    await u.fill(args.email);
-    await p.fill(args.password);
-    // 勾「记住我」（若存在），尽量让服务端签更长的会话
-    try {
-      const rm = document.querySelector("input[type=checkbox]");
-      if (rm && !rm.checked) await rm.click();
-    } catch (e) {}
-    const btn = Array.from(document.querySelectorAll('button'))
-      .find(b => /登录|sign in|login/i.test((b.innerText || b.textContent || '')));
-    if (!btn) return { ok: false, err: '找不到登录按钮' };
-    await btn.click();
-    await page.waitForTimeout(2500);
-    sess = JSON.parse(localStorage.getItem('session') || 'null');
-    if (sess && sess.token) return { ok: true, renewed: true,
-      email: (JSON.parse(localStorage.getItem('user') || '{}') || {}).email || '' };
-    const bodyTxt = (document.body.innerText || '').slice(0, 300);
-    return { ok: false, err: '登录后未见 session；页面提示：' + bodyTxt };
-  } catch (e) {
-    return { ok: false, err: '自动登录异常：' + String(e) };
-  }
+  const setVal = (el, v) => {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  const u = pick(args.userSels), p = pick(args.pwdSels);
+  if (!u || !p) return { ok: false, err: '找不到登录输入框（页面结构可能变了）',
+                          html: (document.body.innerHTML || '').slice(0, 600) };
+  setVal(u, args.email);
+  setVal(p, args.password);
+  try { const rm = document.querySelector('input[type=checkbox]'); if (rm && !rm.checked) rm.click(); } catch (e) {}
+  const btn = Array.from(document.querySelectorAll('button'))
+    .find(b => /登录|sign in|login/i.test((b.innerText || b.textContent || '')));
+  if (!btn) return { ok: false, err: '找不到登录按钮' };
+  btn.click();
+  return { ok: true };
 }, __ARGS__);
-return r;
+if (!fill.ok) return fill;
+// 等 session 落 localStorage（daemon 上下文轮候）
+let sess = null;
+for (let i = 0; i < 20; i++) {
+  await page.waitForTimeout(500);
+  sess = await page.evaluate(() => JSON.parse(localStorage.getItem('session') || 'null'));
+  if (sess && sess.token) break;
+}
+if (sess && sess.token) {
+  const email = await page.evaluate(() => (JSON.parse(localStorage.getItem('user') || '{}') || {}).email || '');
+  return { ok: true, renewed: true, email: email };
+}
+const bodyTxt = await page.evaluate(() => (document.body.innerText || '').slice(0, 300));
+return { ok: false, err: '登录后未见 session；页面提示：' + bodyTxt };
 """
 
 
@@ -238,7 +249,7 @@ def auto_login(cfg=None, log=print):
                 "dtt 会话已失效。要在本地配置 dtt_email/dtt_password 后自动续期"
                 "（等价于长期免手动登录），或在 Edge 里手动登录 dtt.bigcatking.cc。"}
     cli = _pw_cli(cfg)
-    code = _JS_LOGIN.replace("__ARGS__",
+    code = _JS_LOGIN.replace("__SITE__", json.dumps(SITE_ORIGIN)).replace("__ARGS__",
         json.dumps({"email": email, "password": password,
                     "userSels": list(_USERNAME_SELECTORS),
                     "pwdSels": list(_PASSWORD_SELECTORS)}, ensure_ascii=False))
@@ -271,6 +282,75 @@ def ping_daemon(cfg=None, timeout=10):
             return r.status == 200
     except Exception:
         return False
+
+
+def start_daemon(cfg=None, log=print, timeout=45):
+    """按需拉起浏览器守护进程（离线时）；已在线则直接返回。
+
+    守护默认 15 分钟空闲自动退出（不常驻），命令触发取数时若发现离线，
+    这里临时拉起一次：后台启动 pw-browser daemon（Edge），轮询 /health 直到就绪。
+    返回 True/False（是否在线）。
+    """
+    if ping_daemon(cfg, timeout=5):
+        return True
+    cli = _pw_cli(cfg)
+    if not os.path.exists(cli):
+        log("浏览器守护离线，且 CLI 不存在：%s" % cli)
+        return False
+    base, env = _node_cmd(cli)
+    # Windows 下用 CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS 让守护脱离当前进程，
+    # 避免 TG 监听线程结束/守护重启时把它一起带走；stdout/stderr 丢弃防止管道阻塞。
+    flags = 0
+    if os.name == "nt":
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | \
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+    log("浏览器守护离线，正在按需拉起（Edge，不常驻）…")
+    try:
+        subprocess.Popen(base + ["daemon"], env=env, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=flags,
+                         cwd=os.path.dirname(os.path.abspath(base[1])))
+    except Exception as e:
+        log("拉起浏览器守护失败：%s" % e)
+        return False
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(1.5)
+        if ping_daemon(cfg, timeout=4):
+            log("浏览器守护已就绪")
+            return True
+    log("浏览器守护启动超时（%ds）：仍无法连接，检查 Edge 是否可启动 / 端口 19223 是否被占用"
+        % timeout)
+    return False
+
+
+def ensure_ready(cfg=None, log=print):
+    """取数前置：守护在线 + 浏览器停在 dtt 站点 + 会话有效（失效则自动登录）。
+
+    守护空闲退出后浏览器是全新空白 context（localStorage 无 token），所以拉起后
+    必须先 open dtt 站点，再检查/续期会话，否则页面上下文 fetch 会拿到 about:blank。
+    """
+    if not start_daemon(cfg, log=log):
+        raise RuntimeError("浏览器守护无法启动（Edge / 端口 19223 不可用）")
+    cli = _pw_cli(cfg)
+    # 确认/打开 dtt 站点：auth_status 内部会检查 host，不在站点会返回失败。
+    # 先轻量探测页面 host；不对就 open 过去。
+    check = r"""
+const r = await page.evaluate(() => ({ host: location.hostname, url: location.href }));
+return r;
+"""
+    try:
+        cur = _run_cli(cli, check, timeout=30)
+    except Exception:
+        cur = {}
+    if "dtt.bigcatking.cc" not in str(cur.get("host", "")):
+        log("浏览器未停在 dtt 站点，正在打开 %s …" % SITE_ORIGIN)
+        open_code = "await page.goto(%s, {waitUntil:'domcontentloaded', timeout:60000}); " \
+                    "await page.waitForTimeout(1200); return {ok:true};" % json.dumps(SITE_ORIGIN)
+        _run_cli(cli, open_code, timeout=90)
+    st = auth_status(cfg)
+    if not st.get("ok"):
+        raise RuntimeError(st.get("reason") or "dtt 会话不可用")
+    return True
 
 
 def auth_status(cfg=None):
@@ -317,6 +397,8 @@ def fetch_day(day_str, cfg=None, log=print, until_now=True):
                   + "（当前）") if until_now else "次日00:00"
     log("社区取数：%s（北京时间 %s 00:00 → %s，正在从 dtt 拉取…）"
         % (day_str, day_str, _end_label))
+    # 守护空闲退出后会话会丢，取数前先确保：守护在线 + 浏览器在 dtt 站点 + 会话有效。
+    ensure_ready(cfg, log=log)
     res = _run_cli(cli, code, timeout=240)
     if res.get("authExpired"):
         # 会话失效：先尝试用本地凭据自动续期，成功后重跑取数

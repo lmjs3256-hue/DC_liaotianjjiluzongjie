@@ -4,7 +4,7 @@
 > 用 AI 总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.20.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.20.2** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 **当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
@@ -266,15 +266,24 @@ python pipeline.py
 5. 默认**任何人**都能触发（开放模式）；想只让指定人触发：填 `allowed_user_ids`（TG 数字 ID，@GetIDsBot 可查）
 6. （可选）在 @BotFather 发 `/setcommands`，选你的机器人，粘贴下面这段，让输入 `/` 时弹出指令菜单：
    ```
-   digest - 导出前一天并双推（可跟日期）
-   today - 导出并总结今天的聊天记录
+   digest - 导出前一天并双推（可跟日期/多日）
+   today - 导出并总结今天的聊天记录（00:00到现在）
    weekly - 生成本周周报
+   community_today - 今日社区日报（dtt版，今日00:00→当前）
+   community_yesterday - 昨日社区日报（dtt版，昨日00:00→当前）
    water - 水聊侧记（只挑闲聊，可跟日期/天数）
    watch - 查看潜力观察/跨日热点(可跟天数, 如 /watch 7)
+   research - 子网投研报告（/research 29，也可直接发 29）
+   archive_list - 列出已建档子网（/archive_list 29 看单个）
    repush - 补推已生成的日报(可跟日期与 tg/feishu)
    retry - 按你的反馈重总结（/retry 反馈内容）
+   kb - 子网知识库周更状态（/kb update 立即校对）
+   keyboard - 重新显示底部按钮栏
    help - 显示帮助
    ```
+   中文别名同样有效：`/社区今日`=community_today、`/社区昨日`=community_yesterday
+   （`/社区` 不带参数也=昨日）、`/水聊`=water、`/投研`=research、
+   `/档案`=archive_list、`/重总结`=retry、`/收起`=hidekeyboard 等。
 
 ### 飞书机器人
 1. 飞书群 → 设置 → 群机器人 → 添加机器人
@@ -516,12 +525,16 @@ python update_subnets.py --no-sync-archive # 只更知识库，不动子网档�
 **Bittensor社区消息日报（dtt版）· 命令触发（v1.20.0 起，不再定时推送）**
 
 发命令才生成：`python pipeline.py community [昨日|今日|日期] [nopush]`，默认昨日。
+TG 窗口用一眼可辨的独立命令：`/社区今日` = 今日 00:00→当前、`/社区昨日` = 昨日 00:00→当前
+（`/community_today` / `/community_yesterday` 同义；`/社区` 不带参数也=昨日；
+`/社区 2026-11-20` 指定日、末尾加 `nopush` 只生成不推送）。
 时间窗与 DC 日报一致：**所选日 00:00 → 当前触发时刻**（每份快照按落地时刻缓存，隔太久自动重取）。
 推送到飞书+TG，标题为「🌐 Bittensor 社区消息日报（dtt版）」。旧调度器 `community_daily.py` 保留但不启动；
 日后想恢复定时，把 `config.community_auto` 设 `true` 并取消 `tg_listener.py` 里 `_start_community_scheduler()` 的注释。
 
-- **一次性准备**：取数走本机 **Edge 浏览器**里 dtt 的登录态。首次需在 Edge 打开
-  `https://dtt.bigcatking.cc/keywords` 登录一次；命令触发时若守护进程空闲退出，重新打开该页即可。
+- **浏览器守护自动拉起（v1.20.2）**：取数走本机 **Edge 浏览器**里 dtt 的登录态。
+  守护默认 15 分钟空闲退出；命令触发取数时若发现离线，会自动按需拉起一次（不常驻），
+  并把浏览器打开到 dtt 站点、必要时用本地凭据自动登录。无需你手动保持守护或反复登录。
 - **长期免手动登录（等价「90 天登录一次」）**：会话有效期由 **dtt 服务端签发**（实测约 7 天，本地代码改不了）。
   想不每隔几天手动登录：在**本地** `config.json` 填 `dtt_email` / `dtt_password`（已 gitignore、不入库、
   不进对话），会话失效时 `auto_login()` 自动重新登录（勾「记住我」）续期——填一次即可长期自动续。

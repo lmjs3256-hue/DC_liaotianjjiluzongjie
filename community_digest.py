@@ -75,6 +75,36 @@ def _relevance(e):
     return score
 
 
+def extract_conflicts(digest):
+    """把正文里散落的「待人工确认」条目抽出来，集中成独立板块。
+
+    返回 (去掉冲突行的正文, 冲突行列表)。这样 AI 就地标注的冲突不会再被长文淹没，
+    推送时置顶成一个「⚠️ 待人工确认」专区，用户一眼可见。
+    """
+    lines = (digest or "").splitlines()
+    conflicts = [ln.strip() for ln in lines if "待人工确认" in ln]
+    kept = [ln for ln in lines if "待人工确认" not in ln]
+    # 抽走条目后可能留下连续空行，压成单个空行
+    body = []
+    for ln in kept:
+        if not ln.strip() and body and not body[-1].strip():
+            continue
+        body.append(ln)
+    return "\n".join(body).strip(), conflicts
+
+
+def build_conflict_section(conflicts):
+    """把冲突条目拼成置顶的醒目专区（飞书/TG 通用，标题加粗）。"""
+    items = []
+    for c in conflicts:
+        c = c.strip()
+        if not c.startswith("-"):
+            c = "- " + c
+        items.append(c)
+    return ("**⚠️ 待人工确认（%d 处 · 社区消息与历史结论冲突，请人工核对后再采信）**\n\n"
+            % len(conflicts)) + "\n".join(items)
+
+
 COMMUNITY_SYSTEM_PROMPT = (
     "你是一名 Bittensor 生态资深研究员，负责把「多平台社区关键词监控」抓到的当日消息，"
     "整理成一份**按子网分组**的中文社区日报。数据来源是 dtt 关键词监控工具，"
@@ -291,14 +321,15 @@ def run_community_day(cfg, day_str, log=print, push=True):
     # 社区日报用自己的提示词控结构，只做基础清洗。
     digest = P.sanitize_digest(digest)
 
-    # 3) 交叉核对：出现「待人工确认」的醒日志 + 正文顶部提示
+    # 3) 交叉核对：把散落在正文各处的「待人工确认」抽出来，置顶成独立专区。
+    #    之前只在顶部写一句泛泛提示、冲突仍埋在长文条目里，群里根本看不见；
+    #    现在正文里的冲突行被移走、集中进「⚠️ 待人工确认」专区，一眼可见。
     flags = [ln.strip() for ln in (digest or "").splitlines() if "待人工确认" in ln]
     if flags:
         log("⚠️⚠️ 社区日报交叉核对：%d 处「待人工确认」（社区消息与历史结论冲突）：%s"
             % (len(flags), " | ".join(flags[:5])))
-        notice = ("⚠️ **本篇含 %d 处「待人工确认」：社区消息与历史档案/投研结论存在冲突，"
-                  "已并列写出，请人工核对后再采信。**\n\n" % len(flags))
-        digest = notice + digest
+        body, _ = extract_conflicts(digest)
+        digest = build_conflict_section(flags) + "\n\n" + body
     else:
         log("✅ 社区日报交叉核对通过（未发现与历史结论的明显冲突）")
 

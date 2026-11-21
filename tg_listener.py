@@ -717,6 +717,20 @@ def _start_kb_scheduler():
         log("知识库周更排程启动失败（忽略，手动 /kb update 仍可用）：%s" % e)
 
 
+def _start_community_scheduler():
+    """启动社区消息日报的每日后台调度（监听启动时调用一次）。"""
+    try:
+        import community_daily as C
+        C.start_thread(
+            P._CFG,
+            notify=lambda t: send(P._CFG.get("telegram_chat_id") or _last_chat_id(), t),
+            log=log,
+            busy=_pipeline_busy,
+        )
+    except Exception as e:
+        log("社区日报排程启动失败（忽略，手动 python pipeline.py community 仍可用）：%s" % e)
+
+
 def _last_chat_id():
     """没有配置 telegram_chat_id 时，退回到最近一次收到指令的会话。"""
     return _LAST_CHAT_ID[0] if _LAST_CHAT_ID[0] else ""
@@ -1281,6 +1295,7 @@ def main():
     if cfg.get("telegram_chat_id"):
         _LAST_CHAT_ID[0] = str(cfg.get("telegram_chat_id"))
     _start_kb_scheduler()
+    _start_community_scheduler()
 
     last_hb = time.time()
     last_ver_check = time.time()

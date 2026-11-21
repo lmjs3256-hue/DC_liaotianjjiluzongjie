@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.18.0"
+__version__ = "1.19.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -3927,14 +3927,15 @@ if __name__ == "__main__":
     ap.add_argument("-V", "--version", action="version",
                     version="DTAO price-talk pipeline v%s" % __version__)
     ap.add_argument("mode", nargs="?", default="daily",
-                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research", "wallet"],
+                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research", "wallet", "community"],
                     help="daily=导出并推送（可跟日期，省略则前一天）；weekly=周报；"
                          "repush=仅补推已生成的日报（不重导/不重算）；"
                          "resummarize=按反馈重总结（日期 反馈内容 [tg|feishu]）；"
                          "chat=水聊总结（[日期] [天数]，只读已有导出、不重新导出）；"
                          "archive=子网建档（[天数|日期…]，只读已有导出，按子网单独存档）；"
                          "research=子网投研（子网编号/名称 [天数] [tg|feishu]，读档案+全网交叉验证）；"
-                         "wallet=人工补录回购地址（子网 地址 [备注]，自动归档不会覆盖）")
+                         "wallet=人工补录回购地址（子网 地址 [备注]，自动归档不会覆盖）；"
+                         "community=社区消息日报（[日期] [nopush]，读 dtt 多平台关键词监控）")
     ap.add_argument("extra", nargs="*",
                     help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）；"
                          "resummarize: 日期 反馈内容 [tg|feishu]；chat: [日期] [天数] [tg|feishu]；"
@@ -4035,6 +4036,22 @@ if __name__ == "__main__":
             addr = rest[1]
             note = " ".join(rest[2:]).strip("'\"")
             SA.add_manual_wallet(SA.get_arc_dir(cfg), sn, addr, note=note, log=log)
+        elif args.mode == "community":
+            # 社区消息日报：取 dtt 多平台关键词监控 -> 按 SN 分组总结 -> 落档 -> 双推
+            import community_digest as CD
+            cfg = load_config()
+            rest = list(args.extra)
+            push = not any(x.lower() in ("nopush", "--no-push") for x in rest)
+            rest = [x for x in rest if x.lower() not in ("nopush", "--no-push")]
+            if rest:
+                day = _resolve_day_alias(rest[0], datetime.timezone(datetime.timedelta(hours=8)))
+            else:
+                day = (datetime.datetime.now(
+                    datetime.timezone(datetime.timedelta(hours=8)))
+                    - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            res = CD.run_community_day(cfg, day, log=log, push=push)
+            log("社区日报完成：%s（%d 条消息，%d 个子网落档）"
+                % (day, res.get("total", 0), res.get("archived_sn", 0)))
         elif args.mode == "research":
             # 子网投研：读本地档案 + 全网抓取交叉验证，生成重要事件跟踪报告
             import subnet_research as SR

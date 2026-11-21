@@ -4,12 +4,13 @@
 > 用 AI 总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.18.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.19.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 **当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
 
 - 🤖 **AI 日报**：AI 把频道讨论总结成结构化日报，**4 个板块**：🔥 必读重点 / 👥 重要人物观点 / 📎 其他细节 / 💡 一句话总结（子网异动统一写进「必读重点」，不再重复列一遍）
+- 🌐 **社区消息日报（v1.19.0）**：接入 dtt 多平台关键词监控（Twitter/X · Telegram · Discord），**与 DC 日报完全隔离**的独立日报。每天定时（默认 08:30）按北京时间取前一日全量命中消息（实测单日 700+ 条），按 SN 分组、每 SN 标来源平台，**过滤误抓的无关英文长文**；同样飞书+TG 双推、彩色 emoji 标记。社区传闻**是线索不是证据**：附历史档案/投研参考，与历史结论矛盾时并列标「⚠️ 待人工确认」，正文顶部提示+标题打标。并按 SN 拆段落进各子网档案 `community_digests[]`（与投研结论 `reports[]` 分开），**供后续投研报告查询参考**——投研读该段时强制要求与链上/数据站交叉核对，不静默采信。取数走本机 Edge 浏览器登录态现取 token（7 天过期，重登一次即可，不落项目文件），daemon 由调度线程保活防空闲退出。命令：`python pipeline.py community [日期] [nopush]`
 - 🔴 **TG 变化值彩色标记（v1.18.0）**：日报里标红的变化值在两个平台分别呈现——飞书保留真红字（`<font color='red'>`），TG 因官方不支持给文字上色，降级成「**彩色 emoji + 粗体**」：`含 +` 判涨用 🔴、`含 -/−` 判跌用 🟢、有数字无涨跌号用 ⚪ 中性点（沿用国内涨红跌绿）。emoji 自带颜色，不受 TG 客户端深浅主题影响。**误判防护**：📰 资讯条目和无数字的标红走纯加粗，绝不加色块（否则 `11-18` 这类日期里的 `-` 会被当成下跌）
 - 🗂 **日报会读子网档案，但只当「判断底子」（v1.10.1）**：总结前先看当天**真的聊到了哪些子网**（按编号/名称/别名识别，只认强命中防张冠李戴），然后只注入两样东西——① **身份行**：`SN41 Almanac（预测市场研究与情报）｜今日提到 6 次`，让模型写得出「**SN41 Almanac**」而不是干巴巴的「某子网」；② **此前判断**：有投研档案的子网，附上它「📌 预期跟踪」里当时在盯的事项（最多 3 条），作为「早期观点」的候选。**档案不是写作素材**：只有当今天的事与它构成「**项目有进展**」（旧事被推进/落地）或「**早期判断被验证**」（被今天的事实证实或推翻）时，才准用一句话带过，**否则一个字都不写**——日报主体永远是当天谈的话题。**不给历史原话**是实测后的取舍：早先试过用中文 2-gram 做关键词重叠来挑「相关旧记录」，结果最高分的全是「28-gm 41-almanac 51-lium 53-engy」这种罗列名单的泛论（因为含多个子网名而误判高度相关），剔掉名称词后重叠又几乎归零，这种匹配不可靠，宁可不给；何况 `context_days`（默认 2 天）本来就把最近的聊天给模型了。实测 545 字（约输入 1%），初版 1627 字里一半是噪声，砍掉后日报主体与篇幅均无变化
 - 🔍 **日报交叉核对投研报告，矛盾标「待人工确认」（v1.17.0）**：日报总结时，除子网档案外，还会从**两个来源**收集当日聊到子网的历史投研要点——① 本项目档案的 `reports`，② `config.research_ref_dirs` 指向的外部投研库（如 `E:\子网投研档案\bittensor-subnet-research`）里的 `SNxx/*.md`，兼容本项目 4 段报告与外部 8 板块深度报告。**这些是历史快照，绝不当今日事实**：提示词硬性要求「今日群聊/数据与其明显矛盾时，必须写『⚠️ 待人工确认：投研（日期）称 X，但今日 Y』」，把冲突交人工判断、不自行采信任何一方；没矛盾就一个字别提。生成后还会机器核验：含该标记的日报**正文顶部加醒目提示、推送标题加「⚠️待人工核对」、写醒目日志**——例如投研曾写「所有者回购为零/团队未回购」，今日群里却说「已启动回购」，就会被标出来供人工核对，而不是被静默采信或忽略
@@ -182,6 +183,11 @@ python pipeline.py
   "kb_update_weekday": 0,                          // 周更的星期几：0=周一 … 6=周日
   "kb_update_hour": 9,                             // 周更的整点（北京时间）
   "kb_update_notify": true,                        // 周更完成后把变更摘要推到 TG
+  "community_auto": true,                          // 社区消息日报每日自动生成（v1.19.0，挂在监听进程；需先在 Edge 登录 dtt）
+  "community_hour": 8,                             // 社区日报的整点（北京时间，默认 08:30，与 DC 日报错开）
+  "community_minute": 30,                          // 社区日报的分钟
+  "pw_browser_cli": "",                            // 浏览器 CLI 路径（留空用默认：~/.workbuddy/skills/playwright-browser-use/pw-browser）
+  "community_output_dir": "exports/community",     // 社区日报取数 JSON 与 digest 的落地目录
   "llm_verify_pass": true,                         // 两遍成稿：第二遍带原文校对（数字归属/人物-子网归属/残留英文），失败自动回退初稿
   "compare_profiles": [],                          // 双模型对比模式：填 2 个以上模型档案，日报会分别生成、分别推送（见下方「对比模式」）
   "llm_direct": true,                              // 国内大模型 API 直连、不走代理（默认开，避免被 Clash 节点掐断）
@@ -293,6 +299,9 @@ python pipeline.py research 29 21         # 回看最近 21 天的群聊观点�
 python pipeline.py research hotfloat tg   # 用子网名也行（hotfloat=SN29 / trishool=SN23 / chutes=SN64）；只推 TG
 python pipeline.py research 9             # 本地没档案的子网也能跑：自动走纯全网投研
 python pipeline.py wallet 53 5Ccg... '已链上核对的回购钱包'  # 人工补录回购地址(自动归档不覆盖；也可在TG直接发「地址，8备注」补录)
+python pipeline.py community              # 社区消息日报：取 dtt 前一日消息→按SN分组→落档→双推（默认每天08:30自动跑）
+python pipeline.py community 2026-11-20   # 指定日期生成；加 nopush 只生成不推送
+python community_daily.py                 # 查看社区日报调度状态；加 now 立即跑一次
 python pipeline.py repush 2026-10-23      # 只把已生成的日报重推一遍(不重导)
 python pipeline.py repush 2026-10-23 tg   # 只重推 TG
 python pipeline.py resummarize 2026-10-23 "orange 说的第一涨幅是 SN27"  # 按反馈重总结(不重导)
@@ -500,6 +509,20 @@ python update_subnets.py --no-sync-archive # 只更知识库，不动子网档�
 
 调度器跑在监听进程里（`kb_weekly.py` 的后台线程），所以只要监听活着就会自动周更；
 状态记录在 `exports/_kb_state.json`。
+
+**社区消息日报每天自动跑（v1.19.0 起，默认开启）**
+
+dtt 多平台关键词监控的社区日报也挂在监听进程（`community_daily.py` 后台线程），
+排程规则与周更一致（每天 08:30 北京时间，配置 `community_auto` / `community_hour` /
+`community_minute`；补跑、让路、30 分钟失败退避；状态在 `exports/community/_state.json`）。
+
+- **一次性准备（重要）**：取数走本机 **Edge 浏览器**里 dtt 的登录态（不用账号密码、不落项目文件）。
+  首次需在 Edge 打开 `https://dtt.bigcatking.cc/keywords` 并登录一次；之后调度线程每 10 分钟 ping
+  浏览器守护进程保活，防止它 15 分钟空闲退出丢会话。
+- **token 7 天过期**：过期后定时取数会失败并推一条提醒——届时只需在 Edge 重新登录一次即可，
+  代码和配置都不用改。`python community_daily.py` 看排程/上次成功/待补跑原因，`... now` 立即跑一次。
+- **与 DC 日报隔离**：独立数据源、独立提示词、独立文件（`exports/community/`），双推但互不污染；
+  按 SN 拆段落档到各子网档案 `community_digests[]`，供投研报告查询参考。
 
 **怎么喂给日报**：不是把整表塞进提示词。生成时只挑**当天消息里提到的编号**（显式 `SNxx`、1–256 的裸数字、
 以及只写名字的「Engy」反查编号），**最多 45 条**，并附硬约束：
@@ -820,6 +843,8 @@ A：不会。`config.json`、日志、`exports/`、DiscordChatExporter 程序都
 | `install_task_login.ps1` | 注册任务计划程序自启（更稳，失败自动重启；**需以管理员身份运行**） |
 | `DEPLOY_HOMEPC.md` | 部署到另一台常开 Windows 电脑的完整教程 |
 | `exports/` | 导出的聊天记录和生成的日报（**不入库**） |
+| `exports/community/`（v1.19.0） | 社区消息日报：`community_日期.json`（dtt 原始取数）、`community_日期.digest.txt`（日报）、`_state.json`（调度状态）（**不入库**） |
+| `community_fetch.py` / `community_digest.py` / `community_daily.py`（v1.19.0） | 社区日报三件套：浏览器取数 / 按SN分组生成+落档+双推 / 每日定时调度 |
 | `exports/watchlist_*.txt` `exports/watchlist_all.md` | 自动沉淀的潜力股跟踪文件（**不入库**） |
 | `E:\子网投研档案\subnet_archive\`（v1.17.0 起，旧版在项目内 `subnet_archive/`） | 子网档案目录（`index.json` 全局索引、`_trans_cache.json` 译文缓存、`SNxx/archive.json` + `archive.md` + `research_*.md`）（**不入库**）；路径由 `config.archive_dir` 配置，可与 `E:\子网投研档案\bittensor-subnet-research` 外部投研库并列存放 |
 | `run.log` / `tg_listener.log` | 运行日志（**不入库**） |

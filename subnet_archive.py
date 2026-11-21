@@ -733,6 +733,21 @@ def build_md(arc, max_lines_per_day=400):
             else:
                 lines.append("")
 
+    # 社区消息日报线索区（未经证实的公开传闻，与投研结论分开）
+    cd = arc.get("community_digests") or []
+    if cd:
+        lines += ["## 🌐 社区消息线索（dtt 关键词监控，未经证实）", "",
+                  "> 来自 Twitter/X · Telegram · Discord 的公开讨论，**是线索不是证据**："
+                  "传闻/喊单/爆料混在其中，投研引用时须与链上/数据站交叉核对，冲突标「待人工确认」。", ""]
+        for c in cd[:20]:
+            plats = "、".join(c.get("platforms") or []) or "多平台"
+            lines.append("### %s · %s" % (c.get("date") or "—", plats))
+            lines.append(_clip(c.get("excerpt") or "", 1600))
+            if c.get("source_file"):
+                lines.append("")
+                lines.append("- 日报全文：`%s`" % c["source_file"])
+            lines.append("")
+
     wdays = arc.get("weak_days") or {}
     if wdays:
         n_weak = sum(len(v) for v in wdays.values())
@@ -883,6 +898,50 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
     log("投研落档：SN%d 档案%s，已记录 %s 的报告（累计 %d 份）"
         % (int(sn), "已更新" if existed else "已新建",
            date_str, len(arc["reports"])))
+    return arc
+
+
+def attach_community_digest(cfg, day, sn, excerpt, platforms=None, source_file="",
+                            log=print):
+    """把「社区消息日报」里某子网的一段，落进该子网档案的 `community_digests[]`。
+
+    与 `reports[]`（投研研究结论）刻意分开：社区消息是**未经证实的公开传闻/爆料**，
+    性质不同，不能混进「此前投研结论」里被当成研究判断引用。投研侧单独读本字段，
+    并强制标注「社区线索、不可当证据、冲突待人工确认」。
+
+    - 同一 (date, sn) 只保留一条，重跑覆盖；
+    - excerpt 只留该子网的片段（不是整篇日报），避免一个子网塞进全部内容；
+    - 档案不存在时新建最小档案。
+    """
+    arc_dir = _archive_dir_of(cfg)
+    os.makedirs(arc_dir, exist_ok=True)
+    now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+    sn = int(sn)
+    arc = load_archive(arc_dir, sn)
+    if not arc:
+        arc = {
+            "sn": sn, "name": "（知识库未收录）", "biz": "", "url": "", "github": "",
+            "created_at": now, "days": {}, "weak_days": {}, "reports": [],
+            "buyback_wallets": [],
+            "note": "本档案由社区消息日报创建（尚无群聊归档/投研报告）",
+        }
+    rec = {
+        "date": day,
+        "sn": sn,
+        "platforms": platforms or [],
+        "excerpt": (excerpt or "").strip(),
+        "source_file": source_file,
+        "generated_at": now,
+        "kind": "community_digest",
+    }
+    lst = [x for x in (arc.get("community_digests") or [])
+           if not (x.get("date") == day and x.get("sn") == sn)]
+    lst.insert(0, rec)
+    arc["community_digests"] = lst[:40]
+    arc["updated_at"] = now
+    save_archive(arc_dir, arc)
+    save_md(arc_dir, arc)
+    log("社区日报落档：SN%d ← %s 社区线索（累计 %d 条）" % (sn, day, len(arc["community_digests"])))
     return arc
 
 

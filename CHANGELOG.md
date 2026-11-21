@@ -8,9 +8,24 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.18.0** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.19.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.19.0 — 2026-11-21
+
+**新增「Bittensor 社区消息日报」：接入 dtt 多平台关键词监控，与 DC 日报完全隔离**
+
+- **数据源**：dtt.bigcatking.cc（Twitter/X · Telegram · Discord 关键词监控）。取数走本机 Edge 浏览器守护进程在登录态里现取 Bearer token（7 天过期），token 从会话现读、不落项目文件；过期只需在浏览器重登一次，代码配置都不用改。
+- **取数模块 `community_fetch.py`**：调 `/api/events/list` 按北京时间自然日游标翻页取全天事件（单日实测 712 条），`/api/keywords` 取关键词→SN 组映射；落 `exports/community/community_日期.json`。会话失效/daemon 离线给明确提示。
+- **日报模块 `community_digest.py`**：按 SN 分组、每 SN 标来源平台与时间、过滤误抓的无关英文长文（相关性打分）；独立提示词（社区热点/子网动态/人物观点/一句话总结），**不复用会强制 DC 板块结构的 polish/compress**。飞书+TG 双推，沿用彩色 emoji 涨跌标记。
+- **交叉核对**：社区传闻是线索不是证据。附历史档案/投研参考块，社区说法与历史结论矛盾时并列标「⚠️ 待人工确认」，正文顶部提示 + 推送标题打标。
+- **落档供投研参考**：按 SN 拆段写入各子网档案的新字段 `community_digests[]`（与投研结论 `reports[]` 刻意分开），`archive.md` 增「🌐 社区消息线索」段；投研 `build_input` 注入该段并要求与链上/数据站交叉核对，冲突标待人工确认、无证据写明「社区传闻未获证实」。
+- **定时 `community_daily.py`**：仿 kb_weekly 挂监听进程后台线程，默认每天 08:30 北京时间（config `community_auto`/`community_hour`/`community_minute`），补跑+失败退避+让路流水线；每轮 ping 浏览器 daemon 保活（防 15 分钟空闲退出丢会话）。
+- **CLI**：`python pipeline.py community [日期] [nopush]`；`/社区状态` 由调度器提供 status_text。
+- 同步 README / CHANGELOG / 版本号 1.18.0→1.19.0。
 
 ---
 

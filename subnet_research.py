@@ -3190,6 +3190,31 @@ def _wallet_block(arc):
     return "\n".join(L)
 
 
+def _community_block(arc, limit=4, chars=700):
+    """把档案里的「社区消息日报线索」拼成提示词小段。
+
+    这些是 dtt 关键词监控抓来的多平台公开讨论（传闻/爆料/喊单混杂），
+    **不是证据、不是投研结论**。投研只能拿它当线索，必须与外部源交叉核对；
+    若与链上/数据站结论冲突，须在报告里并列标「待人工确认」，不得静默采信。
+    """
+    if not arc:
+        return ""
+    cd = [c for c in (arc.get("community_digests") or []) if isinstance(c, dict)]
+    if not cd:
+        return ""
+    L = ["档案里的社区消息线索 %d 条（dtt 关键词监控，来自 Twitter/X·Telegram·Discord；"
+         "**未经证实，是线索不是证据**）：" % len(cd)]
+    for c in cd[:limit]:
+        plats = "、".join(c.get("platforms") or []) or "多平台"
+        exc = re.sub(r"\s+", " ", (c.get("excerpt") or "")).strip()
+        L.append("- 【%s · %s】%s" % (c.get("date") or "—", plats, exc[:chars]))
+    L.append("**使用规则**：只能当线索。若上述社区说法与本次链上/数据站/官方源结论**矛盾**，"
+             "必须在报告里并列写出「社区（日期）称X，但链上/数据站显示Y，待人工确认」，"
+             "不得采信任何一方、也不得删掉线索；若无外部证据支持，须明确写「社区传闻，未获证实」。"
+             "禁止把社区消息当今日确定的事实或当成已验证的事件。")
+    return "\n".join(L)
+
+
 def _signal_block(sources):
     """硬规则信号：由代码判定、直接写进提示词，不允许模型忽略。
 
@@ -3286,6 +3311,8 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
     # 档案里登记的回购地址（群聊推断 / 人工补录）：仅作线索。数据站零回购但档案有地址时，
     # 必须并列呈现冲突，不能一边倒写「团队没回购」。
     _wallet_txt = _wallet_block(_pa)
+    # 社区消息日报线索：多平台公开讨论，未经证实。单独成段，强制与链上/数据站交叉核对。
+    _community_txt = _community_block(_pa)
     body = ("\n===== 一、链上/数据站事实（抓取原文）=====\n" + _ext_block(sources, meta)
             + "\n\n===== 二、交叉验证矩阵（同指标多源并列）=====\n" + _consensus_block(build_consensus(sources)))
     if n:
@@ -3296,6 +3323,8 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
         body += "\n\n===== 收入与回购（链上口径，报告必须单独成段）=====\n" + inc_txt
     if _wallet_txt:
         body += "\n\n===== 档案登记的回购地址（仅线索，不代表已链上确认）=====\n" + _wallet_txt
+    if _community_txt:
+        body += "\n\n===== 社区消息线索（多平台公开讨论，未经证实，须交叉核对）=====\n" + _community_txt
     if hist:
         body += "\n\n===== 此前投研结论（历史留档）=====\n" + hist
     # 上次的「预期跟踪」逐条清单：报告必须逐条打钩（兑现/证伪/未触发）

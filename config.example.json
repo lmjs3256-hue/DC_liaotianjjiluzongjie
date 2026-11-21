@@ -50,5 +50,8 @@
   "kb_update_notify": true,
   "research_ref_dirs": [
     "E:/子网投研档案/bittensor-subnet-research"
-  ]
+  ],
+  "community_auto": true,
+  "community_hour": 8,
+  "community_minute": 30
 }

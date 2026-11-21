@@ -11,6 +11,9 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /weekly                       周报
   /社区今日（/community_today） 今日社区日报：今日00:00→当前
   /社区昨日（/community_yesterday） 昨日社区日报：昨日00:00→当前
+  /社区确认 55 收入属实          确认冲突：把结论写进 SN55 档案（默认已核实）
+  /社区确认 64 谣言 已推翻        推翻某条冲突（末尾加「已推翻」）
+  /社区重推                      按已确认结论重推社区日报确认版（不重新取数）
   /水聊（/water）                水聊侧记：只挑被日报过滤掉的闲聊，单独成一条
   /水聊 昨日 3                   指定日期 / 连续天数（只读已有导出，不重新导出）
   /watch                       查看潜力观察（默认最新一天，可跟天数 /watch 7 或 /watch all；同步推飞书）
@@ -83,6 +86,11 @@ HELP = (
     "   /社区今日     取今日00:00→当前，总结后飞书+TG双推\n"
     "   /社区昨日     取昨日00:00→当前（/社区 不带参数也=昨日）\n"
     "   可加日期：/社区 2026-11-20；末尾加 nopush 只生成不推送\n"
+    "   🧑‍⚖️ 冲突人工确认闭环（专区冲突核对后）：\n"
+    "     /社区确认 55 收入属实，已查链上   ← 把结论写进 SN55 档案（默认「已核实」）\n"
+    "     /社区确认 64 取消回购是谣言 已推翻 ← 末尾加「已推翻」标为推翻\n"
+    "     /社区重推                        ← 按已确认结论重推确认版（不重新取数/不调AI）\n"
+    "     确认后该结论会被投研和确认版日报引用；可直接发 SN 号确认最近一份日报的冲突。\n"
     "━━ 子网档案 / 投研 ━━\n"
     "（建档全自动：每次导出日报时自动把提到的子网存档，已建档的增量补充、\n"
     "  未建档的自动新建，无需手动操作）\n"
@@ -624,6 +632,28 @@ def _run_pipeline_sync(args, chat_id):
                 receipt += "\n⚠️ 含 %s 处「待人工确认」，请核对正文后再采信" % mf.group(1)
             safe_send(chat_id, receipt)
             return
+        if args and args[0] == "community_confirm":
+            mc = re.search(r"社区冲突人工确认完成：\s*(\S+)\s+SN(\d+)\s+(已核实|已推翻)", out)
+            if mc:
+                day, sn, tag = mc.groups()
+                safe_send(chat_id, "✅ %s SN%s 冲突已标记「%s」并写入子网档案。\n"
+                          "该结论会被投研和确认版日报引用。发 /社区重推 可重推带确认标记的确认版。"
+                          % (day, sn, tag))
+            else:
+                safe_send(chat_id, "✅ 人工确认已写入档案（详情见 run.log）")
+            return
+        if args and args[0] == "community_reconfirm":
+            mr = re.search(r"社区确认版重推完成：\s*(\S+)（(\d+) 处已人工确认）", out)
+            if mr:
+                day, cnt = mr.groups()
+                safe_send(chat_id, "✅ 社区日报确认版已重推（飞书 + TG）：%s\n"
+                          "已带 %s 处人工确认标记，专区置顶显示谁被核实/推翻。" % (day, cnt))
+            elif "社区确认版重推跳过" in out:
+                safe_send(chat_id, "⚠️ " + _clean_tail(out).split("跳过：")[-1].strip()
+                          + "\n（先用 /社区确认 SN编号 结论 写入确认，再 /社区重推）")
+            else:
+                safe_send(chat_id, "🌐 确认版重推流程已结束（详情见群内推送或 run.log）")
+            return
         stat = ""
         m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
         if m:
@@ -779,6 +809,19 @@ def _latest_digest_date():
         if m:
             dates.append(m.group(1))
     return max(dates) if dates else None
+
+
+def _latest_community_day():
+    """扫描 exports/community/community_YYYY-MM-DD.digest.txt，返回最新日期。"""
+    out_dir = os.path.join(HERE, "exports", "community")
+    files = glob.glob(os.path.join(out_dir, "community_*.digest.txt"))
+    dates = []
+    for f in files:
+        m = re.search(r"community_(\d{4}-\d{2}-\d{2})\.digest\.txt$", f)
+        if m:
+            dates.append(m.group(1))
+    return max(dates) if dates else (datetime.datetime.now(
+        datetime.timezone(datetime.timedelta(hours=8))) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
 
 
 YESTERDAY_ALIASES = {"昨日", "昨天", "yesterday", "latest", "最新", "y"}
@@ -1084,6 +1127,36 @@ def handle(text, chat_id):
             preset = []
         send_async(chat_id, "🌐 收到，正在生成 Bittensor 社区消息日报（dtt版），稍等…")
         run_pipeline(["community"] + preset + parts[1:], chat_id, quiet=True)
+    elif cmd in ("社区确认", "community_confirm", "确认冲突", "核实"):
+        # 人工确认社区日报冲突：/社区确认 SN编号 结论 [已推翻]
+        #   例：/社区确认 55 收入数字属实，已查链上
+        #       /社区确认 64 取消回购是谣言 已推翻
+        # 写进该 SN 档案 community_digests[].confirm，供投研与确认版日报引用。
+        rest = parts[1:]
+        if len(rest) < 2 or not re.match(r"^\d{1,4}$", rest[0]):
+            send_async(chat_id, "用法：/社区确认 SN编号 结论 [已推翻]\n"
+                          "例：/社区确认 55 收入数字属实，已查链上\n"
+                          "    /社区确认 64 取消回购是谣言 已推翻（默认为「已核实」）\n"
+                          "默认确认最近一份社区日报的日期；可在 SN 前加日期指定。")
+            return
+        sn = rest[0]
+        note = " ".join(rest[1:]).strip()
+        status = "confirmed"
+        if note.endswith("已推翻") or note.endswith("不实"):
+            status = "refuted"
+            note = re.sub(r"(已推翻|不实)\s*$", "", note).strip()
+        # 默认对最近一份社区日报的日期确认（不重新取数）
+        day = _latest_community_day()
+        run_pipeline(["community_confirm", day, sn, note,
+                      "refuted" if status == "refuted" else "confirmed"], chat_id, quiet=True)
+    elif cmd in ("社区重推", "community_reconfirm", "确认版重推"):
+        # 按档案人工确认重推社区日报确认版（不重新取数/不调 AI）
+        rest = parts[1:]
+        day = rest[0] if rest and re.match(r"^\d{4}-\d{2}-\d{2}$", rest[0]) else _latest_community_day()
+        push = not any(x.lower() in ("nopush", "--no-push") for x in rest)
+        args = ["community_reconfirm", day] + ([] if push else ["nopush"])
+        send_async(chat_id, "🌐 收到，正在按已确认结论重推社区日报确认版，稍等…")
+        run_pipeline(args, chat_id, quiet=True)
     elif cmd in ("chat", "shuichat", "water", "水聊", "闲聊", "水贴"):
         # /水聊                  -> 最近一份导出记录的水聊侧记
         # /水聊 昨日              -> 指定日期（可跟天数：/水聊 昨日 3）

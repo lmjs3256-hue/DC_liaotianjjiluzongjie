@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.20.6"
+__version__ = "1.20.7"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -3927,7 +3927,7 @@ if __name__ == "__main__":
     ap.add_argument("-V", "--version", action="version",
                     version="DTAO price-talk pipeline v%s" % __version__)
     ap.add_argument("mode", nargs="?", default="daily",
-                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research", "wallet", "community"],
+                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research", "wallet", "community", "community_confirm", "community_reconfirm"],
                     help="daily=导出并推送（可跟日期，省略则前一天）；weekly=周报；"
                          "repush=仅补推已生成的日报（不重导/不重算）；"
                          "resummarize=按反馈重总结（日期 反馈内容 [tg|feishu]）；"
@@ -3936,7 +3936,9 @@ if __name__ == "__main__":
                          "research=子网投研（子网编号/名称 [天数] [tg|feishu]，读档案+全网交叉验证）；"
                          "wallet=人工补录回购地址（子网 地址 [备注]，自动归档不会覆盖）；"
                          "community=Bittensor社区消息日报（dtt版）（[昨日|今日|日期] [nopush]，默认昨日；"
-                         "取所选日00:00到当前，命令触发不定时；会话失效可用本地凭据自动续期）")
+                         "取所选日00:00到当前，命令触发不定时；会话失效可用本地凭据自动续期）；"
+                         "community_confirm=确认社区日报冲突（日期 SN编号 结论 [confirmed|refuted]）；"
+                         "community_reconfirm=按人工确认重推确认版（[日期] [nopush]）")
     ap.add_argument("extra", nargs="*",
                     help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）；"
                          "resummarize: 日期 反馈内容 [tg|feishu]；chat: [日期] [天数] [tg|feishu]；"
@@ -4053,6 +4055,46 @@ if __name__ == "__main__":
             res = CD.run_community_day(cfg, day, log=log, push=push)
             log("社区日报完成：%s（%d 条消息，%d 个子网落档）"
                 % (day, res.get("total", 0), res.get("archived_sn", 0)))
+        elif args.mode == "community_confirm":
+            # 人工确认社区日报的某条冲突：写入对应子网档案 community_digests[].confirm
+            # 用法：community_confirm 日期 SN编号 结论 [confirmed|refuted]
+            #   例：community_confirm 2026-11-21 55 收入数字属实，已查链上确认
+            import subnet_archive as SA
+            cfg = load_config()
+            rest = list(args.extra)
+            if len(rest) < 3:
+                raise RuntimeError("community_confirm 需要：日期 SN编号 结论 [confirmed|refuted]，"
+                                   "例如：python pipeline.py community_confirm 2026-11-21 55 收入属实")
+            day = _resolve_day_alias(rest[0], datetime.timezone(datetime.timedelta(hours=8)))
+            sn = rest[1]
+            if not re.match(r"^\d{1,4}$", sn):
+                raise RuntimeError("SN 编号必须是数字，收到：%s" % sn)
+            status = "confirmed"
+            note_tokens = rest[2:]
+            if note_tokens and note_tokens[-1].lower() in ("confirmed", "refuted", "confirm", "refute", "推翻", "不实"):
+                status = "refuted" if note_tokens[-1].lower() in ("refuted", "refute", "推翻", "不实") else "confirmed"
+                note_tokens = note_tokens[:-1]
+            note = " ".join(note_tokens).strip("'\"")
+            if not note:
+                raise RuntimeError("确认结论（批注）不能为空")
+            SA.confirm_community_digest(cfg, day, int(sn), note, status=status, log=log)
+            tag = "已核实" if status == "confirmed" else "已推翻"
+            log("社区冲突人工确认完成：%s SN%s %s（%s）" % (day, sn, tag, note[:80]))
+        elif args.mode == "community_reconfirm":
+            # 按档案人工确认重推社区日报确认版（不重新取数/不调 AI）
+            import community_digest as CD
+            cfg = load_config()
+            rest = list(args.extra)
+            push = not any(x.lower() in ("nopush", "--no-push") for x in rest)
+            rest = [x for x in rest if x.lower() not in ("nopush", "--no-push")]
+            day = _resolve_day_alias(rest[0], datetime.timezone(datetime.timedelta(hours=8))) if rest else \
+                  (datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+                   - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            res = CD.push_confirmed_version(cfg, day, log=log, push=push)
+            if res.get("ok"):
+                log("社区确认版重推完成：%s（%d 处已人工确认）" % (day, res.get("confirmed_count", 0)))
+            else:
+                log("社区确认版重推跳过：%s" % res.get("reason"))
         elif args.mode == "research":
             # 子网投研：读本地档案 + 全网抓取交叉验证，生成重要事件跟踪报告
             import subnet_research as SR

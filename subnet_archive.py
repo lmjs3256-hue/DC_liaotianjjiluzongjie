@@ -742,6 +742,11 @@ def build_md(arc, max_lines_per_day=400):
         for c in cd[:20]:
             plats = "、".join(c.get("platforms") or []) or "多平台"
             lines.append("### %s · %s" % (c.get("date") or "—", plats))
+            # 人工确认状态（/社区确认 写入）：一眼可见哪条已核实/已推翻
+            cf = c.get("confirm") or {}
+            if cf.get("status"):
+                tag = "✅ 人工已核实" if cf["status"] == "confirmed" else "❌ 人工已推翻"
+                lines.append("**%s（%s）**：%s" % (tag, cf.get("at") or "—", cf.get("note") or "（无批注）"))
             lines.append(_clip(c.get("excerpt") or "", 1600))
             if c.get("source_file"):
                 lines.append("")
@@ -943,6 +948,71 @@ def attach_community_digest(cfg, day, sn, excerpt, platforms=None, source_file="
     save_md(arc_dir, arc)
     log("社区日报落档：SN%d ← %s 社区线索（累计 %d 条）" % (sn, day, len(arc["community_digests"])))
     return arc
+
+
+def confirm_community_digest(cfg, day, sn, note, status="confirmed", log=print):
+    """把人工对某日某 SN 社区线索的确认结论写进该子网档案。
+
+    `/社区确认 SN55 收入属实` 走这里：status=confirmed（已核实）或 refuted（已推翻），
+    note 是人工批注。写入 community_digests[] 中 (date,sn) 对应条目的 `confirm` 字段。
+    若该 (date,sn) 尚无社区线索条目，则新建一条最小条目挂上确认（避免结论无处可写）。
+    同一 (date,sn) 重跑覆盖（再次确认以最新为准）。
+    """
+    arc_dir = _archive_dir_of(cfg)
+    os.makedirs(arc_dir, exist_ok=True)
+    now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+    sn = int(sn)
+    status = "confirmed" if str(status).lower() in ("confirmed", "confirm", "yes", "1", "true") else \
+             ("refuted" if str(status).lower() in ("refuted", "refute", "no", "0", "false", "推翻", "不实") else "confirmed")
+    arc = load_archive(arc_dir, sn)
+    if not arc:
+        arc = {
+            "sn": sn, "name": "（知识库未收录）", "biz": "", "url": "", "github": "",
+            "created_at": now, "days": {}, "weak_days": {}, "reports": [],
+            "buyback_wallets": [],
+            "note": "本档案由人工确认社区线索时创建",
+        }
+    lst = arc.get("community_digests") or []
+    idx = next((i for i, x in enumerate(lst)
+                if x.get("date") == day and x.get("sn") == sn), None)
+    if idx is None:
+        rec = {"date": day, "sn": sn, "platforms": [], "excerpt": "",
+               "generated_at": now, "kind": "community_digest"}
+        lst.insert(0, rec)
+        idx = 0
+    lst[idx]["confirm"] = {"status": status, "note": (note or "").strip(), "at": now}
+    arc["community_digests"] = lst[:40]
+    arc["updated_at"] = now
+    save_archive(arc_dir, arc)
+    save_md(arc_dir, arc)
+    tag = "已核实" if status == "confirmed" else "已推翻"
+    log("社区线索人工确认：SN%d %s ← %s（%s）" % (sn, day, tag, (note or "")[:60]))
+    return arc
+
+
+def get_community_confirms(cfg, day):
+    """取某日所有已被人工确认的社区线索：{sn: {status, note, at}}。
+
+    供确认版日报渲染专区时查每条冲突的确认状态。扫描各 SN 档案的
+    community_digests[]（按 source_file 文件名也可定位，但这里直接按 date 匹配）。
+    """
+    arc_dir = _archive_dir_of(cfg)
+    out = {}
+    if not os.path.isdir(arc_dir):
+        return out
+    for entry in os.listdir(arc_dir):
+        # 档案目录名是 SN55 / SN8 这种格式（也可能纯数字）
+        mdir = re.match(r"^(?:SN)?(\d{1,4})$", entry, re.I)
+        if not mdir or not os.path.isdir(os.path.join(arc_dir, entry)):
+            continue
+        arc = load_archive(arc_dir, int(mdir.group(1)))
+        for c in (arc.get("community_digests") or []):
+            if c.get("date") != day:
+                continue
+            cf = c.get("confirm") or {}
+            if cf.get("status"):
+                out[int(mdir.group(1))] = {"status": cf["status"], "note": cf.get("note") or "", "at": cf.get("at") or ""}
+    return out
 
 
 def refresh_index(arc_dir):

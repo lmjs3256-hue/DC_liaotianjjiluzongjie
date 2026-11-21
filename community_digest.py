@@ -93,15 +93,26 @@ def extract_conflicts(digest):
     return "\n".join(body).strip(), conflicts
 
 
-def build_conflict_section(conflicts):
+def build_conflict_section(conflicts, confirms=None):
     """把冲突条目拼成置顶的醒目专区（飞书/TG 通用，标题加粗）。
 
     AI 按提示词输出结构化格式：
         ⚠️待人工确认｜SN编号 子网名｜社区：<...>｜档案：<...>｜冲突：<...>
     这里解析成逐字段的多行板块，让「哪个子网/社区说啥/档案记啥/矛盾在哪」一眼可见。
     旧格式（无 ｜ 分隔）降级为原样列出，不丢内容。
+
+    confirms: 可选 {sn(int): {status, note, at}}，来自子网档案的人工确认。
+    有确认的冲突在末尾追加「✅ 人工已核实 / ❌ 人工已推翻 + 批注」，供确认版重推。
     """
-    header = "**⚠️ 待人工确认（%d 处 · 社区消息与历史档案结论冲突，请核对后再采信）**\n\n" % len(conflicts)
+    confirms = confirms or {}
+    n_confirmed = sum(1 for k, v in confirms.items() if v.get("status") == "confirmed")
+    n_refuted = sum(1 for k, v in confirms.items() if v.get("status") == "refuted")
+    title_bits = ["%d 处 · 社区消息与历史档案结论冲突" % len(conflicts)]
+    if n_confirmed or n_refuted:
+        title_bits.append("已人工确认 %d 处（核实 %d / 推翻 %d）" % (n_confirmed + n_refuted, n_confirmed, n_refuted))
+    else:
+        title_bits.append("请核对后再采信")
+    header = "**⚠️ 待人工确认（%s）**\n\n" % "，".join(title_bits)
     blocks = []
     for i, c in enumerate(conflicts, 1):
         c = c.strip().lstrip("-").strip()
@@ -120,6 +131,10 @@ def build_conflict_section(conflicts):
                 fields[key] = p[len(key) + 1:].strip()
             elif not fields["sn"] and re.search(r"\d", p):
                 fields["sn"] = p.strip()
+        # 从 SN 字段提取编号，查人工确认
+        msn = re.search(r"(\d+)", fields["sn"])
+        sn = int(msn.group(1)) if msn else None
+        cf = confirms.get(sn) if sn is not None else None
         if fields["社区"] and fields["档案"]:
             # 结构化成功：逐字段分行展示
             lines = ["**%d）%s**" % (i, fields["sn"] or "SN？")]
@@ -129,10 +144,17 @@ def build_conflict_section(conflicts):
                 lines.append("　档案记录：%s" % fields["档案"])
             if fields["冲突"]:
                 lines.append("　冲突点：%s" % fields["冲突"])
+            if cf:
+                tag = "✅ 人工已核实" if cf.get("status") == "confirmed" else "❌ 人工已推翻"
+                lines.append("　%s（%s）：%s" % (tag, cf.get("at") or "—", cf.get("note") or "（无批注）"))
             blocks.append("\n".join(lines))
             continue
-        # 降级：旧格式原样列出
-        blocks.append("**%d）** %s" % (i, c))
+        # 降级：旧格式原样列出（若有确认也追加上）
+        line = "**%d）** %s" % (i, c)
+        if cf:
+            tag = "✅ 人工已核实" if cf.get("status") == "confirmed" else "❌ 人工已推翻"
+            line += "\n　%s（%s）：%s" % (tag, cf.get("at") or "—", cf.get("note") or "（无批注）")
+        blocks.append(line)
     return header + "\n\n".join(blocks)
 
 
@@ -155,6 +177,10 @@ COMMUNITY_SYSTEM_PROMPT = (
     "下接 1-3 条要点；子网名以输入里的名称对照为准，查不到就只写编号，不要编名字。"
     "按消息量与重要性排序，只写有价值的前若干个，不必全部列出）\n"
     "**👀 人物与观点**（点名开发者/核心成员的重要表态，标平台；普通群友无关发言不列；没有就省略）\n"
+    "　用户名写法：Discord 等平台的 `名字_四位数字`（如 `p383_54249`）是「显示名+辨识码」，"
+    "统一写成 **@显示名**（如 **@p383**），去掉 `_数字` 后缀和 `备注:` 之类监控标签，"
+    "保留 @ 前缀让人一眼认出是用户名，别把辨识码当成名字的一部分；"
+    "原文若有真实姓名/公开别名（如 Isabella Liu）则用真名，不要改成编号。\n"
     "**💡 一句话总结**（当天社区情绪与主线，一句收束）\n"
     "\n"
     "【交叉核对：发现矛盾必须标出来，交人工确认（格式严格）】\n"
@@ -377,6 +403,14 @@ def run_community_day(cfg, day_str, log=print, push=True):
     dp = os.path.join(out_dir, "community_%s.digest.txt" % day_str)
     with open(dp, "w", encoding="utf-8") as f:
         f.write(digest.strip())
+    # 原始冲突行存 sidecar：确认版重推时据此重渲染专区（带人工确认状态），
+    # 不必重新调 AI / 重新取数，避免确认内容对不上或被改写。
+    cp = os.path.join(out_dir, "community_%s.conflicts.json" % day_str)
+    try:
+        with open(cp, "w", encoding="utf-8") as f:
+            json.dump({"day": day_str, "conflicts": flags}, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        log("冲突 sidecar 写入失败（不影响推送）：%s" % e)
 
     # 4b) 按 SN 落进各子网档案的 community_digests[]（供投研回看社区线索）。
     #     与 reports[]（投研结论）分开存，投研侧用独立段落读取并要求交叉核对。
@@ -417,6 +451,78 @@ def run_community_day(cfg, day_str, log=print, push=True):
     return {"ok": True, "day": day_str, "digest": digest, "sn": sns,
             "flags": len(flags), "path": dp, "archived_sn": archived,
             "total": payload.get("stats", {}).get("total", 0)}
+
+
+def push_confirmed_version(cfg, day_str, log=print, push=True):
+    """按档案里的人工确认，重建某日社区日报的专区并重推「确认版」。
+
+    不重新调 AI、不重新取数——用 sidecar 里保存的原始冲突行 + 档案确认状态，
+    重渲染专区替换掉落盘 digest 的旧专区，再双推。这样确认内容不会被 AI 改写。
+
+    返回 {ok, day, confirmed_count, path, digest}；无冲突或无确认时 ok=False 并给 reason。
+    """
+    import pipeline as P
+    import subnet_archive as SA
+
+    day_str = P._resolve_day_alias(day_str, TZ)
+    out_dir = _out_dir(cfg)
+    dp = os.path.join(out_dir, "community_%s.digest.txt" % day_str)
+    cp = os.path.join(out_dir, "community_%s.conflicts.json" % day_str)
+    if not os.path.exists(dp):
+        return {"ok": False, "reason": "找不到 %s，请先生成该日社区日报" % dp}
+    with open(dp, encoding="utf-8") as f:
+        digest = f.read().strip()
+    conflicts = []
+    if os.path.exists(cp):
+        try:
+            with open(cp, encoding="utf-8") as f:
+                conflicts = json.load(f).get("conflicts") or []
+        except Exception as e:
+            log("读取冲突 sidecar 失败：%s" % e)
+    if not conflicts:
+        # 兼容旧日报（sidecar 之前生成的）：从落盘文本里反推冲突行
+        conflicts = [ln.strip() for ln in digest.splitlines() if "待人工确认" in ln]
+    if not conflicts:
+        return {"ok": False, "reason": "%s 没有待人工确认的条目，无需确认版" % day_str}
+
+    confirms = SA.get_community_confirms(cfg, day_str)
+    confirmed_count = len(confirms)
+    if not confirmed_count:
+        return {"ok": False,
+                "reason": "%s 还没有任何人工确认（发 /社区确认 SN编号 结论 后再重推）" % day_str,
+                "conflicts": len(conflicts)}
+
+    # 用原始冲突行 + 档案确认，重渲染专区
+    new_section = build_conflict_section(conflicts, confirms)
+    # 从落盘 digest 中剥离旧专区：旧专区从开头到第一个板块标题（**🔥 / **🧩 等）
+    body = digest
+    m = re.search(r"^\*\*⚠️ 待人工确认", body)
+    if m:
+        rest = body[m.end():]
+        # 找下一个加粗板块标题行作为正文起点
+        nm = re.search(r"(?m)^\**(?:🔥|🧩|👀|💡|📌)", rest)
+        body = rest[nm.start():].strip() if nm else rest.strip()
+    new_digest = new_section + "\n\n" + body
+
+    with open(dp, "w", encoding="utf-8") as f:
+        f.write(new_digest.strip())
+    log("社区日报确认版重建：%s（%d 处冲突，%d 处已人工确认）" % (day_str, len(conflicts), confirmed_count))
+
+    day_label = ("昨日" if day_str == (datetime.datetime.now(TZ) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                 else ("今日" if day_str == datetime.datetime.now(TZ).strftime("%Y-%m-%d") else day_str))
+    title = "🌐 Bittensor 社区消息日报（dtt版）· %s（%s · ✅人工确认版）" % (day_str, day_label)
+    if push:
+        try:
+            P.push_feishu(cfg, title, new_digest)
+        except Exception as e:
+            log("确认版飞书推送失败（不影响 TG）：%s" % e)
+        try:
+            P.push_telegram(cfg, title, new_digest)
+        except Exception as e:
+            log("确认版 TG 推送失败：%s" % e)
+        log("社区日报确认版已推送：飞书 + TG")
+    return {"ok": True, "day": day_str, "confirmed_count": confirmed_count,
+            "conflicts": len(conflicts), "path": dp, "digest": new_digest}
 
 
 if __name__ == "__main__":

@@ -8,9 +8,30 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.20.6** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.20.7** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.20.7 — 2026-11-21
+
+**社区日报冲突人工确认闭环：确认→写档案→重推确认版**
+
+- 起因：用户问「人工如何确认/反馈/修正档案/重推确认版」，发现此前只有第①步（专区展示），②③④ 社区日报都不支持（`/retry` 和 `/repush` 只认 DC 日报）。
+- 档案层 `subnet_archive.py`：
+  - 新增 `confirm_community_digest(cfg,day,sn,note,status)`：按 (date,sn) 把 `{status,note,at}` 写进 `community_digests[].confirm`，重跑覆盖；无条目则新建。
+  - 新增 `get_community_confirms(cfg,day)`：扫描档案（目录名 `SN55` 格式，正则匹配）取某日所有确认。
+  - archive.md 社区段渲染确认状态（✅已核实/❌已推翻 + 批注）。
+- 生成层 `community_digest.py`：
+  - `build_conflict_section(conflicts, confirms=None)`：按 SN 匹配确认，每条冲突末尾追加确认标记，标题显示「已人工确认 N 处（核实 X/推翻 Y）」。
+  - 落盘时把原始冲突行存 sidecar `community_<日>.conflicts.json`，供重推复用（不重新调 AI/取数）。
+  - 新增 `push_confirmed_version()`：用 sidecar + 档案确认重建专区、替换落盘 digest 的旧专区、双推「✅人工确认版」。
+- 接入层：`pipeline.py` 加 `community_confirm`（日期 SN 结论 [confirmed|refuted]）、`community_reconfirm`（[日期] [nopush]）两模式；`tg_listener.py` 加 `/社区确认`、`/社区重推`（含别名）分发、帮助、专属回执；`_latest_community_day()` 取最近日报日期。
+- 人物观点用户名规范化：提示词要求 Discord `名字_四位数字`（如 p383_54249）写成 `@显示名`（@p383），去辨识码与 `备注:` 标签，保留真名。
+- 验证：端到端全通过——写确认→档案 JSON+md 回写→重推确认版专区带标记→「已推翻」分支→清除测试数据恢复原状。
+- 坑：`get_community_confirms` 初版用 `entry.isdigit()` 匹配档案目录，实际是 `SN55`，修为正则 `^(?:SN)?(\d+)$`。
+- 用户 subnets 3文件仍未提交。push 用 7890。
 
 ---
 

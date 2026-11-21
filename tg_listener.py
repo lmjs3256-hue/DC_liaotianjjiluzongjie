@@ -606,6 +606,24 @@ def _run_pipeline_sync(args, chat_id):
             safe_send(chat_id, "✅ 子网投研报告已生成并推送（飞书 + TG）%s\n"
                           "已归档到 %s（下次同子网可直接复用档案）。" % (detail, _arc_label()))
             return
+        if args and args[0] == "community":
+            # 社区日报专属回执：日报正文已由 pipeline 自行推送，这里回一条明确的
+            # 「成功/条数/子网数/冲突标志」，免得用户分不清到底成没成。
+            m = re.search(r"社区日报完成：\s*(\d{4}-\d{2}-\d{2})\s*（(\d+)\s*条消息，(\d+)\s*个子网落档）", out)
+            if m:
+                day, total, sns = m.group(1), m.group(2), m.group(3)
+                receipt = ("🌐 社区日报已生成并推送（飞书 + TG）\n"
+                           "📅 %s　📊 %s 条消息 · %s 个子网落档\n"
+                           "📄 exports/community/community_%s.digest.txt" % (day, total, sns, day))
+            elif "社区关键词监控当日无命中" in out:
+                receipt = "🌐 社区日报已生成：当日无命中消息（空报告，未推送正文）"
+            else:
+                receipt = "🌐 社区日报流程已结束（详情见群内推送或 run.log）"
+            mf = re.search(r"社区日报交叉核对：\s*(\d+)\s*处「待人工确认」", out)
+            if mf:
+                receipt += "\n⚠️ 含 %s 处「待人工确认」，请核对正文后再采信" % mf.group(1)
+            safe_send(chat_id, receipt)
+            return
         stat = ""
         m = re.search(r"过滤后保留实质消息\s*(\d+)\s*条", out)
         if m:
@@ -623,6 +641,11 @@ def _run_pipeline_sync(args, chat_id):
     else:
         # 失败才回传错误尾部（清洗乱码、只留最后几行有意义的）
         tail = _clean_tail(out)
+        if args and args[0] == "community":
+            hint = ("\n💡 若是「连接 19223 / 守护离线」，取数时已尝试自动拉起 Edge 守护；"
+                    "仍失败请确认 Edge 可启动、dtt 账号密码正确（config 本地配置），详见 run.log。")
+            safe_send(chat_id, "❌ 社区日报生成失败\n%s%s" % (tail or "（无输出，详见 run.log）", hint))
+            return
         safe_send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail or "（无输出，详见 run.log）"))
 
 

@@ -2643,17 +2643,19 @@ _RESEARCH_PROMPT_TMPL = (
     "**验证状态已经跟在每条事件后面了，不需要再单列一节复述**。"
     "也不要写开场白、不要写总结、不要写「综上所述」。"
     "**更不要在正文里写「（45-60字）」「（约 50 字）」这类字数标注**——那是给你自己看的约束，不是内容。\n"
-    "\n【篇幅】**只有上限、没有下限**：全文不超过 **1600 字**。"
-    "**简短是硬要求，不是建议**：能一句话说清就别写两句，"
-    "本期只有 3 件事，就写 3 条、四百字收工，不要为了显得详尽而堆形容词、堆免责声明、堆重复表述。\n"
-    "超过 1600 字会被代码层强制压缩（只删不增），可能把你想保留的事件删掉。\n"
+    "\n【篇幅】**只有上限、没有下限**：全文不超过 **%(max_chars)s 字**。"
+    "**不注水，但信息要全**：能一句话说清就别写两句，不要堆形容词、免责声明、重复表述；"
+    "但社区动态、收入回购、关键事件、跟踪清单该写的必须写全，"
+    "不要为了「简短」把关键信息砍掉。\n"
+    "超过 %(max_chars)s 字才会被代码层压缩（只删不增）。\n"
     "\n【语言】中文；英文专有名词、代币名、代码库名保留原文。不用 # 标题、不用 > 引用，手机端可读。"
 )              # 注意：这里不能就地 % 格式化，模板里含 %% 字面量，交给 research_prompt 统一处理
 
 
-def research_prompt(days=14):
-    """投研系统提示词（天数可配，默认 14 天窗口）。"""
-    return _RESEARCH_PROMPT_TMPL % {"days": int(days or 14)}
+def research_prompt(days=14, max_chars=3000):
+    """投研系统提示词（天数、篇幅上限可配：config.research_max_chars）。"""
+    return _RESEARCH_PROMPT_TMPL % {"days": int(days or 14),
+                                    "max_chars": int(max_chars or 3000)}
 
 
 RESEARCH_SYSTEM_PROMPT = research_prompt(14)
@@ -3385,6 +3387,38 @@ def _key_author_block(payload, cfg=None):
             % ("、".join("@" + x for x in names), "\n".join(lines)))
 
 
+def _const_dynamics_block(payload, cfg=None, max_chars=180):
+    """代码层保底：const 本人的当日推文/转推/回复逐条列出。
+
+    光靠提示词让模型「涵盖主要说法」不可靠（实测 19 条注入只写了 1 条），
+    所以在报告里固定附一段原文清单，不参与模型筛选与压缩。
+    """
+    import community_digest as CD
+    names = CD._key_author_names(cfg)
+    lines, seen = [], set()
+    events = sorted(((payload or {}).get("events") or []),
+                    key=lambda x: x.get("occurredAt") or 0, reverse=True)
+    for e in events:
+        a = (e.get("author") or "")
+        if not any(n in a.lower() for n in names):
+            continue  # 只列本人发言；别人提及 const 的由社区动态正文涵盖
+        c = CD._clean(e.get("content"))[:max_chars]
+        k = (a, c[:60])
+        if k in seen:
+            continue
+        seen.add(k)
+        t = e.get("occurredAt")
+        tstr = (datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M")
+                if t else "??:??")
+        plat = CD.PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
+        lines.append("- [社区][%s %s] <%s>（%s）%s ⚠️未验证"
+                     % (plat, tstr, CD._clean(a, 40), CD._msg_kind(e, cfg), c))
+    if not lines:
+        return "", 0
+    return ("**关键人物动态（const 当日全部 %d 条：推文/转推/回复，逐条保留）**\n%s"
+            % (len(lines), "\n".join(lines))), len(lines)
+
+
 def _today_community_block(cfg, sn, day_str=None, log=print):
     """取当日 dtt 社区消息并拼段；取数失败一律不阻断投研主流程。
 
@@ -3750,7 +3784,8 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         def llm(body, sp=None):
             return pipeline.call_deepseek(cfg, body, system_prompt=sp)
 
-    digest = llm(text_block, research_prompt(days))
+    max_chars = int(cfg.get("research_max_chars", 3000) or 3000)
+    digest = llm(text_block, research_prompt(days, max_chars=max_chars))
     # 字数标注清除：模型会把「每条 45-60 字」这类配额直接抄进正文，
     # 变成「**kτwτ**（45-60字）：…」——读者看到的是提示词不是内容，必须先删掉。
     try:
@@ -3772,10 +3807,10 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     _comm_section = ""
     if _nct:
         _comm_section = _take_section(digest, "📢 当日社区动态")[1]
-    # 字数闸门：只限上限 1600 字（时间线里的红色资讯条目要留出空间），不设下限。
+    # 字数闸门：只限上限（默认 3000 字，config.research_max_chars 可改），不设下限。
     # rounds=3：模型每轮只删一部分，两轮常常压不到位（实测 5061→3465），三轮才收得住。
     try:
-        digest = pipeline.compress_digest(cfg, digest, 0, 1600, rounds=3,
+        digest = pipeline.compress_digest(cfg, digest, 0, max_chars, rounds=3,
                                           system_prompt=RESEARCH_COMPRESS_PROMPT,
                                           sanitize_fn=lambda s: pipeline.strip_length_tags(s),
                                           cut_hint="报告有四段骨架（时间线 / 当前数据 / 收入与回购 / 预期跟踪），"
@@ -3843,6 +3878,17 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         digest = _insert_section(digest, _comm_section, "📌 预期跟踪")
         log("📢 当日社区动态节被压缩删除，已从初稿恢复（%d 字）"
             % len(re.sub(r"\s", "", _comm_section)))
+    # const 本人动态固定附清单：模型从 19 条里只挑 1 条是实测发生过的事，
+    # 不能依赖提示词保证「全部体现」，这里读本地缓存直接逐条写进报告。
+    if _nct:
+        try:
+            import community_fetch as CF2
+            _cs, _cn = _const_dynamics_block(CF2.read_day(today, cfg), cfg)
+            if _cs and "关键人物动态（const" not in digest:
+                digest = _insert_section(digest, _cs, "📌 预期跟踪")
+                log("📢 关键人物动态：代码层补入 const 当日全部 %d 条（推文/转推/回复）" % _cn)
+        except Exception as e:
+            log("📢 关键人物动态清单跳过（%s）" % str(e)[:120])
     title = "🔬 SN%d %s · 重要事件跟踪报告（%s）" % (
         sn, meta["name"] or "未收录", datetime.datetime.now(TZ).strftime("%m-%d"))
     d = A.sn_dir(arc_dir, sn)

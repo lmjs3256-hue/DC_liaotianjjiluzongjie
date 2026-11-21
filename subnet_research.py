@@ -3436,72 +3436,70 @@ _PEOPLE_SUMMARY_PROMPT = (
 
 
 def _sn_related_events(events, sn, sn_name, cfg=None, context=""):
-    """从当日 dtt 全部消息里，筛出与当前子网明确相关的（供子网报告社区动态用）。
+    """从当日 dtt 全部消息里，筛出与当前子网**强相关**的（供子网报告社区动态用）。
 
-    与社区日报口径不同：社区日报=生态全量所有人都列；这里=只留跟本 SN 有关的。
-    命中任一条件即保留：
-      1. dtt 的 sn 归属里含本 SN；
-      2. 内容点名本子网项目名 / SN 编号 / 官方 handle（如 cascade_sn91）；
-      3. 关键人物（const 等）发言里的实质词与「本子网当日社区消息」背景重合
-         （实测 const 的「19 days is actually quite slow」未标 SN，但正是 SN91
-         训练天数争议的关键回应，必须靠背景相关性捞回来）；
-      4. 内容含背景里出现的、且非通用词的专名（项目名/基准名/对手公司等）。
+    口径（用户 2026-11-22 确认）：「明确归属 + 强证据捞回」，绝不靠弱信号凑数。
+    社区日报=生态全量所有人都列；这里=只留跟本 SN 明确有关的，避免 SN25 报告
+    混入一整屏 SN8/SN64/SN120/Openrouter 等无关 const 动态。
+
+    命中任一即保留（强证据）：
+      1. dtt 的 sn 归属里明确含本 SN；
+      2. 内容直接点名本子网项目名 / SN 编号 / 官方 handle（如 cascade_sn91）。
+    唯一允许的「捞回」：本项目配置里登记的**精确专名锚点**（如项目全名、产品名），
+    出现在未标 SN 的消息里——必须有 config.research_sn_anchors 显式登记才算，
+    不靠背景词/通用数字猜测（那正是 SN25 误命中 49 条的根源）。
+    明确标了别的 SN 的消息一律排除，除非同时点名了本子网。
     """
     import community_digest as CD
     cfg = cfg or {}
     sn_s = str(sn)
     name = (sn_name or "").strip()
-    # 本子网标识词：项目名、SN 编号各种写法、官方 handle
-    id_tokens = set()
-    if name:
-        id_tokens.add(name.lower())
-        id_tokens.add(re.sub(r"[^a-z0-9]", "", name.lower()))
-    for tok in ("sn%d" % sn, "#%d" % sn, "sn %d" % sn, "子网%d" % sn):
-        id_tokens.add(tok.lower())
 
-    # 从背景提取信号词：英文专名 + 2 位以上数字（如 GIFT-Eval / Salesforce / 19）。
-    # 数字信号很关键：const 的「19 days is actually quite slow」未标 SN，
-    # 但背景里有「SN91 训练第 19 天」，靠 19 这个数字把它捞回。
-    stop = {"社区", "未验证", "线索", "报告", "消息", "当日", "dtt", "sn", "未证实",
-            "表示", "转推", "回复", "chain", "data", "unverified", "the", "and"}
-    bg_words, bg_nums = set(), set()
-    for w in re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", (context or "")):
-        if w.lower() not in stop:
-            bg_words.add(w.lower())
-    for num in re.findall(r"\d{2,}", (context or "")):
-        bg_nums.add(num)
+    # 本子网标识：用「词边界」匹配，避免短名/通用名（如 SN25 的 "UR"）在
+    # "your"/"architecture" 里到处误命中——那正是 SN25 误捞 49 条的根源。
+    # 编号类（sn25/#25/sn:25）用子串即可，本身足够独特。
+    name_patterns = []
+    if name and len(name) >= 2:
+        # 项目名按词边界匹配；允许常见的 `@项目名_sn号` handle 形态
+        name_patterns.append(re.compile(r"(?<![a-z0-9])" + re.escape(name.lower()) + r"(?![a-z0-9])"))
+    num_tokens = []
+    for tok in ("sn%d" % sn, "#%d" % sn, "sn %d" % sn, "子网%d" % sn, "sn:%d" % sn):
+        num_tokens.append(tok.lower())
 
-    names = CD._key_author_names(cfg)
+    def _names_me(text):
+        low = text.lower()
+        if any(t in low for t in num_tokens):
+            return True
+        return any(p.search(low) for p in name_patterns)
+
+    # 精确专名锚点：只认 config 里显式登记的，避免泛化词误命中。
+    # 例如 SN91 的 "Moirai"/"GIFT-Eval" 若要捞 const 的未标注发言，需在此登记。
+    anchors = []
+    for a in (cfg.get("research_sn_anchors") or {}).get(sn_s, []) or []:
+        a = str(a).strip().lower()
+        if a and len(a) >= 3:
+            anchors.append(re.compile(r"(?<![a-z0-9])" + re.escape(a) + r"(?![a-z0-9])"))
+
     hits = []
     for e in events or []:
         tags = [str(x) for x in (e.get("sn") or [])]
         content = (e.get("content") or "")
         low = content.lower()
-        names_me = any(t in low for t in id_tokens if t)
+        names_me = _names_me(content)
 
         # ① dtt 明确标了本 SN → 保留
         if sn_s in tags:
             hits.append(e)
             continue
-        # ② 明确标了别的 SN → 一律排除（那是别的子网的事，不该出现在SN91报告）
-        #    例外：内容又点名了本子网项目名/SN号（罕见，如跨子网对比）
+        # ② 明确标了别的 SN → 一律排除（除非内容又点名本子网）
         if tags and not names_me:
             continue
         # ③ 内容点名本子网项目名/SN编号/handle → 保留
         if names_me:
             hits.append(e)
             continue
-        # ④ 未标 SN 的消息：靠背景信号判断是不是同一件事的讨论。
-        #    命中「背景数字」或「1 个以上背景专名」，且发言人是关键人物时保留；
-        #    普通发言人需命中 1 个背景专名 + 1 个背景数字才保留（避免泛聊误入）。
-        author = (e.get("author") or "")
-        overlap_w = [t for t in bg_words if t in low]
-        overlap_n = [n for n in bg_nums if n in low]
-        is_key = any(n in author.lower() for n in names)
-        if is_key and (overlap_w or overlap_n):
-            hits.append(e)
-            continue
-        if overlap_w and overlap_n:
+        # ④ 未标 SN：仅当命中显式登记的精确专名锚点（词边界，强证据）→ 保留
+        if anchors and any(p.search(low) for p in anchors):
             hits.append(e)
     return hits
 
@@ -3637,20 +3635,20 @@ def _today_community_block(cfg, sn, day_str=None, log=print):
     try:
         block, n = _format_community_today(
             payload, sn, limit=int(cfg.get("research_community_max", 12) or 12), cfg=cfg)
-        key_block = _key_author_block(payload, cfg)
     except Exception as e:
         log("   ⚠️ 当日社区消息整理失败（%s），跳过" % str(e)[:120])
         return "", 0, "error"
-    key_n = key_block.count("[社区·重要人物]") if key_block else 0
-    if key_block:
-        block = (block + "\n\n" + key_block) if block else key_block
-    total = n + key_n
-    if total:
-        log("   ✅ 当日 dtt 社区消息：SN%d 命中 %d 条 + 关键人物 %d 条（含未归属 SN），已加入投研输入"
-            % (sn, n, key_n))
+    # 关键人物（const 等）动态**不注入主模型素材**：
+    #  1) 它们大多与当前子网无关（SN91 报告混入 SN8/SN64/SN120 就是这个原因）；
+    #  2) 主模型照抄后，那段又被当成 context 去捞「相关」消息，形成自我印证死循环。
+    # 现在严格相关消息由代码层 _sn_related_events() 用强证据筛选，直接从 payload 取，
+    # 不再经过主模型。主模型素材里只有「明确标注本 SN」的消息，让它写事实基线即可。
+    if n:
+        log("   ✅ 当日 dtt 社区消息：SN%d 明确归属 %d 条，已加入投研输入"
+            % (sn, n))
     else:
-        log("   当日 dtt 社区消息：SN%d 无命中" % sn)
-    return block, total, ("hit" if total else "empty")
+        log("   当日 dtt 社区消息：SN%d 无明确归属消息" % sn)
+    return block, n, ("hit" if n else "empty")
 
 
 def _signal_block(sources):
@@ -3987,11 +3985,6 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     except Exception as e:
         log("投研校对跳过（%s）" % e)
     digest = (digest or "").strip()
-    # 压缩前留存「📢 当日社区动态」整节：压缩提示词原本写「只有四段」，
-    # 实测模型会把这节当成多余整节删掉。留底后若丢失由代码插回，保证内容不消失。
-    _comm_section = ""
-    if _nct:
-        _comm_section = _take_section(digest, "📢 当日社区动态")[1]
     # 字数闸门：只限上限（默认 3000 字，config.research_max_chars 可改），不设下限。
     # rounds=3：模型每轮只删一部分，两轮常常压不到位（实测 5061→3465），三轮才收得住。
     try:
@@ -4059,29 +4052,37 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             log("资讯/时间线整理：%d 处调整" % _nfix)
     except Exception as e:
         log("资讯并入时间线跳过（%s）" % e)
-    if _comm_section and "📢 当日社区动态" not in digest:
-        digest = _insert_section(digest, _comm_section, "📌 预期跟踪")
-        log("📢 当日社区动态节被压缩删除，已从初稿恢复（%d 字）"
-            % len(re.sub(r"\s", "", _comm_section)))
-    # 当日社区动态：主模型写的是 dtt 英文原文照抄、人名也是原始账号，用户体验差。
-    # 这里单独调一次小 LLM，把全部人物按人提炼成中文短句（const 排前、无链接、无账号名），
-    # 生成成功后**整体替换**主模型那段英文，报告里只保留这一份中文版。
-    if _nct:
+    # ===== 📢 当日社区动态：完全由代码层接管，绝不保留主模型照抄的英文原节 =====
+    # 主模型那节是英文原文照抄、人名是原始账号，且（旧逻辑下）可能塞满与子网无关的
+    # const 生态动态。这里先整体删掉，再按「强证据筛选结果」重建：
+    #   有相关消息 → 提炼中文短句；无相关消息 → 如实写一句说明；提炼失败 → 也写说明。
+    if "📢 当日社区动态" in digest:
+        digest, _ = _take_section(digest, "📢 当日社区动态")
+
+    _comm_done = False
+    if _dtt_state == "hit" and _nct:
         try:
             import community_fetch as CF2
             _p2 = CF2.read_day(today, cfg)
-            _cs, _cn = _people_summary_block(
-                _p2, cfg, sn, meta, llm, log=log, context=_comm_section)
+            _cs, _cn = _people_summary_block(_p2, cfg, sn, meta, llm, log=log)
             if _cs:
-                # 删掉主模型写的旧英文节（可能已被压缩恢复），再插中文提炼版
-                if "📢 当日社区动态" in digest:
-                    digest, _ = _take_section(digest, "📢 当日社区动态")
                 digest = _insert_section(digest, _cs, "📌 预期跟踪")
-                log("📢 当日社区动态：已替换为按人提炼的中文版 %d 条（const 排前，无链接/账号名）" % _cn)
-            else:
-                log("📢 当日社区动态：人物提炼失败，保留主模型原节")
+                log("📢 当日社区动态：强证据筛出 %d 条相关消息，已提炼为中文短句" % _cn)
+                _comm_done = True
         except Exception as e:
             log("📢 当日社区动态提炼跳过（%s）" % str(e)[:120])
+
+    if not _comm_done and _dtt_state in ("hit", "empty"):
+        # 无相关消息或提炼失败：写一句如实说明，绝不退回主模型的全量无关原节。
+        if _dtt_state == "empty":
+            _note = ("**📢 当日社区动态**\n"
+                     "当日 dtt 关键词监控未抓到与 SN%d（%s）明确相关的社区消息，本节从略。⚠️未验证"
+                     % (sn, meta.get("name") or "未收录"))
+        else:
+            _note = ("**📢 当日社区动态**\n"
+                     "当日抓到 SN%d 相关消息，但自动提炼未成功，暂不列出（不影响报告其它章节）。" % sn)
+        digest = _insert_section(digest, _note, "📌 预期跟踪")
+        log("📢 当日社区动态：无相关消息/提炼失败，已写如实说明（不保留主模型原节）")
     title = "🔬 SN%d %s · 重要事件跟踪报告（%s）" % (
         sn, meta["name"] or "未收录", datetime.datetime.now(TZ).strftime("%m-%d"))
     d = A.sn_dir(arc_dir, sn)

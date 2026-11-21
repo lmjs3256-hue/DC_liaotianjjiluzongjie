@@ -3418,7 +3418,8 @@ _PEOPLE_SUMMARY_PROMPT = (
     "2. 写「内容要点」而不是抄原文：抓住他说了什么结论/数字/态度，一句话讲清；"
     "**不许贴任何 URL、t.co 链接、x.com 链接**。同一人同一观点合并成一条。\n"
     "3. 人名只用线索 `<>` 里的显示名（如 const、p383），禁止写 @handle、"
-    "consttt、_数字 后缀、备注标签；被转推/回复的对象保留其 @handle。\n"
+    "consttt、_数字 后缀、备注标签；被转推/回复的对象若是关键人物（如 const）"
+    "也用 @显示名（@const），不要用 @const_reborn 这类账号；其他对象保留其 @handle。\n"
     "4. 每人 1-3 条，每条不超过 45 字；确实无可提炼内容的人才跳过。\n"
     "5. 只输出要点行，不要标题、不要解释、不要总数统计；一个人都没就输出「无」。\n"
 )
@@ -3491,9 +3492,16 @@ def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
     if not out or out.strip() in ("无", "无。", "无相关", "没有相关发言"):
         return "", 0
     kept = []
+    # 兜底：把关键人物的原始账号名统一成显示名（被回复对象里模型可能写回 @const_reborn）
+    key_alias = {}
+    for n in names:
+        key_alias[n + "_reborn"] = n
+        key_alias[n + "tt"] = n
     for ln in out.splitlines():
         ln = re.sub(r"^\s*[-•*]\s*", "", ln).strip()
         ln = re.sub(r"https?://\S+", "", ln).strip()  # 兜底删链接
+        for alias, canon in key_alias.items():
+            ln = re.sub(r"@" + re.escape(alias) + r"\b", "@" + canon, ln, flags=re.I)
         if ln and ln not in ("无", "无。") and len(kept) < 45:
             kept.append(ln)
     if not kept:

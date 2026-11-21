@@ -2584,6 +2584,15 @@ _RESEARCH_PROMPT_TMPL = (
     "「数据站口径下所有者回购为零，但群聊/人工登记了回购钱包 <地址>（未链上核实），冲突待核」。"
     "**不许**因为数据站是零就删掉地址线索，也**不许**反过来把数据站改成非零。\n"
     "- 抓不到收入数据（输入里没有该段）就整段写「收入与回购：未获取（数据源未返回）」，不要留空、不要编数字。\n"
+    "\n**📢 当日社区动态**（仅当输入里有【当日 dtt 社区消息】段时写这一节；没有就整段不写）\n"
+    "- 这是 dtt 关键词监控当日抓到的公开讨论，**未经证实、不是证据**。必须单独成节、"
+    "涵盖该子网当日的主要说法；同主题可合并，但每条都要标 `[社区]` 与 `⚠️未验证`，"
+    "并写上平台与时间（如「[社区][Telegram 14:32]」）。\n"
+    "- **禁止**把社区说法写成已发生的事实、或与链上/数据站数字混成一句；"
+    "与链上/数据站/官方结论冲突时，必须并列写「社区称X，但链上/数据站显示Y，⚠️待人工确认」，"
+    "不得二选一、不得删掉任一方。\n"
+    "- 本节不计入时间线事件条数；若与档案里的历史社区线索重复，以本节的当日消息为准，"
+    "历史线索只在有新增信息时补一句。\n"
     "\n**📌 预期跟踪**（先逐条结清上次的，再写本次新增的；合计 4-7 条）\n"
     "**若输入里有【上次跟踪事项（逐条回答）】段，必须先逐条给结论**，一条都不许漏：\n"
     "  格式：`- ✅已兑现 / ⏳进行中 / ❌已证伪 / ⚔️条件未触发：<上次那条的简述> → <这次的事实依据>`\n"
@@ -2622,8 +2631,9 @@ RESEARCH_VERIFY_PROMPT = (
     "你是投研报告的合规校对员，不是作者。输入是【原始素材】+【报告初稿】。\n"
     "逐条核对，只做删改不做新增，输出修正后的完整报告：\n"
     "1. 每个数字、名称、日期必须能在【原始素材】里找到一模一样的字符串；找不到的删掉或改「未获取」；\n"
-    "2. 检查来源标记：无标记的断言，补 `[群聊]` 或改为「判断：」；标错来源的改正；\n"
-    "3. 群聊传闻被写成事实的，降级为「群内有人称（日期，人物）：…」；\n"
+    "2. 检查来源标记：无标记的断言，补 `[群聊]` 或 `[社区]` 或改为「判断：」；标错来源的改正；\n"
+    "3. 群聊传闻被写成事实的，降级为「群内有人称（日期，人物）：…」；"
+    "社区讨论被写成事实的，降级为「社区称（日期，平台）：…」；\n"
     "4. 把「可能/或将/有望」后面没有证据支撑的推测删除，或明确标注为待验证假设；\n"
     "5. 冲突数据被合并成一个值的，改回并列呈现；\n"
     "6. 保留全部小节标题与顺序，**不得比初稿更长**。\n"
@@ -3215,6 +3225,89 @@ def _community_block(arc, limit=4, chars=700):
     return "\n".join(L)
 
 
+def _format_community_today(payload, sn, limit=15):
+    """从 dtt 当日取数结果里挑出该 SN 的消息，拼成投研输入段。
+
+    返回 (block, kept)；无相关消息返回 ("", 0)。
+    复用 community_digest 的相关性打分/清洗，保证社区日报与投研用同一套过滤口径。
+    """
+    import community_digest as CD
+    events = [e for e in ((payload or {}).get("events") or [])
+              if str(sn) in [str(x) for x in (e.get("sn") or [])]]
+    if not events:
+        return "", 0
+    events = [e for e in events if CD._relevance(e) >= 0]
+    seen, picked = set(), []
+    for e in sorted(events, key=lambda x: x.get("occurredAt") or 0, reverse=True):
+        key = ((e.get("author") or ""), (e.get("content") or "")[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(e)
+        if len(picked) >= limit:
+            break
+    if not picked:
+        return "", 0
+    lines = []
+    for e in picked:
+        t = e.get("occurredAt")
+        tstr = (datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M")
+                if t else "??:??")
+        plat = CD.PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
+        author = CD._clean(e.get("author") or "?", 40)
+        content = CD._clean(e.get("content"))[:320]
+        lines.append("- [%s][%s] <%s> %s [社区]" % (tstr, plat, author, content))
+    b = (payload or {}).get("bounds") or {}
+
+    def _ts(v):
+        return datetime.datetime.fromtimestamp(v, TZ).strftime("%m-%d %H:%M") if v else "?"
+
+    rng = ("%s → %s" % (_ts(b.get("start")), _ts(b.get("end")))) if b else "当日 00:00 → 当前"
+    more = ("（另有 %d 条同类消息已省略）" % (len(events) - len(picked))) if len(events) > len(picked) else ""
+    block = (
+        "SN%d 当日 dtt 社区消息 %d 条（北京时间 %s；Twitter/X·Telegram·Discord）%s：\n%s\n"
+        "**使用规则**：这些是关键词监控抓来的公开讨论，**未经证实、是线索不是证据**。"
+        "报告必须单独写「📢 当日社区动态」一节涵盖其中主要说法，每条标 `[社区]` 与 `⚠️未验证`；"
+        "与链上/数据站/官方结论冲突时并列写「社区称X，但链上/数据站显示Y，⚠️待人工确认」，"
+        "不得采信任何一方、也不得删掉线索；禁止把这些消息写成今日已确定的事实。"
+        % (sn, len(picked), rng, more, "\n".join(lines))
+    )
+    return block, len(picked)
+
+
+def _today_community_block(cfg, sn, day_str=None, log=print):
+    """取当日 dtt 社区消息并拼段；取数失败一律不阻断投研主流程。"""
+    day_str = day_str or datetime.datetime.now(TZ).strftime("%Y-%m-%d")
+    try:
+        import community_fetch as CF
+    except Exception as e:
+        log("   ⚠️ 当日社区消息模块不可用（%s），跳过" % str(e)[:120])
+        return "", 0
+    try:
+        payload = CF.read_day(day_str, cfg)
+        if payload is not None and CF.cache_covers_now(payload, cfg):
+            log("   当日 dtt 社区消息：复用 %s 已取数结果（%d 条）"
+                % (day_str, (payload.get("stats") or {}).get("total", 0)))
+        else:
+            if payload is not None:
+                log("   当日 dtt 社区消息：旧快照未覆盖当前，重取中…")
+            payload = CF.fetch_day(day_str, cfg, log=log, until_now=True)
+    except Exception as e:
+        log("   ⚠️ 当日 dtt 社区消息取数失败（%s），本次投研继续，不带社区段" % str(e)[:160])
+        return "", 0
+    try:
+        block, n = _format_community_today(
+            payload, sn, limit=int(cfg.get("research_community_max", 12) or 12))
+    except Exception as e:
+        log("   ⚠️ 当日社区消息整理失败（%s），跳过" % str(e)[:120])
+        return "", 0
+    if n:
+        log("   ✅ 当日 dtt 社区消息：SN%d 命中 %d 条，已加入投研输入" % (sn, n))
+    else:
+        log("   当日 dtt 社区消息：SN%d 无命中" % sn)
+    return block, n
+
+
 def _signal_block(sources):
     """硬规则信号：由代码判定、直接写进提示词，不允许模型忽略。
 
@@ -3268,8 +3361,12 @@ def _signal_block(sources):
     return ("【代码预判的硬信号（必须体现在报告中，不得忽略）】\n- " + "\n- ".join(sig))
 
 
-def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, today=None, arc_dir=None):
+def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, today=None,
+                arc_dir=None, community_today=""):
     """拼装投研输入。arc 为 None 时跳过群聊段（纯全网投研）。
+
+    community_today：当日 dtt 关键词监控里该子网的社区消息段（由 run_research 取数拼好），
+    有则单独成段并强制模型在报告里写「📢 当日社区动态」。
 
     prev_arc：用于取「此前投研结论」的档案。arc 会被 run_research 置 None（有档案但无群聊条目），
     此时历史报告仍然存在，必须单独传进来，否则「上次说了什么」永远进不了输入。
@@ -3325,6 +3422,9 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
         body += "\n\n===== 档案登记的回购地址（仅线索，不代表已链上确认）=====\n" + _wallet_txt
     if _community_txt:
         body += "\n\n===== 社区消息线索（多平台公开讨论，未经证实，须交叉核对）=====\n" + _community_txt
+    if community_today:
+        body += ("\n\n===== 当日 dtt 社区消息（SN%d，未经证实，报告必须单独成节）=====\n"
+                 % meta["sn"]) + community_today
     if hist:
         body += "\n\n===== 此前投研结论（历史留档）=====\n" + hist
     # 上次的「预期跟踪」逐条清单：报告必须逐条打钩（兑现/证伪/未触发）
@@ -3463,9 +3563,18 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
                 r = {"src": "X", "ok": False, "err": str(e)[:120], "recent": []}
             sources["X"] = r
             log("  投研补抓 %-12s %s" % ("X", "OK" if r.get("ok") else "失败"))
+    # ③ 当日 dtt 社区消息（关键词监控）：有该 SN 的消息才注入；取数失败不阻断投研。
+    #    放在全网抓取之后，复用已取数缓存（社区日报刚跑过就直接复用，不重复请求 dtt）。
+    community_today = ""
+    if cfg.get("research_community_today", True):
+        log("③ 当日 dtt 社区消息（关键词监控）…")
+        community_today, _nct = _today_community_block(cfg, sn, today, log=log)
+    else:
+        log("③ 当日 dtt 社区消息：配置 research_community_today=false，跳过")
     text_block = build_input(arc, sources, meta, days=days,
                              cap_per_day=int(cfg.get("research_max_items_per_day", 260) or 260),
-                             prev_arc=prev_arc, today=today, arc_dir=arc_dir)
+                             prev_arc=prev_arc, today=today, arc_dir=arc_dir,
+                             community_today=community_today)
     if feedback:
         # 用户反馈单独成段，且明确标「权威修正」：模型很吃这一套，
         # 只把反馈混在正文里它常常当成又一条群聊传闻，改不动已经写下的判断。
@@ -3627,7 +3736,7 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             ("本地档案 + " if arc else "（无本地档案）纯全网 ") + "、".join(ok_srcs),
             "；".join(_src_state(k, v) for k, v in sources.items()),
             digest))
-    log("③ 报告已生成：%s（%d 字）" % (path, len(re.sub(r"\s", "", digest))))
+    log("④ 报告已生成：%s（%d 字）" % (path, len(re.sub(r"\s", "", digest))))
     # 投研产出增量写回子网档案：报告正文 + 结论 + 时间线 + 数据源一起入库；
     # 已有档案只替换本日记录（幂等），没有档案就新建一个 —— 这是下次投研的输入来源。
     try:
@@ -3636,11 +3745,11 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
                                        "url": meta.get("url"), "github": meta.get("github")},
                                  file_name=fname, log=log,
                                  income_snap=(_LAST_INC_SNAP or None))
-        log("④ 档案增量更新完成：SN%d 现有投研 %d 份、群聊 %d 条 —— 下次投研会先读它"
+        log("⑤ 档案增量更新完成：SN%d 现有投研 %d 份、群聊 %d 条 —— 下次投研会先读它"
             % (sn, len(_arc.get("reports") or []),
                sum(len(v) for v in (_arc.get("days") or {}).values())))
     except Exception as e:
-        log("④ 投研落档失败（报告文件已留存，档案未更新）：%s" % e)
+        log("⑤ 投研落档失败（报告文件已留存，档案未更新）：%s" % e)
     if push and cfg.get("push_enabled", True):
         want = [x.lower() for x in (targets or ["feishu", "tg"])]
         if "feishu" in want:

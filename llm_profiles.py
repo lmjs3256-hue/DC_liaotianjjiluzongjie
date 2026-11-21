@@ -7,6 +7,7 @@
     三个字段（字段名是历史遗留，实际是任意 OpenAI 兼容接口）。当前默认是
     Engy（Bittensor SN53）的 api.engy.ai/v1 + kimi-k3。手改三个字段不方便，
     故做「档案 + 切换」：常用平台各存一份档案，TG 里一句话切换。
+    档案按 SN 编号命名（sn53 / sn28），不区分大小写；旧名 engy 兼容为 sn53 别名。
 
 设计要点：
     1. 档案存在 config.json 的 llm_profiles[] 里，当前用哪个记在 active_llm_profile。
@@ -19,8 +20,8 @@
 
 档案结构（llm_profiles[] 里的每一项）：
     {
-      "name": "sn28",                      # 短名，TG 里用 /模型 sn28
-      "label": "SN28 / <model>",           # 展示名（可选，缺省=name）
+      "name": "sn53",                      # 短名，TG 里用 /模型 sn53（SN53/SN28 大小写随意）
+      "label": "SN53 / <model>",           # 展示名（可选，缺省=name）
       "base_url": "https://xxx/v1",        # OpenAI 兼容网关地址
       "model": "model-name",               # 模型名
       "api_key": "sk-xxx",                 # 密钥
@@ -45,6 +46,16 @@ _FIELD_MAP = [
     ("max_tokens", "deepseek_max_tokens"),
     ("timeout", "deepseek_timeout"),
 ]
+
+
+# 旧档案名 -> 现用名（兼容老命令：/模型 engy 仍等于 /模型 sn53）
+_ALIASES = {"engy": "sn53"}
+
+
+def _norm(name):
+    """档案名规范化：去空白 + 转小写 + 套别名。故 SN28/sn28/Sn28 全等价。"""
+    key = str(name or "").strip().lower()
+    return _ALIASES.get(key, key)
 
 
 def _load():
@@ -83,9 +94,9 @@ def _profiles(cfg):
 
 
 def _find(cfg, name):
-    key = str(name or "").strip().lower()
+    key = _norm(name)
     for p in _profiles(cfg):
-        if str(p.get("name") or "").strip().lower() == key:
+        if _norm(p.get("name")) == key:
             return p
     return None
 
@@ -108,7 +119,7 @@ def list_profiles():
             "base_url": str(p.get("base_url") or "").strip(),
             "model": str(p.get("model") or "").strip(),
             "key_mask": _mask(p.get("api_key")),
-            "active": (str(p.get("name") or "").strip().lower() == (act or "").lower()),
+            "active": (_norm(p.get("name")) == _norm(act)),
         })
     return out, act
 
@@ -137,7 +148,7 @@ def switch(name):
             # 档案没带的可选项要清掉，否则会残留上一个模型的设置
             # （例如上一个模型关了思考、新模型不该继承）
             cfg.pop(dst, None)
-    cfg["active_llm_profile"] = str(p.get("name") or name).strip()
+    cfg["active_llm_profile"] = _norm(p.get("name") or name)
     _save(cfg)
     return {
         "name": cfg["active_llm_profile"],
@@ -150,7 +161,7 @@ def switch(name):
 
 def add(name, base_url, model, api_key, label=None):
     """现场添加/覆盖一个档案。返回展示信息 dict。"""
-    name = str(name or "").strip()
+    name = _norm(name)
     base_url = str(base_url or "").strip().rstrip("/")
     model = str(model or "").strip()
     api_key = str(api_key or "").strip()
@@ -171,7 +182,7 @@ def add(name, base_url, model, api_key, label=None):
     }
     replaced = False
     for i, old in enumerate(profiles):
-        if str(old.get("name") or "").strip().lower() == name.lower():
+        if _norm(old.get("name")) == name:
             # 覆盖同名档案，但保留它已有的可选项（extra_params/max_tokens/timeout）
             for opt in ("extra_params", "max_tokens", "timeout"):
                 if opt in old:
@@ -195,10 +206,10 @@ def remove(name):
     if not p:
         raise KeyError("没有名为「%s」的档案" % name)
     pname = str(p.get("name") or name).strip()
-    if (active_name(cfg) or "").lower() == pname.lower():
+    if (active_name(cfg) or "").strip().lower() == pname.lower():
         raise ValueError("「%s」是当前正在用的档案，请先切到别的再删" % pname)
     cfg["llm_profiles"] = [x for x in _profiles(cfg)
-                           if str(x.get("name") or "").strip().lower() != pname.lower()]
+                           if _norm(x.get("name")) != _norm(pname)]
     _save(cfg)
     return pname
 

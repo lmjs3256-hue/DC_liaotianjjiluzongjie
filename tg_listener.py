@@ -14,8 +14,8 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /社区确认                     确认冲突：点命令后 bot 依次问 SN、结论（分两步，少打字）
                                  也可一条写完：/社区确认 55 收入属实；末尾「已推翻」=推翻
   /社区重推                      按已确认结论重推社区日报确认版（不重新取数）
-  /模型（/model）                大模型平台/模型切换：无参列出；/模型 sn28 切换；
-                                 /模型 添加 <名> <base_url> <模型名> <key>；/模型 删除 <名>
+  /模型（/model）                大模型平台/模型切换：无参列出；/模型 sn28 或 /模型 sn53 切换
+                                 （档案名不区分大小写，旧名 engy=sn53）；/模型 添加/删除 <名>
   /水聊（/water）                水聊侧记：只挑被日报过滤掉的闲聊，单独成一条
   /水聊 昨日 3                   指定日期 / 连续天数（只读已有导出，不重新导出）
   /watch                       查看潜力观察（默认最新一天，可跟天数 /watch 7 或 /watch all；同步推飞书）
@@ -96,8 +96,9 @@ HELP = (
     "     /社区确认 55 收入属实            ← 也可一条写完（老写法仍有效）\n"
     "     /社区重推                        ← 按已确认结论重推确认版（不重新取数/不调AI）\n"
     "     确认后该结论会被投研和确认版日报引用。\n"
-    "🤖 /模型 大模型平台切换（当前 Engy SN53 / kimi-k3）：\n"
+    "🤖 /模型 大模型平台切换（档案名不区分大小写：sn53/sn28；旧名 engy=sn53）：\n"
     "   /模型              列出档案+当前；/模型 sn28 切到 SN28 SayGM\n"
+    "   /模型 sn53         切回 SN53 Engy（旧写法 /模型 engy 也认）\n"
     "   /模型 添加 <名> <base_url> <模型名> <key> 现场加平台（key会留聊天记录，注意）\n"
     "   /模型 删除 <名>    删除档案（不能删当前在用的）；/模型 当前 看当前\n"
     "   切换写盘即生效，下次日报/投研就是新模型，无需重启\n"
@@ -1461,7 +1462,8 @@ def handle(text, chat_id):
         send_async(chat_id, "📤 收到，正在重推 %s%s…" % (day, ("（%s）" % "/".join(targets)) if targets else ""))
         run_pipeline(["repush", day] + targets, chat_id, quiet=True)
     elif cmd in ("模型", "model", "llm"):
-        # 大模型平台/模型切换（v1.21.0）：点命令列出档案、按名字切换、现场添加。
+        # 大模型平台/模型切换（v1.21.1）：点命令列出档案、按名字切换、现场添加。
+        # 档案名大小写不敏感（SN28/sn28 等价），旧名 engy 兼容为 sn53 别名。
         # 写盘立即生效（日报是子进程重读 config.json），key 一律脱敏回显。
         rest = parts[1:]
         sub = rest[0].lower() if rest else ""
@@ -1476,7 +1478,7 @@ def handle(text, chat_id):
                     lines.append("  %s %s · %s · %s · key %s"
                                  % ("✅" if p["active"] else "　", p["name"],
                                     p["label"], p["base_url"], p["key_mask"]))
-                lines += ["", "切换：/模型 <档案名>（如 /模型 sn28）",
+                lines += ["", "切换：/模型 <档案名>（sn28/SN28 都行；sn53 旧名 engy 也认）",
                           "添加：/模型 添加 <名> <base_url> <模型名> <api_key>",
                           "删除：/模型 删除 <名>；当前：/模型 当前",
                           "⚠️ 添加会把 key 存进 config.json 明文、并留在 TG 聊天记录里，注意保管。"]
@@ -1496,7 +1498,7 @@ def handle(text, chat_id):
                     return
                 item = LP.add(rest[1], rest[2], rest[3], rest[4])
                 safe_send(chat_id, "✅ 已%s档案「%s」\n地址：%s\n模型：%s\nkey：%s\n"
-                              "发 /模型 sn28 即可切换（下次日报生效，无需重启）"
+                              "发 /模型 <档案名> 即可切换（不区分大小写，下次日报生效，无需重启）"
                               % ("覆盖" if item["replaced"] else "添加", item["name"],
                                  item["base_url"], item["model"], item["key_mask"]))
             elif sub in ("删除", "remove", "rm", "d"):

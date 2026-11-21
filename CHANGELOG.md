@@ -8,9 +8,32 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.21.0** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.21.2** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.21.2 — 2026-11-22
+
+**子网重要事件跟踪报告接入当日 dtt 社区消息**
+
+- 起因（用户要求）：生成子网重要事件跟踪报告时，调用当日 dtt 关于该子网的社区消息；有消息就写进报告。
+- `subnet_research.py`：新增 `_today_community_block()` / `_format_community_today()` —— 取当日 dtt 关键词监控数据（缓存覆盖当前则复用，否则 `fetch_day` 重取），按 SN 归属字段过滤、复用社区日报的相关性打分与去重口径；**取数失败只记日志，不阻断投研**。
+- `build_input()` 新增 `community_today` 参数，单独成段；`research_prompt()` 增加硬规则：有该段时报告必须写「📢 当日社区动态」一节，每条标 `[社区]` + `⚠️未验证`，与链上/数据站冲突时并列标「⚠️待人工确认」，不得当事实采信；校对提示词同步放行 `[社区]` 标记。
+- `config.json`：新增 `research_community_today=true`（可关）、`research_community_max=12`（单子网最多注入条数，与社区日报一致）。
+- 验证：py_compile 全通过；用 11-21 已落档 dtt 数据测过滤/去重/拼段与输入注入正常、无命中返回空；提示词模板 `%` 格式化与新增小节检查通过。
+
+---
+
+## v1.21.1 — 2026-11-22
+
+**模型档案统一按 SN 编号命名：`sn53` 取代 `engy`，档案名大小写不敏感**
+
+- 起因（用户要求）：模型切换用 `/模型 sn28` 这种写法，SN 不区分大小写；`engy` 也改成 `sn53`。
+- `llm_profiles.py`：新增 `_norm()`（strip + lower + 别名表 `_ALIASES={"engy":"sn53"}`），`_find/add/remove/list_profiles/switch` 全走规范化；旧名 `engy`/`ENGY` 仍解析到 `sn53`，老命令不失效。
+- `config.json`：档案 `engy`→`sn53`（label 改 `SN53 Engy / kimi-k3`）、`active_llm_profile`→`sn53`；`deepseek_*` 主字段未动。备份于 `config.json.bak_before_sn53`。
+- `tg_listener.py` 帮助/回执、`README.md` 同步；升 `v1.21.1` 触发监听热重载（磁盘版本变化自动重启）。
 
 ---
 

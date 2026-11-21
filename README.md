@@ -273,21 +273,26 @@ python pipeline.py
    weekly - 生成本周周报
    community_today - 今日社区日报（dtt版，今日00:00→当前）
    community_yesterday - 昨日社区日报（dtt版，昨日00:00→当前）
-   community_confirm - 确认社区日报冲突（SN 结论，写进子网档案）
+   community - 社区日报（默认昨日，可跟日期/nopush）
+   community_confirm - 确认社区日报冲突（分步引导：SN 结论）
    community_reconfirm - 按人工确认重推社区日报确认版
+   model - 大模型平台切换（/model sn53|sn28，大小写随意）
    water - 水聊侧记（只挑闲聊，可跟日期/天数）
-   watch - 查看潜力观察/跨日热点(可跟天数, 如 /watch 7)
    research - 子网投研报告（/research 29，也可直接发 29）
    archive_list - 列出已建档子网（/archive_list 29 看单个）
+   watch - 查看潜力观察/跨日热点(可跟天数, 如 /watch 7)
    repush - 补推已生成的日报(可跟日期与 tg/feishu)
-   retry - 按你的反馈重总结（/retry 反馈内容）
+   retry - 按反馈重总结，或重做刚出过的子网投研
    kb - 子网知识库周更状态（/kb update 立即校对）
    keyboard - 重新显示底部按钮栏
+   hidekeyboard - 收起底部按钮栏
    help - 显示帮助
    ```
    中文别名同样有效：`/社区今日`=community_today、`/社区昨日`=community_yesterday
    （`/社区` 不带参数也=昨日）、`/水聊`=water、`/投研`=research、
-   `/档案`=archive_list、`/重总结`=retry、`/收起`=hidekeyboard 等。
+   `/档案`=archive_list、`/模型`=model、`/重总结`=retry、`/收起`=hidekeyboard 等。
+   另外两类**不用斜杠**的输入：裸编号 `29` / `SN29` / `#29` 直接出投研；
+   `ss58地址，8回购地址` 直接补录回购地址。分步确认时用 `/取消` 退出。
 
 ### 飞书机器人
 1. 飞书群 → 设置 → 群机器人 → 添加机器人

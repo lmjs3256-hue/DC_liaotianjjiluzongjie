@@ -8,9 +8,21 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.20.3** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.20.4** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.20.4 — 2026-11-21
+
+**社区日报取数改为 Edge 无窗口后台运行，不再弹窗打断办公**
+
+- 起因：dtt 取数弹出的 Edge 窗口影响用户正常办公，希望后台处理。
+- 浏览器技能 `pw-browser.js` 新增 `PW_BROWSER_HEADLESS` 开关（默认 0=有窗口，不影响其他用途）；daemon 的 `chromium.launch` 两处改为按该开关决定 headless。
+- `community_fetch.start_daemon()` 拉起守护时设 `PW_BROWSER_HEADLESS=1`——只有社区日报取数是无头模式，别处手动用浏览器技能仍是有窗口的。
+- 验证：端到端取数成功（498 条），同会话读取 UA 为 `HeadlessChrome/158 ... Edg/158`，确认无窗口生效。
+- 注：改动了全局技能文件 `C:/Users/Administrator/.workbuddy/skills/playwright-browser-use/pw-browser.js`（不入本项目 git）。
 
 ---
 

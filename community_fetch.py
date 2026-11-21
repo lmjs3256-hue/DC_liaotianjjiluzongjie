@@ -298,6 +298,9 @@ def start_daemon(cfg=None, log=print, timeout=45):
         log("浏览器守护离线，且 CLI 不存在：%s" % cli)
         return False
     base, env = _node_cmd(cli)
+    # 后台无窗口：dtt 取数不需要人工看页面，让 Edge 以 headless 启动，避免弹窗干扰办公。
+    # 浏览器技能用 PW_BROWSER_HEADLESS 控制（默认 0=有窗口，仅这里设为 1）。
+    env["PW_BROWSER_HEADLESS"] = "1"
     # Windows 下用 CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS 让守护脱离当前进程，
     # 避免 TG 监听线程结束/守护重启时把它一起带走；stdout/stderr 丢弃防止管道阻塞。
     flags = 0

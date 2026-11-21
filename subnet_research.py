@@ -3398,36 +3398,117 @@ def _key_author_block(payload, cfg=None):
 
 
 _PEOPLE_SUMMARY_PROMPT = (
-    "你是投研助理。下面是某子网当日 dtt 关键词监控抓到的全部人物发言线索"
-    "（已标人名/形态/SN归属/内容），另附本子网当日社区消息作背景。\n"
-    "任务：按人提炼观点短句。能进关键词监控的人物都被系统判为重要，"
-    "**所有发言人都列出**，只是与本子网直接相关的重点写、const 排最前。\n"
+    "你是投研助理。下面是一份「本子网当日社区消息」背景（已确认跟本子网相关），"
+    "以及当日 dtt 关键词监控抓到的人物发言线索（已做初步筛选）。\n"
+    "任务：**只挑出跟本子网明确相关**的发言，按人提炼成中文短句。\n"
+    "\n"
+    "【重要口径】这是「子网重要事件跟踪报告」里的社区动态，"
+    "**只放跟本子网有关的消息**。把生态全量所有人物观点都写出来是「社区日报」的职责，"
+    "不在这里做；哪怕发言人是创始人，只要与本子网无关也不写。\n"
     "\n"
     "【输出格式（每条一行，严格照此）】\n"
     "- 人名 转推 @对象：一句话内容要点\n"
     "- 人名 回复 @对象：一句话内容要点\n"
     "- 人名 表示：一句话内容要点\n"
-    "（自己发言用「表示」；转推用「转推 @谁」；回复/提及用「回复 @谁」；"
+    "（本人发言用「表示」；转推用「转推 @谁」；回复/提及用「回复 @谁」；"
     "对象若线索里写了 @某人 就带上，没写就不硬造。）\n"
     "\n"
-    "【硬规则】\n"
-    "1. **凡线索里出现的人物都要列**，不许因为「跟子网无关」就删人——"
-    "dtt 关键词监控本身已做过一轮重要性筛选。const 影响力最大，排**最前**并单列；"
-    "其余人按与本子网的相关度和发言份量排序。直接提到本子网项目/编号/事件/争议/"
-    "收入的写清他具体说了什么；没直接提到的，也用一句话概括他的观点或态度。\n"
-    "2. 写「内容要点」而不是抄原文：抓住他说了什么结论/数字/态度，一句话讲清；"
+    "【相关判定：满足至少一条才写】\n"
+    "1. 线索的 SN 归属就是本子网；\n"
+    "2. 内容点名本子网项目名、SN 编号或官方账号；\n"
+    "3. 内容的议题与「本子网当日社区消息」背景里的事件是同一件"
+    "（同一个性能对比、争议、训练进度、合作、回购等）。\n"
+    "\n"
+    "【必须剔除——哪怕发言人是创始人】\n"
+    "- 明确属于别的子网的（线索标了别的 SN，或内容在谈别的项目/争议）；\n"
+    "- 与本子网议题无关的泛泛发言（别的子网进展、隐私推理、日常寒暄、纯链接）。\n"
+    "\n"
+    "【其它硬规则】\n"
+    "- 写内容要点、不是抄原文：抓结论/数字/态度，一句话讲清；"
     "**不许贴任何 URL、t.co 链接、x.com 链接**。同一人同一观点合并成一条。\n"
-    "3. 人名只用线索 `<>` 里的显示名（如 const、p383），禁止写 @handle、"
-    "consttt、_数字 后缀、备注标签；被转推/回复的对象若是关键人物（如 const）"
-    "也用 @显示名（@const），不要用 @const_reborn 这类账号；其他对象保留其 @handle。\n"
-    "4. 每人 1-3 条，每条不超过 45 字；确实无可提炼内容的人才跳过。\n"
-    "5. 只输出要点行，不要标题、不要解释、不要总数统计；一个人都没就输出「无」。\n"
+    "- 人名只用线索 `<>` 里的显示名（如 const、cats），禁止 @handle、consttt、"
+    "_数字后缀、备注标签；被转推/回复的对象若是关键人物用 @显示名（@const），"
+    "其他对象保留其 @handle。\n"
+    "- 相关发言人里 const（创始人）排最前，其余按发言份量排；"
+    "每人 1-2 条、每条不超过 45 字；相关发言很少就少写，一条都没有就只输出「无」。\n"
+    "- 只输出要点行，不要标题、解释、总数统计。\n"
 )
+
+
+def _sn_related_events(events, sn, sn_name, cfg=None, context=""):
+    """从当日 dtt 全部消息里，筛出与当前子网明确相关的（供子网报告社区动态用）。
+
+    与社区日报口径不同：社区日报=生态全量所有人都列；这里=只留跟本 SN 有关的。
+    命中任一条件即保留：
+      1. dtt 的 sn 归属里含本 SN；
+      2. 内容点名本子网项目名 / SN 编号 / 官方 handle（如 cascade_sn91）；
+      3. 关键人物（const 等）发言里的实质词与「本子网当日社区消息」背景重合
+         （实测 const 的「19 days is actually quite slow」未标 SN，但正是 SN91
+         训练天数争议的关键回应，必须靠背景相关性捞回来）；
+      4. 内容含背景里出现的、且非通用词的专名（项目名/基准名/对手公司等）。
+    """
+    import community_digest as CD
+    cfg = cfg or {}
+    sn_s = str(sn)
+    name = (sn_name or "").strip()
+    # 本子网标识词：项目名、SN 编号各种写法、官方 handle
+    id_tokens = set()
+    if name:
+        id_tokens.add(name.lower())
+        id_tokens.add(re.sub(r"[^a-z0-9]", "", name.lower()))
+    for tok in ("sn%d" % sn, "#%d" % sn, "sn %d" % sn, "子网%d" % sn):
+        id_tokens.add(tok.lower())
+
+    # 从背景提取信号词：英文专名 + 2 位以上数字（如 GIFT-Eval / Salesforce / 19）。
+    # 数字信号很关键：const 的「19 days is actually quite slow」未标 SN，
+    # 但背景里有「SN91 训练第 19 天」，靠 19 这个数字把它捞回。
+    stop = {"社区", "未验证", "线索", "报告", "消息", "当日", "dtt", "sn", "未证实",
+            "表示", "转推", "回复", "chain", "data", "unverified", "the", "and"}
+    bg_words, bg_nums = set(), set()
+    for w in re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,}", (context or "")):
+        if w.lower() not in stop:
+            bg_words.add(w.lower())
+    for num in re.findall(r"\d{2,}", (context or "")):
+        bg_nums.add(num)
+
+    names = CD._key_author_names(cfg)
+    hits = []
+    for e in events or []:
+        tags = [str(x) for x in (e.get("sn") or [])]
+        content = (e.get("content") or "")
+        low = content.lower()
+        names_me = any(t in low for t in id_tokens if t)
+
+        # ① dtt 明确标了本 SN → 保留
+        if sn_s in tags:
+            hits.append(e)
+            continue
+        # ② 明确标了别的 SN → 一律排除（那是别的子网的事，不该出现在SN91报告）
+        #    例外：内容又点名了本子网项目名/SN号（罕见，如跨子网对比）
+        if tags and not names_me:
+            continue
+        # ③ 内容点名本子网项目名/SN编号/handle → 保留
+        if names_me:
+            hits.append(e)
+            continue
+        # ④ 未标 SN 的消息：靠背景信号判断是不是同一件事的讨论。
+        #    命中「背景数字」或「1 个以上背景专名」，且发言人是关键人物时保留；
+        #    普通发言人需命中 1 个背景专名 + 1 个背景数字才保留（避免泛聊误入）。
+        author = (e.get("author") or "")
+        overlap_w = [t for t in bg_words if t in low]
+        overlap_n = [n for n in bg_nums if n in low]
+        is_key = any(n in author.lower() for n in names)
+        if is_key and (overlap_w or overlap_n):
+            hits.append(e)
+            continue
+        if overlap_w and overlap_n:
+            hits.append(e)
+    return hits
 
 
 def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
                           context=""):
-    """与当前 SN 相关的人物观点：按人提炼成短句（含 const 与其他所有发言人）。
+    """与当前 SN 相关的人物观点：按人提炼成短句（含 const 与其他相关发言人）。
 
     复用一次小 LLM 调用做「相关性判断 + 提炼」，不贴链接、不抄原文、不用账号名。
     const 等创始人排最前；无相关发言返回空，绝不退回「原文全塞」。
@@ -3439,27 +3520,30 @@ def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
     events = list((payload or {}).get("events") or [])
     if not events:
         return "", 0
-    # 候选：当日全部人物发言（关键词监控已做过重要性筛选，一个人都不删）。
-    # const 等创始人排最前（影响力最大），其余按「标了本 SN 优先 + 相关性」排。
-    def _is_key(e):
-        a = (e.get("author") or "")
-        return any(n in a.lower() for n in names)
-
-    def _sn_hit(e):
-        return sn in [x for x in (e.get("sn") or [])]
-
+    # 子网重要事件报告的社区动态：只保留跟当前子网相关的消息。
+    # 「所有人物都列」是社区日报的职责，不在这里做（用户 2026-11-22 明确）。
+    sn_name = (meta or {}).get("name") or ""
+    hits = _sn_related_events(events, sn, sn_name, cfg, context=context)
+    if not hits:
+        return "", 0
     # 去重：同一人同一内容只留一条
     seen, uniq = set(), []
-    for e in events:
+    for e in hits:
         k = (CD._display_author(e.get("author"), cfg), (e.get("content") or "")[:80])
         if k in seen:
             continue
         seen.add(k)
         uniq.append(e)
-    key_ev = [e for e in uniq if _is_key(e)]
-    rest = [e for e in uniq if not _is_key(e)]
-    rest.sort(key=lambda e: (0 if _sn_hit(e) else 1, -CD._relevance(e, cfg)))
-    mine = key_ev + rest[:60]  # 上限防上下文爆炸；60 条足够覆盖当日全部活跃人物
+    # 排序：本 SN 标注的优先 → 关键人物 → 其余；同组按相关性降序。
+    def _is_key(e):
+        return any(n in (e.get("author") or "").lower() for n in names)
+
+    def _sn_hit(e):
+        return sn in [x for x in (e.get("sn") or [])]
+
+    uniq.sort(key=lambda e: (0 if _sn_hit(e) else (1 if _is_key(e) else 2),
+                             -CD._relevance(e, cfg)))
+    mine = uniq[:40]  # 上限防上下文爆炸（已预筛为相关消息）
     if not mine:
         return "", 0
     # 链接要抓正文，否则无法「总结链接内容」（用户明确要求）；只抓相关的少量。

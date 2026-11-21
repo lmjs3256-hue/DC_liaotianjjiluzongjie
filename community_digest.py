@@ -287,25 +287,50 @@ def _clean(s, n=MAX_MSG_CHARS):
     return s if len(s) <= n else s[:n] + "…"
 
 
+# 装饰字符：希腊字母(ταοεκ…)、emoji、方向/杂项符号(✠🌊→…)、变体选择符
+_DECOR_RE = re.compile(r"[\u0370-\u03ff\u2190-\u2bff\U0001f000-\U0001faff\ufe0f\u200d]")
+
+
 def _display_author(author, cfg=None):
-    """取人物显示名：有「备注:X」就用 X，不做任何账号名拼接。
+    """取简洁显示名：备注名优先，去掉账号后缀/辨识码/emoji/希腊字母装饰。
 
     dtt 的 author 字段常见形态（实测 11-22）：
       consttt,备注:const      → const        （监控把人名塞进备注）
       const@const_reborn      → const        （显示名@账号，取 @ 前）
       canigonow,备注:17       → 17
       p383_54249              → p383         （显示名_辨识码）
+      Aphτ 🌊α                → Aph          （emoji + 希腊字母装饰）
+      Chairman τao            → Chairman
+      Rayah τensor τ_τ        → Rayah
+      ✠ PUNISHER ττ ✠         → PUNISHER
       Millie@AltcoinMillie    → Millie
-    用户要求：关键人物名有备注的直接用备注名，不要展示 const_reborn /
-    consttt 这类原始账号名。故备注优先级最高，其次 @ 前显示名，再退 _数字 后缀。
+    用户要求：人名要简单，直接用备注名/显示名，不要原始账号名和装饰符号。
     """
     a = (author or "").strip()
     m = re.search(r"备注[:：]\s*([^,，\s]+)", a)
     if m:
-        return m.group(1).strip()
-    a = a.split("@")[0].strip()
-    a = re.sub(r"_\d{2,6}$", "", a).strip()
-    return a or "?"
+        return _simplify_name(m.group(1).strip())
+    a = a.split("@")[0].strip()          # 显示名@账号 → 取显示名
+    a = re.sub(r"_\d{2,6}$", "", a).strip()  # 名字_辨识码 → 取名字
+    return _simplify_name(a)
+
+
+def _simplify_name(a):
+    """去掉 emoji / 希腊字母 / 装饰符号 / `_装饰` 尾巴；有装饰时取最长的干净词。"""
+    a = (a or "").strip()
+    clean = _DECOR_RE.sub(" ", a)
+    clean = re.sub(r"[|｜]", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        clean = a
+    # 有装饰被去掉 → 名字里多个词时取最像名字的那个（通常第一个实质词）
+    toks = [t for t in clean.split() if t]
+    if not toks:
+        return clean or "?"
+    if len(toks) > 1:
+        # "Chairman ao" / "Aph" / "PUNISHER TT"：取第一个词，避免 τao→ao 这种碎片
+        return toks[0]
+    return clean
 
 
 def build_input(payload, cfg=None):

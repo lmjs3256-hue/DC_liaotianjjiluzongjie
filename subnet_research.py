@@ -3502,12 +3502,21 @@ def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
         ln = re.sub(r"https?://\S+", "", ln).strip()  # 兜底删链接
         for alias, canon in key_alias.items():
             ln = re.sub(r"@" + re.escape(alias) + r"\b", "@" + canon, ln, flags=re.I)
+        # 兜底：清掉行内残留的 emoji / 希腊字母装饰（τ、🌊、✠ 等），保留 ASCII handle
+        ln = re.sub(r"[\u0370-\u03ff\u2190-\u2bff\U0001f000-\U0001faff\ufe0f\u200d]", "", ln)
+        ln = re.sub(r"\s+", " ", ln).strip()
+        # 行首「人名 动作」部分再做一次显示名简化（如 Rayah τensor → Rayah）
+        m = re.match(r"^(.+?)\s+(转推|回复|表示)\b", ln)
+        if m:
+            head_plain = CD._simplify_name(m.group(1))
+            if head_plain != m.group(1):
+                ln = head_plain + ln[m.end(1):]
         if ln and ln not in ("无", "无。") and len(kept) < 45:
             kept.append(ln)
     if not kept:
         return "", 0
-    block = "**👥 相关人物观点（SN%d，含创始人）**\n%s" % (
-        sn, "\n".join("- " + x + " ⚠️未验证" for x in kept))
+    block = "**📢 当日社区动态（按人提炼）**\n%s" % (
+        "\n".join("- " + x + " ⚠️未验证" for x in kept))
     return block, len(kept)
 
 
@@ -3970,8 +3979,9 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         digest = _insert_section(digest, _comm_section, "📌 预期跟踪")
         log("📢 当日社区动态节被压缩删除，已从初稿恢复（%d 字）"
             % len(re.sub(r"\s", "", _comm_section)))
-    # 相关人物观点：所有提到当前 SN 的人（含 const）都按「某人 转推/回复/表示：要点」提炼。
-    # 不用主报告里那段（模型会漏/压缩会删），这里单独调用一次小 LLM 生成后固定插入。
+    # 当日社区动态：主模型写的是 dtt 英文原文照抄、人名也是原始账号，用户体验差。
+    # 这里单独调一次小 LLM，把全部人物按人提炼成中文短句（const 排前、无链接、无账号名），
+    # 生成成功后**整体替换**主模型那段英文，报告里只保留这一份中文版。
     if _nct:
         try:
             import community_fetch as CF2
@@ -3979,15 +3989,15 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             _cs, _cn = _people_summary_block(
                 _p2, cfg, sn, meta, llm, log=log, context=_comm_section)
             if _cs:
-                if "相关人物观点（SN" in digest:
-                    _rest, _ = _take_section(digest, "相关人物观点（SN")
-                    digest = _rest
+                # 删掉主模型写的旧英文节（可能已被压缩恢复），再插中文提炼版
+                if "📢 当日社区动态" in digest:
+                    digest, _ = _take_section(digest, "📢 当日社区动态")
                 digest = _insert_section(digest, _cs, "📌 预期跟踪")
-                log("📢 相关人物观点：提炼出与 SN%d 相关的 %d 条短句（含创始人，无链接/账号名）" % (sn, _cn))
+                log("📢 当日社区动态：已替换为按人提炼的中文版 %d 条（const 排前，无链接/账号名）" % _cn)
             else:
-                log("📢 相关人物观点：当日无与 SN%d 相关的发言，跳过" % sn)
+                log("📢 当日社区动态：人物提炼失败，保留主模型原节")
         except Exception as e:
-            log("📢 相关人物观点提炼跳过（%s）" % str(e)[:120])
+            log("📢 当日社区动态提炼跳过（%s）" % str(e)[:120])
     title = "🔬 SN%d %s · 重要事件跟踪报告（%s）" % (
         sn, meta["name"] or "未收录", datetime.datetime.now(TZ).strftime("%m-%d"))
     d = A.sn_dir(arc_dir, sn)

@@ -8,9 +8,23 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.21.8** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.21.9** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.21.9 — 2026-11-22
+
+**「📢 当日社区动态」整体换成中文按人提炼版 + 人名进一步简化**
+
+- 起因（用户实测）：v1.21.8 报告里出现了两节——主模型写的「📢 当日社区动态」是 dtt 英文原文照抄（`Aphτ 🌊α 表示：「Beating SOTA a multi billion dollar company…」`），人名是原始账号 `cats_cr`；而中文提炼版在另一节「👥 相关人物观点」。用户反馈「一堆英文、没提炼总结、人名太复杂」。
+- `subnet_research.py`：
+  - `_people_summary_block()` 的节标题改为「📢 当日社区动态（按人提炼）」；生成成功后**整体删除**主模型写的英文旧节，再插入中文提炼版，报告只留一份。提炼失败才保留原节。
+  - 提炼输出兜底：删链接、@const_reborn→@const、清掉行内 emoji/希腊字母装饰（τ/🌊/✠）、行首人名再过一次 `_simplify_name()`。
+- `community_digest.py`：
+  - `_display_author()` 加强：新增 `_simplify_name()` + `_DECOR_RE`，去 emoji/希腊字母(ταοεκ)/装饰符号/`|` 后缀/`_辨识码`；`Aphτ 🌊α`→`Aph`、`Chairman τao`→`Chairman`、`Rayah τensor τ_τ`→`Rayah`、`✠ PUNISHER ττ ✠`→`PUNISHER`。备注名、@ 前显示名优先的规则不变。
+- 验证：SN91 单测产出 45 条中文短句，const 排最前、人名已简化、无链接/账号名/装饰符号。
 
 ---
 

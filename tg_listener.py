@@ -11,8 +11,8 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /weekly                       周报
   /社区今日（/community_today） 今日社区日报：今日00:00→当前
   /社区昨日（/community_yesterday） 昨日社区日报：昨日00:00→当前
-  /社区确认 55 收入属实          确认冲突：把结论写进 SN55 档案（默认已核实）
-  /社区确认 64 谣言 已推翻        推翻某条冲突（末尾加「已推翻」）
+  /社区确认                     确认冲突：点命令后 bot 依次问 SN、结论（分两步，少打字）
+                                 也可一条写完：/社区确认 55 收入属实；末尾「已推翻」=推翻
   /社区重推                      按已确认结论重推社区日报确认版（不重新取数）
   /水聊（/water）                水聊侧记：只挑被日报过滤掉的闲聊，单独成一条
   /水聊 昨日 3                   指定日期 / 连续天数（只读已有导出，不重新导出）
@@ -87,10 +87,12 @@ HELP = (
     "   /社区昨日     取昨日00:00→当前（/社区 不带参数也=昨日）\n"
     "   可加日期：/社区 2026-11-20；末尾加 nopush 只生成不推送\n"
     "   🧑‍⚖️ 冲突人工确认闭环（专区冲突核对后）：\n"
-    "     /社区确认 55 收入属实，已查链上   ← 把结论写进 SN55 档案（默认「已核实」）\n"
-    "     /社区确认 64 取消回购是谣言 已推翻 ← 末尾加「已推翻」标为推翻\n"
+    "     /社区确认                       ← 点命令后 bot 分两步问：①SN编号 ②核实结论\n"
+    "       例：发 /社区确认 → 回「55」→ 回「收入属实，已查链上」即可（5分钟内）\n"
+    "       判定不实：结论结尾加「已推翻」；随时发 /取消 退出\n"
+    "     /社区确认 55 收入属实            ← 也可一条写完（老写法仍有效）\n"
     "     /社区重推                        ← 按已确认结论重推确认版（不重新取数/不调AI）\n"
-    "     确认后该结论会被投研和确认版日报引用；可直接发 SN 号确认最近一份日报的冲突。\n"
+    "     确认后该结论会被投研和确认版日报引用。\n"
     "━━ 子网档案 / 投研 ━━\n"
     "（建档全自动：每次导出日报时自动把提到的子网存档，已建档的增量补充、\n"
     "  未建档的自动新建，无需手动操作）\n"
@@ -468,6 +470,98 @@ _KEYBOARD = {
 }
 
 _REMOVE_KB = {"remove_keyboard": True}
+
+
+# ---------------------------------------------------------------------------
+# 分步对话（多轮引导）：点一下 BotFather 菜单里的短命令，再按提示逐步填内容。
+# 目前用于「社区冲突人工确认」——原写法要一整条 /社区确认 55 收入属实… 太长，
+# 手机上难打。现在发 /community_confirm（裸命令）后，bot 依次问 SN 编号、
+# 核实结论，用户分两条消息回复即可。
+#
+# 设计要点：
+#   - 按 chat_id 隔离，互不干扰；每轮刷新超时（默认 5 分钟），超时自动作废。
+#   - 拦截必须放在 handle() 最前面，早于「裸编号=投研」「ss58地址=补录」，
+#     否则分步输入「55」会被当成投研指令抢走。
+#   - 保留一次性写法：/社区确认 55 结论 仍然有效（老用户不受影响）。
+#   - /取消、/cancel、/退出 随时中止；发其它命令则自动放弃当前流程。
+# ---------------------------------------------------------------------------
+_CONFIRM_FLOW = {}          # chat_id -> {"step": "sn"|"note", "ts":..., "sn":...}
+_CONFIRM_FLOW_TTL = 300     # 秒；每轮操作都会重置
+
+
+def _confirm_flow_clear(chat_id):
+    _CONFIRM_FLOW.pop(str(chat_id), None)
+
+
+def _confirm_flow_active(chat_id):
+    st = _CONFIRM_FLOW.get(str(chat_id))
+    if not st:
+        return None
+    if time.time() - st.get("ts", 0) > _CONFIRM_FLOW_TTL:
+        _confirm_flow_clear(chat_id)
+        return None
+    return st
+
+
+def _confirm_flow_consume(text, chat_id):
+    """若该会话正处于分步确认中，消费本条消息并返回 True；否则返回 False。
+
+    返回 True 时调用方直接 return，不再走命令分发/裸编号逻辑。
+    """
+    st = _confirm_flow_active(chat_id)
+    if not st:
+        return False
+    t = (text or "").strip()
+    low = t.lstrip("/").lower().split("@")[0]
+    # 取消：中英文都认
+    if low in ("取消", "cancel", "退出", "quit", "q"):
+        _confirm_flow_clear(chat_id)
+        safe_send(chat_id, "已取消社区冲突确认，未写入任何档案。")
+        return True
+    # 发来其它斜杠命令：放弃当前流程，让该命令正常执行
+    if t.startswith("/"):
+        _confirm_flow_clear(chat_id)
+        return False
+    # 第 1 步：输入 SN 编号
+    if st["step"] == "sn":
+        m = re.match(r"^(?:SN|#|subnet\s*)?(\d{1,4})$", t, re.I)
+        if not m:
+            safe_send(chat_id, "请回复子网编号（如 55），或发 /取消 退出。")
+            return True
+        st["sn"] = m.group(1)
+        st["step"] = "note"
+        st["ts"] = time.time()
+        safe_send(chat_id,
+                  "✅ 已记录 SN%s。\n"
+                  "现在请回复人工核实结论，例如：\n"
+                  "　收入数字属实，已查链上审计\n"
+                  "若判定社区消息不实，结尾加「已推翻」，例如：\n"
+                  "　取消回购是谣言，已推翻\n"
+                  "发 /取消 可随时退出。" % st["sn"])
+        return True
+    # 第 2 步：输入核实结论 → 调用与一次性写法相同的执行体
+    if not t:
+        safe_send(chat_id, "结论不能为空，请重新输入，或发 /取消 退出。")
+        return True
+    sn = st.get("sn") or ""
+    _confirm_flow_clear(chat_id)
+    _run_community_confirm(sn, t, chat_id)
+    return True
+
+
+def _run_community_confirm(sn, note, chat_id):
+    """社区冲突确认的统一执行体：分步对话与一次性写法共用，避免逻辑分叉。"""
+    note = (note or "").strip()
+    status = "confirmed"
+    if note.endswith("已推翻") or note.endswith("不实"):
+        status = "refuted"
+        note = re.sub(r"(已推翻|不实)\s*$", "", note).strip()
+        note = note.rstrip("，,。.；;、 \t")   # 去掉标记后清掉残留标点
+    if not note:
+        note = "（无补充结论）"
+    day = _latest_community_day()
+    send_async(chat_id, "🧑‍⚖️ 收到，正在把确认结论写入 SN%s 档案…" % sn)
+    run_pipeline(["community_confirm", day, str(sn), note, status], chat_id, quiet=True)
 
 
 def send(chat_id, text, markup=None):
@@ -1067,6 +1161,10 @@ def handle(text, chat_id):
     text = (text or "").strip()
     if not text:
         return
+    # 分步对话优先拦截：正在引导社区确认时，用户回复的「55」「结论…」必须
+    # 先被这里消费，绝不能落到下面的「裸编号=投研」「ss58=地址补录」逻辑。
+    if _confirm_flow_consume(text, chat_id):
+        return
     parts = text.split()
     # 群里发指令可能带 @机器人名（/digest@Dtao_ribao_bot），剥掉后缀再匹配
     cmd = parts[0].lstrip("/").lower().split("@")[0]
@@ -1128,27 +1226,27 @@ def handle(text, chat_id):
         send_async(chat_id, "🌐 收到，正在生成 Bittensor 社区消息日报（dtt版），稍等…")
         run_pipeline(["community"] + preset + parts[1:], chat_id, quiet=True)
     elif cmd in ("社区确认", "community_confirm", "确认冲突", "核实"):
-        # 人工确认社区日报冲突：/社区确认 SN编号 结论 [已推翻]
-        #   例：/社区确认 55 收入数字属实，已查链上
-        #       /社区确认 64 取消回购是谣言 已推翻
-        # 写进该 SN 档案 community_digests[].confirm，供投研与确认版日报引用。
+        # 人工确认社区日报冲突，两种写法：
+        #   ① 分步（推荐）：只发 /community_confirm → bot 依次问 SN、核实结论
+        #   ② 一次性（兼容）：/社区确认 55 收入数字属实，已查链上 [已推翻]
+        # 两种写法最终都走 _run_community_confirm，逻辑不重复。
         rest = parts[1:]
+        if not rest:
+            _CONFIRM_FLOW[str(chat_id)] = {"step": "sn", "ts": time.time(), "sn": ""}
+            safe_send(chat_id,
+                      "🧑‍⚖️ 社区冲突确认（分两步，5 分钟内有效）\n"
+                      "第 1 步 请回复子网编号，如：55\n"
+                      "第 2 步 再回复核实结论，如：收入数字属实，已查链上\n"
+                      "（判定不实则结论结尾加「已推翻」）\n"
+                      "发 /取消 随时退出；也可一条写完：/社区确认 55 结论")
+            return
         if len(rest) < 2 or not re.match(r"^\d{1,4}$", rest[0]):
             send_async(chat_id, "用法：/社区确认 SN编号 结论 [已推翻]\n"
                           "例：/社区确认 55 收入数字属实，已查链上\n"
                           "    /社区确认 64 取消回购是谣言 已推翻（默认为「已核实」）\n"
-                          "默认确认最近一份社区日报的日期；可在 SN 前加日期指定。")
+                          "也可只发 /社区确认 进入分步引导。")
             return
-        sn = rest[0]
-        note = " ".join(rest[1:]).strip()
-        status = "confirmed"
-        if note.endswith("已推翻") or note.endswith("不实"):
-            status = "refuted"
-            note = re.sub(r"(已推翻|不实)\s*$", "", note).strip()
-        # 默认对最近一份社区日报的日期确认（不重新取数）
-        day = _latest_community_day()
-        run_pipeline(["community_confirm", day, sn, note,
-                      "refuted" if status == "refuted" else "confirmed"], chat_id, quiet=True)
+        _run_community_confirm(rest[0], " ".join(rest[1:]).strip(), chat_id)
     elif cmd in ("社区重推", "community_reconfirm", "确认版重推"):
         # 按档案人工确认重推社区日报确认版（不重新取数/不调 AI）
         rest = parts[1:]

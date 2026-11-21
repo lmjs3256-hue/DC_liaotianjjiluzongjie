@@ -4,7 +4,7 @@
 > 用 AI 总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.20.8** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.21.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 **当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
@@ -752,7 +752,22 @@ A：不会。两个模型**共用同一次导出结果**，只是把同一份聊
 **Q：总结用的是哪个模型？可以换吗？**
 A：当前默认接 **Engy（Bittensor SN53）上的 `kimi-k3`**，并关闭了思考模式。日报底部那行 `🤖 由 xxx 生成` 会自动跟着 `deepseek_model` 变，看到什么名字就是什么模型在跑。
 
-**换模型只要改 `config.json` 三个字段**（不用改代码、不用重启监听——监听每次触发都会起新的子进程读最新配置）：
+**V1.21.0 起可在 TG 里一句话切换平台/模型，不用手改 `config.json`**（`llm_profiles.py` + `/模型` 命令）：
+
+```
+/模型                              列出所有档案+当前（key 只显前后各几位，脱敏）
+/模型 sn28                         切到 SN28 SayGM（预置档案）
+/模型 当前                          只看当前
+/模型 添加 <名> <base_url> <模型名> <key>   现场加平台（覆盖同名）
+/模型 删除 <名>                     删档案（不能删当前在用的）
+```
+
+- 切换 = 把档案字段写回 `deepseek_*` 主字段 + 记 `active_llm_profile`，**原子写盘、立即生效**（日报是子进程重读配置），无需重启监听。
+- 已预置两个档案：`engy`（SN53，默认）和 `sn28`（SayGM）；加其他平台在 TG 现场 `/模型 添加` 即可。
+- **安全提醒**：现场添加会把 api_key **明文存进 `config.json`**，且 **key 会出现在 TG 聊天记录里**——发送的群注意权限，别在公开群发带 key 的命令。回执里始终脱敏显示。
+- 底部署名自动跟随模型名（未知型号原样显示）。
+
+**老办法仍然有效：改 `config.json` 三个字段**（不用改代码、不用重启监听——监听每次触发都会起新的子进程读最新配置）：
 
 ```jsonc
 "deepseek_base_url": "https://api.engy.ai/v1",   // ① 服务商地址（OpenAI 兼容的 /v1）
@@ -766,6 +781,7 @@ A：当前默认接 **Engy（Bittensor SN53）上的 `kimi-k3`**，并关闭了�
 | 渠道 | `deepseek_base_url` | `deepseek_model` | 备注 |
 |---|---|---|---|
 | **Engy / Kimi K3（当前）** | `https://api.engy.ai/v1` | `kimi-k3` | SN53 验证推理网络，$1.95/$9.75 每百万 token；**需在 `deepseek_extra_params` 里关思考**，否则可能思考到没正文 |
+| **SN28 SayGM / Kimi K3（预置）** | `https://api.saygm.com/v1` | `kimi-k3` | SN28 的 OpenAI 兼容网关（docs.saygm.com/api/overview），key 格式 `gm_live_…`；同样要关思考（`/模型` 切换会自动带）； Claude/Gemini 只走各自原生接口、**本项目用不了** |
 | DeepSeek（最便宜） | `https://api.deepseek.com/v1` | `deepseek-chat` | 国内直连，无需代理 |
 | DeepSeek 强推理 | 同上 | `deepseek-reasoner` | 更慢更贵；推理模型对温度不敏感，结构可能更啰嗦 |
 | Moonshot 官方 Kimi | `https://api.moonshot.cn/v1` | `kimi-k3` | ¥20/¥100 每百万 token，比 Engy 贵，胜在稳定 |

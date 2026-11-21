@@ -8,9 +8,25 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.20.8** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.21.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.21.0 — 2026-11-22
+
+**TG 里切换大模型平台/模型：档案 + `/模型` 命令（列出/切换/现场添加/删除）**
+
+- 起因（用户问）：日报分析是否走 SN53 API？想换到 SN28（及以后其他平台），要能在 TG 里切换。
+- 现状核实（事实）：日报走 `config.json` 的 `deepseek_base_url/model/api_key`，当前是 Engy(SN53) `api.engy.ai/v1` + `kimi-k3`；15 处调用点全读这三个字段；TG 触发是子进程重读配置，写盘即生效无需重启。
+- 新模块 `llm_profiles.py`：档案存在 `config.json` 的 `llm_profiles[]` + `active_llm_profile`；`switch()` 把档案写回 `deepseek_*` 主字段（原子写 tmp+os.replace）、`add()`/`remove()`/`list_profiles()`/`current()`；key 一律脱敏回显。可选项（extra_params/max_tokens/timeout）随档案走、切换时清掉上一个模型残留。
+- TG `tg_listener.py`：`/模型`（别名 /model、/llm）五种子命令——列出/当前/切换/添加/删除；帮助文本、键盘按钮同步；异常（KeyError/ValueError/通用）都有回执。
+- 预置两档案：`engy`（默认，带关思考参数）、`sn28`（SayGM `api.saygm.com/v1` + kimi-k3，`gm_live_…` key）。
+- **SN28 核实（公开信息）**：SN28 = SayGM（gm 子网），OpenAI 兼容 `https://api.saygm.com/v1`、`/chat/completions`，key 格式 `gm_live_…`（dashboard 创建），来源 docs.saygm.com/api/overview、saygm.com。**Claude 只走 /v1/messages、Gemini 只走 generateContent，本项目用不了**。
+- **实测（关键）**：key 有效（余额 $0.98）；kimi-k3 默认开思考会把正文吃空（content=null），`thinking.type=disabled` 与 `enable_thinking=false` 两种写法都能关，SN28 档案沿用前者；用项目 `call_llm` 真实调用返回「可用」、思考 token=0；切换→写盘→model_label 跟随→切回全通过。
+- **坑**：环境注入的 `https_proxy=127.0.0.1:58325` TLS 握手失败，显式 `-x 127.0.0.1:7890` 才通；项目自带代理逻辑走系统代理 7890 正常。测试误删 engy 档案，已从 `config.json.bak_before_profiles` 恢复并切回。
+- **安全**：现场添加把 key 明文存 config.json 且留在 TG 聊天记录，README 与命令回执均提示；回执始终脱敏。
 
 ---
 

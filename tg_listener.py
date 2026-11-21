@@ -14,6 +14,8 @@ TG 指令监听：在你的 Telegram 对话里发命令，直接触发 pipeline�
   /社区确认                     确认冲突：点命令后 bot 依次问 SN、结论（分两步，少打字）
                                  也可一条写完：/社区确认 55 收入属实；末尾「已推翻」=推翻
   /社区重推                      按已确认结论重推社区日报确认版（不重新取数）
+  /模型（/model）                大模型平台/模型切换：无参列出；/模型 sn28 切换；
+                                 /模型 添加 <名> <base_url> <模型名> <key>；/模型 删除 <名>
   /水聊（/water）                水聊侧记：只挑被日报过滤掉的闲聊，单独成一条
   /水聊 昨日 3                   指定日期 / 连续天数（只读已有导出，不重新导出）
   /watch                       查看潜力观察（默认最新一天，可跟天数 /watch 7 或 /watch all；同步推飞书）
@@ -48,6 +50,7 @@ import urllib.error
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import pipeline as P
+import llm_profiles as LP
 
 def log(msg):
     """只写文件，不 print。
@@ -93,6 +96,11 @@ HELP = (
     "     /社区确认 55 收入属实            ← 也可一条写完（老写法仍有效）\n"
     "     /社区重推                        ← 按已确认结论重推确认版（不重新取数/不调AI）\n"
     "     确认后该结论会被投研和确认版日报引用。\n"
+    "🤖 /模型 大模型平台切换（当前 Engy SN53 / kimi-k3）：\n"
+    "   /模型              列出档案+当前；/模型 sn28 切到 SN28 SayGM\n"
+    "   /模型 添加 <名> <base_url> <模型名> <key> 现场加平台（key会留聊天记录，注意）\n"
+    "   /模型 删除 <名>    删除档案（不能删当前在用的）；/模型 当前 看当前\n"
+    "   切换写盘即生效，下次日报/投研就是新模型，无需重启\n"
     "━━ 子网档案 / 投研 ━━\n"
     "（建档全自动：每次导出日报时自动把提到的子网存档，已建档的增量补充、\n"
     "  未建档的自动新建，无需手动操作）\n"
@@ -463,8 +471,8 @@ _KEYBOARD = {
         ["/digest 昨日", "/repush 最新"],
         ["/投研 29", "/档案"],
         ["/社区今日", "/社区昨日"],
-        ["/watch 7", "/weekly"],
-        ["/keyboard", "/help"]
+        ["/模型", "/watch 7"],
+        ["/weekly", "/help"]
     ],
     "resize_keyboard": True
 }
@@ -1452,6 +1460,63 @@ def handle(text, chat_id):
             return
         send_async(chat_id, "📤 收到，正在重推 %s%s…" % (day, ("（%s）" % "/".join(targets)) if targets else ""))
         run_pipeline(["repush", day] + targets, chat_id, quiet=True)
+    elif cmd in ("模型", "model", "llm"):
+        # 大模型平台/模型切换（v1.21.0）：点命令列出档案、按名字切换、现场添加。
+        # 写盘立即生效（日报是子进程重读 config.json），key 一律脱敏回显。
+        rest = parts[1:]
+        sub = rest[0].lower() if rest else ""
+        try:
+            if not rest or sub in ("列表", "list", "l"):
+                profs, act = LP.list_profiles()
+                cur = LP.current()
+                lines = ["🤖 当前生效：%s（%s · %s，key %s）"
+                         % (act or "主配置直填", cur["base_url"], cur["model"], cur["key_mask"]),
+                         "可用档案："]
+                for p in profs:
+                    lines.append("  %s %s · %s · %s · key %s"
+                                 % ("✅" if p["active"] else "　", p["name"],
+                                    p["label"], p["base_url"], p["key_mask"]))
+                lines += ["", "切换：/模型 <档案名>（如 /模型 sn28）",
+                          "添加：/模型 添加 <名> <base_url> <模型名> <api_key>",
+                          "删除：/模型 删除 <名>；当前：/模型 当前",
+                          "⚠️ 添加会把 key 存进 config.json 明文、并留在 TG 聊天记录里，注意保管。"]
+                safe_send(chat_id, "\n".join(lines))
+            elif sub in ("当前", "current", "c"):
+                cur = LP.current()
+                safe_send(chat_id, "🤖 当前：%s\n地址：%s\n模型：%s\nkey：%s"
+                          % (cur["active"] or "主配置直填", cur["base_url"],
+                             cur["model"], cur["key_mask"]))
+            elif sub in ("添加", "add", "a"):
+                # /模型 添加 <名> <base_url> <模型名> <api_key>
+                if len(rest) < 5:
+                    safe_send(chat_id,
+                              "用法：/模型 添加 <档案名> <base_url> <模型名> <api_key>\n"
+                              "例：/模型 添加 sn28 https://api.saygm.com/v1 kimi-k3 gm_live_xxx\n"
+                              "⚠️ key 会明文存进 config.json 并留在聊天记录，注意保管。")
+                    return
+                item = LP.add(rest[1], rest[2], rest[3], rest[4])
+                safe_send(chat_id, "✅ 已%s档案「%s」\n地址：%s\n模型：%s\nkey：%s\n"
+                              "发 /模型 sn28 即可切换（下次日报生效，无需重启）"
+                              % ("覆盖" if item["replaced"] else "添加", item["name"],
+                                 item["base_url"], item["model"], item["key_mask"]))
+            elif sub in ("删除", "remove", "rm", "d"):
+                if len(rest) < 2:
+                    safe_send(chat_id, "用法：/模型 删除 <档案名>（不能删当前正在用的）")
+                    return
+                gone = LP.remove(rest[1])
+                safe_send(chat_id, "🗑 已删除档案「%s」" % gone)
+            else:
+                # 其余按「切换」处理：/模型 sn28
+                r = LP.switch(rest[0])
+                safe_send(chat_id,
+                          "🔄 已切换到「%s」\n地址：%s\n模型：%s\nkey：%s\n"
+                          "✅ 配置已落盘，下次触发日报/投研即生效，无需重启监听。"
+                          % (r["label"], r["base_url"], r["model"], r["key_mask"]))
+        except (KeyError, ValueError) as e:
+            safe_send(chat_id, "❌ %s" % e)
+        except Exception as e:
+            log("模型命令失败：%s" % e)
+            safe_send(chat_id, "❌ 操作失败：%s（详见 tg_listener.log）" % e)
     else:
         safe_send(chat_id, "未知指令：%s\n%s" % (text, HELP))
 

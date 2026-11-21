@@ -3276,13 +3276,17 @@ def _format_community_today(payload, sn, limit=15):
 
 
 def _today_community_block(cfg, sn, day_str=None, log=print):
-    """取当日 dtt 社区消息并拼段；取数失败一律不阻断投研主流程。"""
+    """取当日 dtt 社区消息并拼段；取数失败一律不阻断投研主流程。
+
+    返回 (block, kept, state)，state ∈ hit / empty / error；
+    run_research 会把 state 打成固定日志行，供 TG 回执显示「当日 dtt 消息统计」。
+    """
     day_str = day_str or datetime.datetime.now(TZ).strftime("%Y-%m-%d")
     try:
         import community_fetch as CF
     except Exception as e:
         log("   ⚠️ 当日社区消息模块不可用（%s），跳过" % str(e)[:120])
-        return "", 0
+        return "", 0, "error"
     try:
         payload = CF.read_day(day_str, cfg)
         if payload is not None and CF.cache_covers_now(payload, cfg):
@@ -3294,18 +3298,18 @@ def _today_community_block(cfg, sn, day_str=None, log=print):
             payload = CF.fetch_day(day_str, cfg, log=log, until_now=True)
     except Exception as e:
         log("   ⚠️ 当日 dtt 社区消息取数失败（%s），本次投研继续，不带社区段" % str(e)[:160])
-        return "", 0
+        return "", 0, "error"
     try:
         block, n = _format_community_today(
             payload, sn, limit=int(cfg.get("research_community_max", 12) or 12))
     except Exception as e:
         log("   ⚠️ 当日社区消息整理失败（%s），跳过" % str(e)[:120])
-        return "", 0
+        return "", 0, "error"
     if n:
         log("   ✅ 当日 dtt 社区消息：SN%d 命中 %d 条，已加入投研输入" % (sn, n))
     else:
         log("   当日 dtt 社区消息：SN%d 无命中" % sn)
-    return block, n
+    return block, n, ("hit" if n else "empty")
 
 
 def _signal_block(sources):
@@ -3565,10 +3569,10 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             log("  投研补抓 %-12s %s" % ("X", "OK" if r.get("ok") else "失败"))
     # ③ 当日 dtt 社区消息（关键词监控）：有该 SN 的消息才注入；取数失败不阻断投研。
     #    放在全网抓取之后，复用已取数缓存（社区日报刚跑过就直接复用，不重复请求 dtt）。
-    community_today = ""
+    community_today, _nct, _dtt_state = "", 0, "off"
     if cfg.get("research_community_today", True):
         log("③ 当日 dtt 社区消息（关键词监控）…")
-        community_today, _nct = _today_community_block(cfg, sn, today, log=log)
+        community_today, _nct, _dtt_state = _today_community_block(cfg, sn, today, log=log)
     else:
         log("③ 当日 dtt 社区消息：配置 research_community_today=false，跳过")
     text_block = build_input(arc, sources, meta, days=days,
@@ -3737,6 +3741,12 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             "；".join(_src_state(k, v) for k, v in sources.items()),
             digest))
     log("④ 报告已生成：%s（%d 字）" % (path, len(re.sub(r"\s", "", digest))))
+    # 固定格式的一行：TG 投研回执从这里抓「当日 dtt 消息统计」（不重新取数、不调 AI）。
+    log({
+        "hit": "📢 当日dtt社区消息：%d 条，已注入报告素材（报告内见「📢 当日社区动态」）" % _nct,
+        "empty": "📢 当日dtt社区消息：无命中，未写入报告",
+        "error": "📢 当日dtt社区消息：取数失败，未写入报告（不影响投研）",
+    }.get(_dtt_state, "📢 当日dtt社区消息：已关闭"))
     # 投研产出增量写回子网档案：报告正文 + 结论 + 时间线 + 数据源一起入库；
     # 已有档案只替换本日记录（幂等），没有档案就新建一个 —— 这是下次投研的输入来源。
     try:

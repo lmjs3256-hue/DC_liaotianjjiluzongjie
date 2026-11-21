@@ -714,8 +714,13 @@ def _run_pipeline_sync(args, chat_id):
         if args and args[0] == "research":
             m = re.search(r"报告已存：(.+?)（(\d+) 字）", out)
             detail = ("\n📄 %s\n📝 %s 字" % (m.group(1), m.group(2))) if m else ""
-            safe_send(chat_id, "✅ 子网投研报告已生成并推送（飞书 + TG）%s\n"
-                          "已归档到 %s（下次同子网可直接复用档案）。" % (detail, _arc_label()))
+            # v1.21.3：回执补一句「当日 dtt 社区消息统计」——数字来自投研子进程固定日志行，
+            # 不重新取数、不调 AI；无命中/取数失败/关闭也如实写明。
+            mdtt = re.search(r"当日dtt社区消息：([^\n]+)", out)
+            dtt_line = ("\n📊 当日 dtt 社区消息：%s" % mdtt.group(1).strip()) if mdtt else ""
+            safe_send(chat_id, "✅ 子网投研报告已生成并推送（飞书 + TG）%s%s\n"
+                          "已归档到 %s（下次同子网可直接复用档案）。"
+                          % (detail, dtt_line, _arc_label()))
             return
         if args and args[0] == "community":
             # 社区日报专属回执：日报正文已由 pipeline 自行推送，这里回一条明确的

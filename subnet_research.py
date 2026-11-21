@@ -2027,7 +2027,9 @@ RESEARCH_COMPRESS_PROMPT = (
     "3. 跟踪清单压到 4 条，每条只留「盯什么 + 判断阈值」；\n"
     "4. 各处铺垫词、形容词、重复解释。\n"
     "\n【必须原样保留】\n"
-    "- 全部小节标题与顺序（只有四段：时间线 / 当前数据 / 收入与回购 / 预期跟踪）；\n"
+    "- 全部小节标题与顺序：时间线 / 当前数据 / 收入与回购 / 📢 当日社区动态（初稿有这节时必须有）/ 预期跟踪；"
+    "**「📢 当日社区动态」这一节绝对不许删**，只许压短其中每条的表述，"
+    "[社区] 标记、⚠️未验证、人名和具体消息内容都要留着；\n"
     "- 所有数字、单位、来源标记 `[群聊 MM-DD]` `[taostats]` `[dtaoscan]` `[bittensor.ai]` `[官网]` `[GitHub]` `[新闻]` `[X]` `[搜索]`；\n"
     "- 人名、子网名、SN 编号；\n"
     "- 时间线里带 `<font color=\"red\">📰 ...</font>` 的红色资讯条目，以及末尾那行红色图例注明；\n"
@@ -2115,6 +2117,31 @@ def tidy_github_line(digest, gh_sum=None, log=print):
     if fix_n:
         log("GitHub 条目改写：%d 处（补「最后一次更新+次数+内容」、清英文残留）" % fix_n)
     return "\n".join(out), fix_n
+
+
+def _take_section(digest, marker):
+    """从报告里抠出一整节（标题行到下一个 **标题** 行前）。返回 (去掉该节的正文, 节文本)。"""
+    lines = (digest or "").splitlines()
+    head = re.compile(r"^\s*\*\*.+\*\*\s*$")
+    start = next((i for i, ln in enumerate(lines)
+                  if marker in ln and head.match(ln)), None)
+    if start is None:
+        return digest, ""
+    end = next((j for j in range(start + 1, len(lines)) if head.match(lines[j])),
+               len(lines))
+    section = "\n".join(lines[start:end]).strip()
+    rest = "\n".join(lines[:start] + lines[end:]).strip()
+    return rest, section
+
+
+def _insert_section(digest, section, before):
+    """把保存的整节插回报告的指定标题之前（压缩/整理误删后的代码兜底）。"""
+    lines = (digest or "").splitlines()
+    pos = next((i for i, ln in enumerate(lines)
+                if before in ln and ln.lstrip().startswith("**")), None)
+    if pos is None:
+        return (digest.rstrip() + "\n\n" + section).strip()
+    return "\n".join(lines[:pos] + ["", section, ""] + lines[pos:]).strip()
 
 
 def tidy_dates(digest, log=print):
@@ -3740,21 +3767,29 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     except Exception as e:
         log("投研校对跳过（%s）" % e)
     digest = (digest or "").strip()
+    # 压缩前留存「📢 当日社区动态」整节：压缩提示词原本写「只有四段」，
+    # 实测模型会把这节当成多余整节删掉。留底后若丢失由代码插回，保证内容不消失。
+    _comm_section = ""
+    if _nct:
+        _comm_section = _take_section(digest, "📢 当日社区动态")[1]
     # 字数闸门：只限上限 1600 字（时间线里的红色资讯条目要留出空间），不设下限。
     # rounds=3：模型每轮只删一部分，两轮常常压不到位（实测 5061→3465），三轮才收得住。
     try:
         digest = pipeline.compress_digest(cfg, digest, 0, 1600, rounds=3,
                                           system_prompt=RESEARCH_COMPRESS_PROMPT,
                                           sanitize_fn=lambda s: pipeline.strip_length_tags(s),
-                                          cut_hint="报告只有四段（时间线 / 当前数据 / 收入与回购 / 预期跟踪）。"
+                                          cut_hint="报告有四段骨架（时间线 / 当前数据 / 收入与回购 / 预期跟踪），"
+                                                   "有 dtt 社区素材时还有第五段「📢 当日社区动态」。"
                                                    "压缩顺序：① 先删时间线里最不重要的整条事件（合并同类、去掉铺垫词）；"
                                                    "② 每条事件压到一行、去掉形容词与重复解释，**但日期、事件核心、"
                                                    "✅已验证/⚠️未验证标记必须留着**；"
                                                    "③ 预期跟踪压到 4 条；"
-                                                   "④ 「当前价格」「💰 收入与回购」两段**永远不许删**"
+                                                   "④ 「📢 当日社区动态」**只许压短表述、绝对不许整节删除**，"
+                                                   "每条的 [社区] 标记、⚠️未验证、人名、消息具体内容必须保留；"
+                                                   "⑤ 「当前价格」「💰 收入与回购」两段**永远不许删**"
                                                    "（收入段是用户点名要求的）；收入段最多把相近项合并成一行，"
                                                    "但收入额、回购金额、变化百分比一个都不许丢；"
-                                                   "⑤ 时间线末尾的红色图例注明行、以及带 <font color=\"red\">📰</font> 的"
+                                                   "⑥ 时间线末尾的红色图例注明行、以及带 <font color=\"red\">📰</font> 的"
                                                    "红色资讯条目**不许删**。"
                                                    "全部数字、来源标记、人名、SN 编号、<font color=\"red\"> 标红必须原样保留。")
     except Exception as e:
@@ -3804,6 +3839,10 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             log("资讯/时间线整理：%d 处调整" % _nfix)
     except Exception as e:
         log("资讯并入时间线跳过（%s）" % e)
+    if _comm_section and "📢 当日社区动态" not in digest:
+        digest = _insert_section(digest, _comm_section, "📌 预期跟踪")
+        log("📢 当日社区动态节被压缩删除，已从初稿恢复（%d 字）"
+            % len(re.sub(r"\s", "", _comm_section)))
     title = "🔬 SN%d %s · 重要事件跟踪报告（%s）" % (
         sn, meta["name"] or "未收录", datetime.datetime.now(TZ).strftime("%m-%d"))
     d = A.sn_dir(arc_dir, sn)
@@ -3837,8 +3876,12 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
             digest))
     log("④ 报告已生成：%s（%d 字）" % (path, len(re.sub(r"\s", "", digest))))
     # 固定格式的一行：TG 投研回执从这里抓「当日 dtt 消息统计」（不重新取数、不调 AI）。
+    # 文案按最终报告里有没有这一节写，不能素材注入了却说「报告内见」——实测压缩会删节。
+    _in_report = "📢 当日社区动态" in digest
     log({
-        "hit": "📢 当日dtt社区消息：%d 条，已注入报告素材（报告内见「📢 当日社区动态」）" % _nct,
+        "hit": ("📢 当日dtt社区消息：%d 条，已写入报告「📢 当日社区动态」节" % _nct)
+               if _in_report else
+               ("📢 当日dtt社区消息：%d 条，已注入素材但报告未生成该节（请检查）" % _nct),
         "empty": "📢 当日dtt社区消息：无命中，未写入报告",
         "error": "📢 当日dtt社区消息：取数失败，未写入报告（不影响投研）",
     }.get(_dtt_state, "📢 当日dtt社区消息：已关闭"))

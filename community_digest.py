@@ -225,14 +225,17 @@ COMMUNITY_SYSTEM_PROMPT = (
     "**🧩 子网动态**（**按 SN 分组**：每个有实质消息的子网写一块，格式「**SN53 Engy**（N 条）」"
     "下接 1-3 条要点；子网名以输入里的名称对照为准，查不到就只写编号，不要编名字。"
     "按消息量与重要性排序，只写有价值的前若干个，不必全部列出）\n"
-    "**👀 人物与观点**（逐个点名当天所有发言人，格式「**@人名**：做了什么/说了什么（平台）」；"
-    "**const（@const_reborn）必须单列且完整**：他的推文、转推（写清「转推 @谁」）、"
-    "回复/提及（写清对象）逐条体现，不得合并成一句空话；"
-    "其他人一律列人名+消息要点，不做重要性筛选；确实无人发言才写「无」）\n"
-    "　用户名写法：Discord 等平台的 `名字_四位数字`（如 `p383_54249`）是「显示名+辨识码」，"
-    "统一写成 **@显示名**（如 **@p383**），去掉 `_数字` 后缀和 `备注:` 之类监控标签，"
-    "保留 @ 前缀让人一眼认出是用户名，别把辨识码当成名字的一部分；"
-    "原文若有真实姓名/公开别名（如 Isabella Liu）则用真名，不要改成编号。\n"
+    "**👀 人物与观点**（逐个点名当天所有发言人，格式「**人名**：做了什么/说了什么（平台）」；"
+    "人名一律用输入里的显示名（如 `const`、`p383`），**禁止**写 `xxx@handle`、"
+    "`名字_数字`、`备注:` 这类账号/辨识码后缀；"
+    "**const 必须单列**：只写他当天与本子网相关的发言/转推/回复，"
+    "每条提炼成一句「const 转推 @谁：内容要点」「const 回复 @谁：内容要点」"
+    "「const 表示：内容要点」，写清对象与他说了什么，不贴原始链接、不照抄全文；"
+    "与 subnet 无关的日常发言不列。其他人一律列人名+消息要点，不做重要性筛选；确实无人发言才写「无」）\n"
+    "　用户名写法：输入里 `<>` 内已是规范显示名（备注名优先，如 `const`、`p383`），**直接用、不要改**；"
+    "若遇到 `名字_四位数字`（如 `p383_54249`）去掉 `_数字` 后缀写成 `p383`，"
+    "遇到 `名字@handle` 只取 `名字`，遇到 `备注:xxx` 只取 `xxx`；"
+    "原文若有真实姓名/公开别名（如 Isabella Liu）则用真名。禁止出现 @handle/辨识码/备注标签。\n"
     "**💡 一句话总结**（当天社区情绪与主线，一句收束）\n"
     "\n"
     "【交叉核对：发现矛盾必须标出来，交人工确认（格式严格）】\n"
@@ -282,6 +285,27 @@ def _sn_names():
 def _clean(s, n=MAX_MSG_CHARS):
     s = re.sub(r"\s+", " ", (s or "")).strip()
     return s if len(s) <= n else s[:n] + "…"
+
+
+def _display_author(author, cfg=None):
+    """取人物显示名：有「备注:X」就用 X，不做任何账号名拼接。
+
+    dtt 的 author 字段常见形态（实测 11-22）：
+      consttt,备注:const      → const        （监控把人名塞进备注）
+      const@const_reborn      → const        （显示名@账号，取 @ 前）
+      canigonow,备注:17       → 17
+      p383_54249              → p383         （显示名_辨识码）
+      Millie@AltcoinMillie    → Millie
+    用户要求：关键人物名有备注的直接用备注名，不要展示 const_reborn /
+    consttt 这类原始账号名。故备注优先级最高，其次 @ 前显示名，再退 _数字 后缀。
+    """
+    a = (author or "").strip()
+    m = re.search(r"备注[:：]\s*([^,，\s]+)", a)
+    if m:
+        return m.group(1).strip()
+    a = a.split("@")[0].strip()
+    a = re.sub(r"_\d{2,6}$", "", a).strip()
+    return a or "?"
 
 
 def build_input(payload, cfg=None):
@@ -351,7 +375,7 @@ def build_input(payload, cfg=None):
             t = e.get("occurredAt")
             tstr = datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M") if t else "??:??"
             plat = PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
-            author = _clean(e.get("author") or "?", 40)
+            author = _clean(_display_author(e.get("author"), cfg), 40)
             content = _clean(e.get("content"))
             line = "- [%s][%s] <%s> %s" % (tstr, plat, author, content)
             lines.append(line)
@@ -380,7 +404,7 @@ def build_input(payload, cfg=None):
             t = e.get("occurredAt")
             tstr = datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M") if t else "??:??"
             plat = PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
-            author = _clean(e.get("author") or "?", 40)
+            author = _clean(_display_author(e.get("author"), cfg), 40)
             lines.append("- [%s][%s] <%s> %s" % (tstr, plat, author, _clean(e.get("content"))))
             n += 1
             if n >= MAX_GENERIC:
@@ -402,7 +426,7 @@ def build_input(payload, cfg=None):
         tstr = datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M") if t else "??:??"
         plat = PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
         key_lines.append("- [%s][%s] <%s>（%s） %s"
-                         % (tstr, plat, _clean(e.get("author") or "?", 40),
+                         % (tstr, plat, _clean(_display_author(e.get("author"), cfg), 40),
                             _msg_kind(e, cfg), _clean(e.get("content"))))
     if key_lines:
         lines.append("\n===== 关键人物全部消息（%s：推文/转推/回复逐条列出，日报必须全部体现）====="

@@ -2622,6 +2622,11 @@ _RESEARCH_PROMPT_TMPL = (
     "- **禁止**把社区说法写成已发生的事实、或与链上/数据站数字混成一句；"
     "与链上/数据站/官方结论冲突时，必须并列写「社区称X，但链上/数据站显示Y，⚠️待人工确认」，"
     "不得二选一、不得删掉任一方。\n"
+    "- **关键人物（const）**：只写他当天与本子网明确相关的动态，每条提炼成一句短句"
+    "「const 转推 @谁：内容要点」「const 回复 @谁：内容要点」「const 表示：内容要点」，"
+    "写清对象与观点；人名用输入 `<>` 里的显示名（如 const），"
+    "**禁止**写 @const_reborn / consttt / _数字 后缀、禁止贴原始链接或 t.co 链接、"
+    "禁止照抄整段原文、禁止只写「重要人物发过言」；与本子网无关的发言不写。\n"
     "- 本节不计入时间线事件条数；若与档案里的历史社区线索重复，以本节的当日消息为准，"
     "历史线索只在有新增信息时补一句。\n"
     "\n**📌 预期跟踪**（先逐条结清上次的，再写本次新增的；合计 4-7 条）\n"
@@ -3346,11 +3351,12 @@ def _format_community_today(payload, sn, limit=15, cfg=None):
 
 
 def _key_author_block(payload, cfg=None):
-    """关键人物（创始人 const 等）当日全部消息：推文/转推/回复，一条不删。
+    """关键人物（创始人 const 等）当日动态，供投研模型判断与本子网的相关性。
 
-    实测坑：const 的「19 days is actually quite slow…」在 dtt 里 sn=[]，
-    按 SN 过滤会整条丢掉；他带 SN64 的那条又被「英文长文无关键词」当噪声剔除。
-    现在关键人物不按 SN 过滤、不做相关性剔除、不按 8 条截断。
+    只提供结构化线索（形态/对象/原文摘要/是否带 SN），相关性判断与提炼由模型做：
+    - dtt 标了本 SN 的，优先相关；
+    - 没标 SN 的（如 const 的「19 days is slow」），看内容是否指向本子网项目/争议。
+    人名一律用显示名（备注名优先，如 const），不带 @handle / _辨识码。
     """
     import community_digest as CD
     names = CD._key_author_names(cfg)
@@ -3373,50 +3379,128 @@ def _key_author_block(payload, cfg=None):
                 if t else "??:??")
         plat = CD.PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
         lines.append("- [%s][%s] <%s>（%s） %s [社区·重要人物]"
-                     % (tstr, plat, CD._clean(author, 40), CD._msg_kind(e, cfg), c))
+                     % (tstr, plat, CD._clean(CD._display_author(author, cfg), 40),
+                        CD._msg_kind(e, cfg), c))
         if len(lines) >= 30:
             break
     if not lines:
         return ""
-    return ("【当日关键人物全部动态（%s：推文/转推/回复；含已归属与未归属 SN，全部保留）】\n%s\n"
-            "**使用规则**：这些消息来自关键人物（如创始人 const），无论 dtt 有没有标 SN，"
-            "只要内容指向本子网（项目名、训练天数、性能对比、争议、生态合作），"
-            "**必须**写进「📢 当日社区动态」节并写出具体原话要点，标 `[社区]` + `⚠️未验证`；"
-            "转推/回复要写清「转推了谁 / 回复了谁」。与本子网无关的也要在人物动态里点名，"
-            "禁止只写「重要人物发过言」而不写内容。"
+    return ("【当日关键人物动态（%s；含 dtt 已归属与未归属 SN 的消息）】\n%s\n"
+            "**使用规则**：以上是关键人物（如创始人 const）当日动态线索，人名已是显示名、"
+            "直接用（禁止写回 @const_reborn 这类账号）。请判断每条与本子网的相关性："
+            "dtt 标了本 SN 的，或内容点名本子网项目/事件/争议的（如训练天数、性能对比、合作、争议），"
+            "才算相关；相关条目写进「📢 当日社区动态」节，每条**提炼成一句短句**："
+            "「const 转推 @谁：内容要点」「const 回复 @谁：内容要点」「const 表示：内容要点」，"
+            "写清动作对象与具体观点/数字，标 `[社区]` + `⚠️未验证`；"
+            "**禁止贴原始链接、禁止照抄整段原文、禁止只写「重要人物发过言」**。"
+            "与本子网无关的日常发言忽略。"
             % ("、".join("@" + x for x in names), "\n".join(lines)))
 
 
-def _const_dynamics_block(payload, cfg=None, max_chars=180):
-    """代码层保底：const 本人的当日推文/转推/回复逐条列出。
+_PEOPLE_SUMMARY_PROMPT = (
+    "你是投研助理。下面是某子网当日 dtt 关键词监控抓到的全部人物发言线索"
+    "（已标人名/形态/SN归属/内容），另附本子网当日社区消息作背景。\n"
+    "任务：按人提炼观点短句。能进关键词监控的人物都被系统判为重要，"
+    "**所有发言人都列出**，只是与本子网直接相关的重点写、const 排最前。\n"
+    "\n"
+    "【输出格式（每条一行，严格照此）】\n"
+    "- 人名 转推 @对象：一句话内容要点\n"
+    "- 人名 回复 @对象：一句话内容要点\n"
+    "- 人名 表示：一句话内容要点\n"
+    "（自己发言用「表示」；转推用「转推 @谁」；回复/提及用「回复 @谁」；"
+    "对象若线索里写了 @某人 就带上，没写就不硬造。）\n"
+    "\n"
+    "【硬规则】\n"
+    "1. **凡线索里出现的人物都要列**，不许因为「跟子网无关」就删人——"
+    "dtt 关键词监控本身已做过一轮重要性筛选。const 影响力最大，排**最前**并单列；"
+    "其余人按与本子网的相关度和发言份量排序。直接提到本子网项目/编号/事件/争议/"
+    "收入的写清他具体说了什么；没直接提到的，也用一句话概括他的观点或态度。\n"
+    "2. 写「内容要点」而不是抄原文：抓住他说了什么结论/数字/态度，一句话讲清；"
+    "**不许贴任何 URL、t.co 链接、x.com 链接**。同一人同一观点合并成一条。\n"
+    "3. 人名只用线索 `<>` 里的显示名（如 const、p383），禁止写 @handle、"
+    "consttt、_数字 后缀、备注标签；被转推/回复的对象保留其 @handle。\n"
+    "4. 每人 1-3 条，每条不超过 45 字；确实无可提炼内容的人才跳过。\n"
+    "5. 只输出要点行，不要标题、不要解释、不要总数统计；一个人都没就输出「无」。\n"
+)
 
-    光靠提示词让模型「涵盖主要说法」不可靠（实测 19 条注入只写了 1 条），
-    所以在报告里固定附一段原文清单，不参与模型筛选与压缩。
+
+def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
+                          context=""):
+    """与当前 SN 相关的人物观点：按人提炼成短句（含 const 与其他所有发言人）。
+
+    复用一次小 LLM 调用做「相关性判断 + 提炼」，不贴链接、不抄原文、不用账号名。
+    const 等创始人排最前；无相关发言返回空，绝不退回「原文全塞」。
+    context 是本子网当日社区动态正文（含已抓的 X 帖正文），作相关性判断背景。
+    返回 (block, kept_lines)。
     """
     import community_digest as CD
     names = CD._key_author_names(cfg)
-    lines, seen = [], set()
-    events = sorted(((payload or {}).get("events") or []),
-                    key=lambda x: x.get("occurredAt") or 0, reverse=True)
-    for e in events:
+    events = list((payload or {}).get("events") or [])
+    if not events:
+        return "", 0
+    # 候选：当日全部人物发言（关键词监控已做过重要性筛选，一个人都不删）。
+    # const 等创始人排最前（影响力最大），其余按「标了本 SN 优先 + 相关性」排。
+    def _is_key(e):
         a = (e.get("author") or "")
-        if not any(n in a.lower() for n in names):
-            continue  # 只列本人发言；别人提及 const 的由社区动态正文涵盖
-        c = CD._clean(e.get("content"))[:max_chars]
-        k = (a, c[:60])
+        return any(n in a.lower() for n in names)
+
+    def _sn_hit(e):
+        return sn in [x for x in (e.get("sn") or [])]
+
+    # 去重：同一人同一内容只留一条
+    seen, uniq = set(), []
+    for e in events:
+        k = (CD._display_author(e.get("author"), cfg), (e.get("content") or "")[:80])
         if k in seen:
             continue
         seen.add(k)
-        t = e.get("occurredAt")
-        tstr = (datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M")
-                if t else "??:??")
-        plat = CD.PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
-        lines.append("- [社区][%s %s] <%s>（%s）%s ⚠️未验证"
-                     % (plat, tstr, CD._clean(a, 40), CD._msg_kind(e, cfg), c))
-    if not lines:
+        uniq.append(e)
+    key_ev = [e for e in uniq if _is_key(e)]
+    rest = [e for e in uniq if not _is_key(e)]
+    rest.sort(key=lambda e: (0 if _sn_hit(e) else 1, -CD._relevance(e, cfg)))
+    mine = key_ev + rest[:60]  # 上限防上下文爆炸；60 条足够覆盖当日全部活跃人物
+    if not mine:
         return "", 0
-    return ("**关键人物动态（const 当日全部 %d 条：推文/转推/回复，逐条保留）**\n%s"
-            % (len(lines), "\n".join(lines))), len(lines)
+    # 链接要抓正文，否则无法「总结链接内容」（用户明确要求）；只抓相关的少量。
+    try:
+        _enrich_community_events(mine, cfg, log=log, max_links=6)
+    except Exception as e:
+        log("   ⚠️ 人物观点链接正文抓取跳过（%s）" % str(e)[:100])
+    lines = []
+    for e in mine[:70]:
+        c = CD._clean(e.get("content"), max_chars)
+        nm = CD._clean(CD._display_author(e.get("author"), cfg), 40)
+        mark = "★创始人" if _is_key(e) else ("标本SN" if _sn_hit(e) else "关键词命中")
+        lines.append("- <%s>[%s] 形态=%s；SN归属=%s；内容=%s"
+                     % (nm, mark, CD._msg_kind(e, cfg),
+                        ",".join(str(x) for x in (e.get("sn") or [])) or "未标注",
+                        c))
+    sn_name = (meta or {}).get("name") or "未收录"
+    bg = (context or "").strip()
+    body = _PEOPLE_SUMMARY_PROMPT + (
+        "\n【本子网：SN%d %s】\n" % (sn, sn_name)
+        + "【本子网当日社区消息（判断相关性的背景）】\n"
+        + (CD._clean(bg, 1400) if bg else "（无）")
+        + "\n\n【当日发言线索（`<>` 内是显示名，直接用）】\n" + "\n".join(lines) + "\n"
+    )
+    try:
+        out = (llm(body) or "").strip()
+    except Exception as e:
+        log("   ⚠️ 人物观点提炼失败（%s），跳过该段" % str(e)[:120])
+        return "", 0
+    if not out or out.strip() in ("无", "无。", "无相关", "没有相关发言"):
+        return "", 0
+    kept = []
+    for ln in out.splitlines():
+        ln = re.sub(r"^\s*[-•*]\s*", "", ln).strip()
+        ln = re.sub(r"https?://\S+", "", ln).strip()  # 兜底删链接
+        if ln and ln not in ("无", "无。") and len(kept) < 45:
+            kept.append(ln)
+    if not kept:
+        return "", 0
+    block = "**👥 相关人物观点（SN%d，含创始人）**\n%s" % (
+        sn, "\n".join("- " + x + " ⚠️未验证" for x in kept))
+    return block, len(kept)
 
 
 def _today_community_block(cfg, sn, day_str=None, log=print):
@@ -3878,17 +3962,24 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         digest = _insert_section(digest, _comm_section, "📌 预期跟踪")
         log("📢 当日社区动态节被压缩删除，已从初稿恢复（%d 字）"
             % len(re.sub(r"\s", "", _comm_section)))
-    # const 本人动态固定附清单：模型从 19 条里只挑 1 条是实测发生过的事，
-    # 不能依赖提示词保证「全部体现」，这里读本地缓存直接逐条写进报告。
+    # 相关人物观点：所有提到当前 SN 的人（含 const）都按「某人 转推/回复/表示：要点」提炼。
+    # 不用主报告里那段（模型会漏/压缩会删），这里单独调用一次小 LLM 生成后固定插入。
     if _nct:
         try:
             import community_fetch as CF2
-            _cs, _cn = _const_dynamics_block(CF2.read_day(today, cfg), cfg)
-            if _cs and "关键人物动态（const" not in digest:
+            _p2 = CF2.read_day(today, cfg)
+            _cs, _cn = _people_summary_block(
+                _p2, cfg, sn, meta, llm, log=log, context=_comm_section)
+            if _cs:
+                if "相关人物观点（SN" in digest:
+                    _rest, _ = _take_section(digest, "相关人物观点（SN")
+                    digest = _rest
                 digest = _insert_section(digest, _cs, "📌 预期跟踪")
-                log("📢 关键人物动态：代码层补入 const 当日全部 %d 条（推文/转推/回复）" % _cn)
+                log("📢 相关人物观点：提炼出与 SN%d 相关的 %d 条短句（含创始人，无链接/账号名）" % (sn, _cn))
+            else:
+                log("📢 相关人物观点：当日无与 SN%d 相关的发言，跳过" % sn)
         except Exception as e:
-            log("📢 关键人物动态清单跳过（%s）" % str(e)[:120])
+            log("📢 相关人物观点提炼跳过（%s）" % str(e)[:120])
     title = "🔬 SN%d %s · 重要事件跟踪报告（%s）" % (
         sn, meta["name"] or "未收录", datetime.datetime.now(TZ).strftime("%m-%d"))
     d = A.sn_dir(arc_dir, sn)

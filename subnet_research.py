@@ -3265,7 +3265,7 @@ def _enrich_community_events(events, cfg=None, log=print, max_links=8):
     return events
 
 
-def _format_community_today(payload, sn, limit=15):
+def _format_community_today(payload, sn, limit=15, cfg=None):
     """从 dtt 当日取数结果里挑出该 SN 的消息，拼成投研输入段。
 
     返回 (block, kept)；无相关消息返回 ("", 0)。
@@ -3276,7 +3276,7 @@ def _format_community_today(payload, sn, limit=15):
               if str(sn) in [str(x) for x in (e.get("sn") or [])]]
     if not events:
         return "", 0
-    events = [e for e in events if CD._relevance(e) >= 0]
+    events = [e for e in events if CD._relevance(e, cfg) >= 0]
     seen, picked = set(), []
     for e in sorted(events, key=lambda x: x.get("occurredAt") or 0, reverse=True):
         key = ((e.get("author") or ""), (e.get("content") or "")[:80])
@@ -3317,27 +3317,24 @@ def _format_community_today(payload, sn, limit=15):
 
 
 def _key_author_block(payload, cfg=None):
-    """dtt 未标 SN、但发言人是关键人物的当日消息，单独成段供投研判断相关性。
+    """关键人物（创始人 const 等）当日全部消息：推文/转推/回复，一条不删。
 
     实测坑：const 的「19 days is actually quite slow…」在 dtt 里 sn=[]，
-    按 SN 过滤会整条丢掉，而它其实正好对应 SN91 的训练进度争议。
+    按 SN 过滤会整条丢掉；他带 SN64 的那条又被「英文长文无关键词」当噪声剔除。
+    现在关键人物不按 SN 过滤、不做相关性剔除、不按 8 条截断。
     """
     import community_digest as CD
-    authors = [str(x).strip().lower() for x in
-               ((cfg or {}).get("community_key_authors") or ["const"])]
-    authors = [a for a in authors if a]
-    if not authors:
+    names = CD._key_author_names(cfg)
+    if not names:
         return ""
     lines, seen = [], set()
-    for e in ((payload or {}).get("events") or []):
-        if e.get("sn"):
+    events = sorted(((payload or {}).get("events") or []),
+                    key=lambda x: x.get("occurredAt") or 0, reverse=True)
+    for e in events:
+        if not CD._key_author_hit(e, cfg):
             continue
         author = (e.get("author") or "")
-        if not any(a in author.lower() for a in authors):
-            continue
-        if CD._relevance(e) < 0:
-            continue
-        c = CD._clean(e.get("content"))[:320]
+        c = CD._clean(e.get("content"))[:500]
         key = (author, c[:80])
         if key in seen:
             continue
@@ -3346,17 +3343,19 @@ def _key_author_block(payload, cfg=None):
         tstr = (datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M")
                 if t else "??:??")
         plat = CD.PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
-        lines.append("- [%s][%s] <%s> %s [社区·重要人物]"
-                     % (tstr, plat, CD._clean(author, 40), c))
-        if len(lines) >= 8:
+        lines.append("- [%s][%s] <%s>（%s） %s [社区·重要人物]"
+                     % (tstr, plat, CD._clean(author, 40), CD._msg_kind(e, cfg), c))
+        if len(lines) >= 30:
             break
     if not lines:
         return ""
-    return ("【当日重要人物动态（dtt 未归属具体 SN，请判断与本子网的相关性）】\n%s\n"
-            "**使用规则**：这些发言来自关键人物（如 const），但 dtt 没有给它标 SN。"
-            "若内容指向本子网（例如提到本子网项目名、训练天数、性能对比、争议），"
+    return ("【当日关键人物全部动态（%s：推文/转推/回复；含已归属与未归属 SN，全部保留）】\n%s\n"
+            "**使用规则**：这些消息来自关键人物（如创始人 const），无论 dtt 有没有标 SN，"
+            "只要内容指向本子网（项目名、训练天数、性能对比、争议、生态合作），"
             "**必须**写进「📢 当日社区动态」节并写出具体原话要点，标 `[社区]` + `⚠️未验证`；"
-            "与本子网无关则忽略。禁止只写「重要人物发过言」而不写内容。" % "\n".join(lines))
+            "转推/回复要写清「转推了谁 / 回复了谁」。与本子网无关的也要在人物动态里点名，"
+            "禁止只写「重要人物发过言」而不写内容。"
+            % ("、".join("@" + x for x in names), "\n".join(lines)))
 
 
 def _today_community_block(cfg, sn, day_str=None, log=print):
@@ -3391,7 +3390,7 @@ def _today_community_block(cfg, sn, day_str=None, log=print):
         log("   ⚠️ 社区 X 链接正文抓取失败（%s），按原始消息处理" % str(e)[:120])
     try:
         block, n = _format_community_today(
-            payload, sn, limit=int(cfg.get("research_community_max", 12) or 12))
+            payload, sn, limit=int(cfg.get("research_community_max", 12) or 12), cfg=cfg)
         key_block = _key_author_block(payload, cfg)
     except Exception as e:
         log("   ⚠️ 当日社区消息整理失败（%s），跳过" % str(e)[:120])
@@ -3401,7 +3400,7 @@ def _today_community_block(cfg, sn, day_str=None, log=print):
         block = (block + "\n\n" + key_block) if block else key_block
     total = n + key_n
     if total:
-        log("   ✅ 当日 dtt 社区消息：SN%d 命中 %d 条 + 重要人物未归属 %d 条，已加入投研输入"
+        log("   ✅ 当日 dtt 社区消息：SN%d 命中 %d 条 + 关键人物 %d 条（含未归属 SN），已加入投研输入"
             % (sn, n, key_n))
     else:
         log("   当日 dtt 社区消息：SN%d 无命中" % sn)

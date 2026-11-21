@@ -36,6 +36,8 @@ MAX_PER_SN = 12
 MAX_SN = 18
 # 无 SN 归属但值得看的通用消息最多多少条
 MAX_GENERIC = 12
+# 创始人等关键人物：dtt 里的转推/推文/回复一律保留，不参与噪声剔除与条数截断
+DEFAULT_KEY_AUTHORS = ["const"]
 
 # 相关性过滤：dtt 靠关键词命中，像 "ms" "jason" "fish" 这类通用词会误抓大量
 # 与 Bittensor 无关的推文（实测 SN24 混进黄仁勋八卦、黎曼猜想）。这里按内容
@@ -52,8 +54,48 @@ _CN_RE = re.compile(r"[\u4e00-\u9fff]")
 _NEWSY = re.compile(r"(?i)^(breaking|rt @|just in|update:|bipartisan|researcher|mathematician)")
 
 
-def _relevance(e):
-    """给一条消息打相关性分：越高越该保留。低于 0 视为噪声剔除。"""
+def _key_author_names(cfg=None):
+    """关键人物名单（创始人等）。dtt 里的const有 const@const_reborn、
+    consttt,备注:const 等多种写法，统一按 handle 匹配。"""
+    names = (cfg or {}).get("community_key_authors")
+    if names is None:
+        names = DEFAULT_KEY_AUTHORS
+    if isinstance(names, str):
+        names = [names]
+    return [str(x).strip().lower() for x in names if str(x).strip()]
+
+
+def _key_author_hit(e, cfg=None):
+    """这条消息是否为关键人物本人发言，或转推/回复/提及关键人物。
+
+    创始人（const）的转推、推文、回复都很重要，即使 dtt 没标 SN、
+    即使内容像英文长文或 RT 腔调，也不能被噪声过滤删掉。
+    """
+    names = _key_author_names(cfg)
+    if not names:
+        return False
+    blob = ((e.get("author") or "") + " " + (e.get("content") or "")).lower()
+    for n in names:
+        # const 可匹配 const / const_reborn / consttt；不匹配 constantly 之类的误命中
+        pat = r"(?<![a-z0-9])" + re.escape(n) + r"(?:_[a-z0-9]+|tt)?(?![a-z])"
+        if re.search(pat, blob):
+            return True
+    return False
+
+
+def _msg_kind(e, cfg=None):
+    """给关键人物消息标形态：转推 / 回复·提及 / 推文·发言。"""
+    c = (e.get("content") or "").strip()
+    if re.match(r"(?i)^rt @", c):
+        return "转推"
+    if re.match(r"(?i)^@[a-z0-9_]+", c):
+        return "回复·提及"
+    return "推文·发言"
+
+
+def _relevance(e, cfg=None):
+    """给一条消息打相关性分：越高越该保留。低于 0 视为噪声剔除。
+    关键人物（const 等）直接给高档分，保证不被 RT 腔调/英文长文规则误杀。"""
     c = (e.get("content") or "").strip()
     score = 0
     has_kw = bool(_BT_KW.search(c))
@@ -72,6 +114,9 @@ def _relevance(e):
     # 极短的纯英文涂抹（如 "gMs"）无归属价值
     if len(c) < 4 and not has_kw:
         score -= 5
+    # 创始人的推文/转推/回复一律保留，且排在普通消息前面
+    if _key_author_hit(e, cfg):
+        return max(score, 20)
     return score
 
 
@@ -168,7 +213,11 @@ COMMUNITY_SYSTEM_PROMPT = (
     "不要写成既定事实。每条必须标注来源平台（Twitter/X / Telegram / Discord）与发言人。\n"
     "- **禁止编造**：不补原文没有的数字、人名、SN 编号、交易细节；原文没有就说没有。\n"
     "- 只关注与 Bittensor 子网、代币机制、团队动态、上线/合作/催化相关的实质内容；"
-    "纯水聊、无关转发、纯表情、与 Bittensor 无关的话题直接忽略。\n"
+    "纯水聊、无关转发、纯表情、与 Bittensor 无关的话题一般不列；"
+    "**但关键人物（如创始人 const）的推文、转推、回复一律保留，不得当成无关转发删掉**。\n"
+    "- **禁止删人**：输入末尾「当日全部人物与消息」里出现的每一位发言人，"
+    "都要在「👀 人物与观点」节点名写出（内容太少就写「仅发言：…」），"
+    "不许以「普通群友」「无关发言」为由省略；const 相关消息必须逐条体现。\n"
     "\n"
     "【输出结构（严格按顺序，标题一律 **加粗**；无内容的小节整节省略，不硬凑）】\n"
     "**🔥 社区热点**（当天跨平台被反复提及、或明显重要的事件，3-6 条；"
@@ -176,7 +225,10 @@ COMMUNITY_SYSTEM_PROMPT = (
     "**🧩 子网动态**（**按 SN 分组**：每个有实质消息的子网写一块，格式「**SN53 Engy**（N 条）」"
     "下接 1-3 条要点；子网名以输入里的名称对照为准，查不到就只写编号，不要编名字。"
     "按消息量与重要性排序，只写有价值的前若干个，不必全部列出）\n"
-    "**👀 人物与观点**（点名开发者/核心成员的重要表态，标平台；普通群友无关发言不列；没有就省略）\n"
+    "**👀 人物与观点**（逐个点名当天所有发言人，格式「**@人名**：做了什么/说了什么（平台）」；"
+    "**const（@const_reborn）必须单列且完整**：他的推文、转推（写清「转推 @谁」）、"
+    "回复/提及（写清对象）逐条体现，不得合并成一句空话；"
+    "其他人一律列人名+消息要点，不做重要性筛选；确实无人发言才写「无」）\n"
     "　用户名写法：Discord 等平台的 `名字_四位数字`（如 `p383_54249`）是「显示名+辨识码」，"
     "统一写成 **@显示名**（如 **@p383**），去掉 `_数字` 后缀和 `备注:` 之类监控标签，"
     "保留 @ 前缀让人一眼认出是用户名，别把辨识码当成名字的一部分；"
@@ -201,7 +253,8 @@ COMMUNITY_SYSTEM_PROMPT = (
     "- 关键主体 **加粗**：人物、**SN编号/子网名**、代币、事件、关键数字。\n"
     "- emoji 标程度：🔥 热点、✅ 落地、⚠️ 风险/待确认、📌 关注、❌ 利空。\n"
     "- 每条单独成行用 - 项目符号，小节间空行，适合手机端；不用 # 标题、不用 > 引用。\n"
-    "- **字数上限 1500 字**（含标点），只有上限没有下限：消息少就少写，简洁+信息全=合格。\n"
+    "- **字数上限 3000 字**（含标点），人物节优先保证所有人和 const 消息齐全；"
+    "只有上限没有下限：消息少就少写，简洁+信息全=合格。\n"
     "- 禁止废话：不写「此外」「总体来看」「可以看出」「值得一提的是」这类填充词；"
     "不复述已说过的事实；不解释自己为什么这么写；一条只说一件事。\n"
     "- 绝对不许在正文里写任何字数标注或「来源：dtt」之外的元信息。\n"
@@ -254,11 +307,11 @@ def build_input(payload, cfg=None):
 
     # 相关性过滤 + 按分数排序（噪声消息剔除）
     for sn in by_sn:
-        scored = [(_relevance(e), e) for e in by_sn[sn]]
+        scored = [(_relevance(e, cfg), e) for e in by_sn[sn]]
         scored = [(sc, e) for sc, e in scored if sc >= 0]
         scored.sort(key=lambda x: (-x[0], -(x[1].get("occurredAt") or 0)))
         by_sn[sn] = [e for _sc, e in scored]
-    generic = [e for e in generic if _relevance(e) >= 0]
+    generic = [e for e in generic if _relevance(e, cfg) >= 0]
 
     # 排序：有实质消息多的 SN 优先
     ordered = sorted(by_sn, key=lambda s: (-len(by_sn[s]), s))[:MAX_SN]
@@ -332,6 +385,44 @@ def build_input(payload, cfg=None):
             n += 1
             if n >= MAX_GENERIC:
                 break
+
+    # 关键人物（创始人等）的全部消息：转推/推文/回复逐条列出，不筛、不截断、不受
+    # MAX_GENERIC / MAX_PER_SN 限制。之前 const 的推文被「英文长文无关键词」规则剔除，
+    # 这里单列一段兜底，日报必须逐条体现。
+    key_names = _key_author_names(cfg)
+    key_lines, _seen_key = [], set()
+    for e in sorted(events, key=lambda x: x.get("occurredAt") or 0, reverse=True):
+        if not _key_author_hit(e, cfg):
+            continue
+        k = (e.get("author"), (e.get("content") or "")[:80])
+        if k in _seen_key:
+            continue
+        _seen_key.add(k)
+        t = e.get("occurredAt")
+        tstr = datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M") if t else "??:??"
+        plat = PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
+        key_lines.append("- [%s][%s] <%s>（%s） %s"
+                         % (tstr, plat, _clean(e.get("author") or "?", 40),
+                            _msg_kind(e, cfg), _clean(e.get("content"))))
+    if key_lines:
+        lines.append("\n===== 关键人物全部消息（%s：推文/转推/回复逐条列出，日报必须全部体现）====="
+                     % "、".join("@" + x for x in key_names))
+        lines.extend(key_lines)
+
+    # 当日全部人物 + 消息：不做重要性筛选，人名和原文都给模型，
+    # 由日报「人物与观点」节逐个点名。用户后续可针对具体人物再要求优化。
+    all_lines, _seen_all = [], set()
+    for e in sorted(events, key=lambda x: x.get("occurredAt") or 0, reverse=True):
+        k = (e.get("author"), (e.get("content") or "")[:80])
+        if k in _seen_all:
+            continue
+        _seen_all.add(k)
+        all_lines.append("- <%s> %s" % (_clean(e.get("author") or "?", 40),
+                                         _clean(e.get("content"))))
+    if all_lines:
+        lines.append("\n===== 当日全部人物与消息（人名+原文，共 %d 条；日报人物节须逐个点名，"
+                     "不得按「普通群友」删人）=====" % len(all_lines))
+        lines.extend(all_lines)
 
     # 附历史档案/投研参考块（复用 v1.17.0 的交叉核对能力）
     try:

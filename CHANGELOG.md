@@ -8,9 +8,24 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.21.4** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.21.5** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.21.5 — 2026-11-22
+
+**dtt 日报不删人：关键人物（const）推文/转推/回复全保留，其他人物人名+消息全列出**
+
+- 起因（用户反馈）：dtt 人物都是重要线索，const 是 Bittensor 创始人，他的转推、推文、回复不能被随意删除；其他人一时分不清轻重，也要把人名和消息都列出来供后续优化。
+- 根因：① `_relevance()` 的「英文长文无关键词 -20」「`RT @` 开头 -15」把 const 的推文和转推判成噪声剔除（11-22 实测 13 条被剔，含 const 一条）；② 日报提示词写「普通群友无关发言不列」；③ `_key_author_block()` 只看未标 SN 的消息且限 8 条。
+- `community_digest.py`：
+  - 新增 `_key_author_names()` / `_key_author_hit()` / `_msg_kind()`，按 handle 识别 const（`const@const_reborn`、`consttt,备注:const`），也识别别人转推/回复/提及 const；`_relevance()` 对关键人物直接返回高档分，豁免噪声剔除并在 SN 桶里排前，不受 `MAX_PER_SN=12` 截断。
+  - `build_input()` 新增两个段落：「关键人物全部消息」（推文/转推/回复逐条标注，不截断）与「当日全部人物与消息」（人名+原文全列，共 79 条实测）。
+  - 提示词铁律加「禁止删人」，人物节改为逐个点名当天所有发言人、const 单列且转推/回复写清对象；字数上限 1500 → 3000。
+- `subnet_research.py`：`_key_author_block()` 不再要求 `sn` 为空、不再做相关性剔除、上限 8 → 30，并标注消息形态；`_format_community_today()` 传 cfg 使用同一套关键人物豁免。
+- 验证：11-22 真实 dtt 数据 79 条中 const 相关 15 条全部命中且 0 条被剔除（含此前被丢的 SN64「Openrouter has no clue…」与两条转推），日报输入含全人物段，投研关键人物段 15 条、SN64 素材命中 const。
 
 ---
 

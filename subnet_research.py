@@ -2588,6 +2588,10 @@ _RESEARCH_PROMPT_TMPL = (
     "- 这是 dtt 关键词监控当日抓到的公开讨论，**未经证实、不是证据**。必须单独成节、"
     "涵盖该子网当日的主要说法；同主题可合并，但每条都要标 `[社区]` 与 `⚠️未验证`，"
     "并写上平台与时间（如「[社区][Telegram 14:32]」）。\n"
+    "- **必须写出具体内容**：把消息里的原话要点、数字、涉及对象，以及【X帖原文】里的正文"
+    "一并写进这一节；只写「附了一个 X 链接」「有人提及」「重要人物发过言」"
+    "而不写链接/发言的实际内容，**视为不合格**。输入里有【X帖原文】时，那就是链接的内容，"
+    "必须据此写，不许编造、也不许略过。\n"
     "- **禁止**把社区说法写成已发生的事实、或与链上/数据站数字混成一句；"
     "与链上/数据站/官方结论冲突时，必须并列写「社区称X，但链上/数据站显示Y，⚠️待人工确认」，"
     "不得二选一、不得删掉任一方。\n"
@@ -3225,6 +3229,42 @@ def _community_block(arc, limit=4, chars=700):
     return "\n".join(L)
 
 
+def _enrich_community_events(events, cfg=None, log=print, max_links=8):
+    """抓取社区消息里 X 帖子的正文，拼回 content。
+
+    用户实测反馈：报告里只写「附第三方 X 链接」，链接里的实际内容完全没体现。
+    原因就是 dtt 只给链接、不给正文，模型无从下笔。这里在拼提示词前先把正文读出来。
+    t.co 短链无法直接解析，x_targets_in 只收 x.com/twitter.com 直链。
+    """
+    seen, n = set(), 0
+    import community_digest as CD
+    # 优先抓「已标 SN + 相关性高」的消息里的链接，保证当前子网的链接不被别的帖子挤掉
+    ordered = sorted(events or [],
+                     key=lambda e: (bool(e.get("sn")), CD._relevance(e)), reverse=True)
+    for e in ordered:
+        content = (e.get("content") or "").strip()
+        extra = []
+        for u in (x_targets_in(content).get("posts") or []):
+            if u in seen or n >= max_links:
+                continue
+            seen.add(u)
+            n += 1
+            try:
+                p = x_tweet(u)
+                if p and (p.get("text") or "").strip():
+                    extra.append("【X帖原文 @%s：%s】"
+                                 % (p.get("author") or "?", p["text"].strip()[:400]))
+                    log("   🧵 社区 X 链接已抓正文：@%s「%s…」"
+                        % (p.get("author") or "?", p["text"][:40]))
+                else:
+                    extra.append("【X帖原文：抓取失败，仅有链接 %s】" % u)
+            except Exception as ex:
+                extra.append("【X帖原文：抓取失败（%s）】" % str(ex)[:60])
+        if extra:
+            e["content"] = content + " " + " ".join(extra)
+    return events
+
+
 def _format_community_today(payload, sn, limit=15):
     """从 dtt 当日取数结果里挑出该 SN 的消息，拼成投研输入段。
 
@@ -3268,11 +3308,55 @@ def _format_community_today(payload, sn, limit=15):
         "SN%d 当日 dtt 社区消息 %d 条（北京时间 %s；Twitter/X·Telegram·Discord）%s：\n%s\n"
         "**使用规则**：这些是关键词监控抓来的公开讨论，**未经证实、是线索不是证据**。"
         "报告必须单独写「📢 当日社区动态」一节涵盖其中主要说法，每条标 `[社区]` 与 `⚠️未验证`；"
+        "**必须写出消息正文/【X帖原文】的具体内容，禁止只写「附链接」「有人提及」**；"
         "与链上/数据站/官方结论冲突时并列写「社区称X，但链上/数据站显示Y，⚠️待人工确认」，"
         "不得采信任何一方、也不得删掉线索；禁止把这些消息写成今日已确定的事实。"
         % (sn, len(picked), rng, more, "\n".join(lines))
     )
     return block, len(picked)
+
+
+def _key_author_block(payload, cfg=None):
+    """dtt 未标 SN、但发言人是关键人物的当日消息，单独成段供投研判断相关性。
+
+    实测坑：const 的「19 days is actually quite slow…」在 dtt 里 sn=[]，
+    按 SN 过滤会整条丢掉，而它其实正好对应 SN91 的训练进度争议。
+    """
+    import community_digest as CD
+    authors = [str(x).strip().lower() for x in
+               ((cfg or {}).get("community_key_authors") or ["const"])]
+    authors = [a for a in authors if a]
+    if not authors:
+        return ""
+    lines, seen = [], set()
+    for e in ((payload or {}).get("events") or []):
+        if e.get("sn"):
+            continue
+        author = (e.get("author") or "")
+        if not any(a in author.lower() for a in authors):
+            continue
+        if CD._relevance(e) < 0:
+            continue
+        c = CD._clean(e.get("content"))[:320]
+        key = (author, c[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        t = e.get("occurredAt")
+        tstr = (datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M")
+                if t else "??:??")
+        plat = CD.PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
+        lines.append("- [%s][%s] <%s> %s [社区·重要人物]"
+                     % (tstr, plat, CD._clean(author, 40), c))
+        if len(lines) >= 8:
+            break
+    if not lines:
+        return ""
+    return ("【当日重要人物动态（dtt 未归属具体 SN，请判断与本子网的相关性）】\n%s\n"
+            "**使用规则**：这些发言来自关键人物（如 const），但 dtt 没有给它标 SN。"
+            "若内容指向本子网（例如提到本子网项目名、训练天数、性能对比、争议），"
+            "**必须**写进「📢 当日社区动态」节并写出具体原话要点，标 `[社区]` + `⚠️未验证`；"
+            "与本子网无关则忽略。禁止只写「重要人物发过言」而不写内容。" % "\n".join(lines))
 
 
 def _today_community_block(cfg, sn, day_str=None, log=print):
@@ -3299,17 +3383,29 @@ def _today_community_block(cfg, sn, day_str=None, log=print):
     except Exception as e:
         log("   ⚠️ 当日 dtt 社区消息取数失败（%s），本次投研继续，不带社区段" % str(e)[:160])
         return "", 0, "error"
+    # 先把社区消息里 X 帖子的正文读出来 —— 否则报告只会写「附了一个链接」，
+    # 链接里的实际内容完全没进素材（SN91 实测问题）。失败不阻断，按原文处理。
+    try:
+        _enrich_community_events(payload.get("events") or [], cfg, log=log)
+    except Exception as e:
+        log("   ⚠️ 社区 X 链接正文抓取失败（%s），按原始消息处理" % str(e)[:120])
     try:
         block, n = _format_community_today(
             payload, sn, limit=int(cfg.get("research_community_max", 12) or 12))
+        key_block = _key_author_block(payload, cfg)
     except Exception as e:
         log("   ⚠️ 当日社区消息整理失败（%s），跳过" % str(e)[:120])
         return "", 0, "error"
-    if n:
-        log("   ✅ 当日 dtt 社区消息：SN%d 命中 %d 条，已加入投研输入" % (sn, n))
+    key_n = key_block.count("[社区·重要人物]") if key_block else 0
+    if key_block:
+        block = (block + "\n\n" + key_block) if block else key_block
+    total = n + key_n
+    if total:
+        log("   ✅ 当日 dtt 社区消息：SN%d 命中 %d 条 + 重要人物未归属 %d 条，已加入投研输入"
+            % (sn, n, key_n))
     else:
         log("   当日 dtt 社区消息：SN%d 无命中" % sn)
-    return block, n, ("hit" if n else "empty")
+    return block, total, ("hit" if total else "empty")
 
 
 def _signal_block(sources):

@@ -8,9 +8,22 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.21.3** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.21.4** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.21.4 — 2026-11-22
+
+**社区动态必须写出内容：X 链接抓正文 + 关键人物未归属消息纳入**
+
+- 起因（用户实测反馈）：SN91 报告的「📢 当日社区动态」只写「附第三方 X 链接」，链接里的实际内容完全没体现；const 的关键发言因 dtt 未标 SN 被按 SN 过滤丢掉，也没进报告。
+- `subnet_research.py`：
+  - `_enrich_community_events()` —— 拼素材前把社区消息里的 X 帖子直链正文抓出来（复用 `x_tweet()` 的 fxtwitter → oEmbed → 页面 meta 三级兜底），拼成 `【X帖原文 @作者：正文】`；最多 8 条，优先「已标 SN + 相关性高」的消息，失败只记日志。
+  - `_key_author_block()` —— dtt 未标 SN、但作者命中 `community_key_authors`（默认 `const`）的当日消息单独成段注入，要求模型判断与本子网相关性后写进社区动态节、写出原话要点。
+  - 提示词硬约束：**禁止只写「附链接」「有人提及」「重要人物发过言」**，必须写消息正文/【X帖原文】的具体内容。
+- 验证：用 11-22 真实 dtt 数据测 SN91 —— 抓到 @MSBIntel 帖文正文（Salesforce GIFT-Eval / Cascade 训练 19 天超越 Moirai 2.0），const 两条未归属消息（含「19 days is actually quite slow…」）均进入素材。
 
 ---
 

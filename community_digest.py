@@ -94,15 +94,46 @@ def extract_conflicts(digest):
 
 
 def build_conflict_section(conflicts):
-    """把冲突条目拼成置顶的醒目专区（飞书/TG 通用，标题加粗）。"""
-    items = []
-    for c in conflicts:
-        c = c.strip()
-        if not c.startswith("-"):
-            c = "- " + c
-        items.append(c)
-    return ("**⚠️ 待人工确认（%d 处 · 社区消息与历史结论冲突，请人工核对后再采信）**\n\n"
-            % len(conflicts)) + "\n".join(items)
+    """把冲突条目拼成置顶的醒目专区（飞书/TG 通用，标题加粗）。
+
+    AI 按提示词输出结构化格式：
+        ⚠️待人工确认｜SN编号 子网名｜社区：<...>｜档案：<...>｜冲突：<...>
+    这里解析成逐字段的多行板块，让「哪个子网/社区说啥/档案记啥/矛盾在哪」一眼可见。
+    旧格式（无 ｜ 分隔）降级为原样列出，不丢内容。
+    """
+    header = "**⚠️ 待人工确认（%d 处 · 社区消息与历史档案结论冲突，请核对后再采信）**\n\n" % len(conflicts)
+    blocks = []
+    for i, c in enumerate(conflicts, 1):
+        c = c.strip().lstrip("-").strip()
+        # 结构化：按全角｜（或半角|）切段，去掉开头的 ⚠️待人工确认
+        parts = [p.strip() for p in re.split(r"[｜|]", c) if p.strip()]
+        if parts and "待人工确认" in parts[0]:
+            parts = parts[1:]
+        fields = {"sn": "", "社区": "", "档案": "", "冲突": ""}
+        for p in parts:
+            key = None
+            for k in ("社区", "档案", "冲突"):
+                if p.startswith(k + "："):
+                    key = k
+                    break
+            if key:
+                fields[key] = p[len(key) + 1:].strip()
+            elif not fields["sn"] and re.search(r"\d", p):
+                fields["sn"] = p.strip()
+        if fields["社区"] and fields["档案"]:
+            # 结构化成功：逐字段分行展示
+            lines = ["**%d）%s**" % (i, fields["sn"] or "SN？")]
+            if fields["社区"]:
+                lines.append("　社区消息：%s" % fields["社区"])
+            if fields["档案"]:
+                lines.append("　档案记录：%s" % fields["档案"])
+            if fields["冲突"]:
+                lines.append("　冲突点：%s" % fields["冲突"])
+            blocks.append("\n".join(lines))
+            continue
+        # 降级：旧格式原样列出
+        blocks.append("**%d）** %s" % (i, c))
+    return header + "\n\n".join(blocks)
 
 
 COMMUNITY_SYSTEM_PROMPT = (
@@ -126,11 +157,18 @@ COMMUNITY_SYSTEM_PROMPT = (
     "**👀 人物与观点**（点名开发者/核心成员的重要表态，标平台；普通群友无关发言不列；没有就省略）\n"
     "**💡 一句话总结**（当天社区情绪与主线，一句收束）\n"
     "\n"
-    "【交叉核对：发现矛盾必须标出来，交人工确认】\n"
+    "【交叉核对：发现矛盾必须标出来，交人工确认（格式严格）】\n"
     "- 输入里若附了「历史档案 / 投研结论」参考块，那是**历史快照，可能过时或被推翻**。\n"
     "- 当今日社区消息与历史结论**明显矛盾**（例如历史写「未回购/未上线」，今日多人称已回购/已上线），"
-    "必须在该条后写「⚠️ 待人工确认：历史（日期）称X，但今日社区称Y」——"
-    "**把冲突并列写出，不要二选一、不要静默采信任何一边**。\n"
+    "必须在该条后写冲突标记，**严格按下面固定格式**（用全角｜分隔，四项一个都不能少、顺序不能变）：\n"
+    "  ⚠️待人工确认｜SN编号 子网名｜社区：<今日社区到底说了什么，含关键数字/主体/来源>｜"
+    "档案：<档案或投研的记录日期 + 原话结论，如「2026-11-19 投研：收入为团队自报、无链上证据」>｜"
+    "冲突：<一句话点明两边到底哪里对不上>\n"
+    "  示例：⚠️待人工确认｜SN55 NIOME｜社区：taoscale 称自 2 月累计收入 $120,000｜"
+    "档案：2026-11-19 投研：该数字为团队自报、无第三方或链上证据｜"
+    "冲突：社区引用的收入数字可信度与档案记录不一致，需核实是否有链上/审计支撑\n"
+    "- **SN 编号和子网名必须写**（从输入对照取，查不到就只写编号）；社区/档案/冲突三项内容都要具体，"
+    "禁止只写「存在冲突」这种空话。把冲突并列写出，不要二选一、不要静默采信任何一边。\n"
     "- 没有矛盾就不要硬标；正常的、无历史对照的消息不加此标记。\n"
     "\n"
     "【排版与篇幅（飞书/TG 双平台通用）】\n"

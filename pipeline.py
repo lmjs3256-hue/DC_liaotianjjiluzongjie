@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.19.0"
+__version__ = "1.20.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -3935,7 +3935,8 @@ if __name__ == "__main__":
                          "archive=子网建档（[天数|日期…]，只读已有导出，按子网单独存档）；"
                          "research=子网投研（子网编号/名称 [天数] [tg|feishu]，读档案+全网交叉验证）；"
                          "wallet=人工补录回购地址（子网 地址 [备注]，自动归档不会覆盖）；"
-                         "community=社区消息日报（[日期] [nopush]，读 dtt 多平台关键词监控）")
+                         "community=Bittensor社区消息日报（dtt版）（[昨日|今日|日期] [nopush]，默认昨日；"
+                         "取所选日00:00到当前，命令触发不定时；会话失效可用本地凭据自动续期）")
     ap.add_argument("extra", nargs="*",
                     help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）；"
                          "resummarize: 日期 反馈内容 [tg|feishu]；chat: [日期] [天数] [tg|feishu]；"

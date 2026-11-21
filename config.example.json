@@ -51,7 +51,10 @@
   "research_ref_dirs": [
     "E:/子网投研档案/bittensor-subnet-research"
   ],
-  "community_auto": true,
+  "community_auto": false,
   "community_hour": 8,
-  "community_minute": 30
+  "community_minute": 30,
+  "dtt_email": "",
+  "dtt_password": "",
+  "dtt_login_days": 90
 }

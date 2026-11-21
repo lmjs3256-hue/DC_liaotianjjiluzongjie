@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""社区消息日报 · 每日定时调度器
-==================================
-仿 kb_weekly 的纯 stdlib 调度：每天固定时间（北京时间，默认 08:30）取
-dtt 前一日社区消息、生成日报、落档、双推。挂在 tg_listener 启动时。
+"""社区消息日报 · 调度器（v1.20.0 起默认关闭：改为命令触发）
+================================================================
+保留本模块仅为兼容旧的手动 `python community_daily.py now` 用法。
+默认不启动后台定时线程（config.community_auto=false）——社区日报改为
+**命令触发**：`python pipeline.py community [昨日|今日|日期]`，不定时推送。
 
-规则：
-    - 周期：每天一次，默认 08:30（config.community_hour，可改小时）。
-    - 补跑：错过时间点后，下次启动发现「上次成功早于最近计划点」立即补跑。
-    - 失败退避 30 分钟；日报流水线在跑（busy）时让路，10 分钟后再试。
-    - 幂等：重复 start_thread 只有一个线程。
+若用户日后又想恢复定时，可把 config.community_auto 设 true 手动启用。
 
 对外接口：
     due(cfg)                    现在是否该跑
@@ -56,7 +53,7 @@ def settings(cfg):
     if not 0 <= mi <= 59:
         mi = DEFAULT_MINUTE
     return {
-        "enabled": bool(_cfg_get(cfg, "community_auto", True)),
+        "enabled": bool(_cfg_get(cfg, "community_auto", False)),
         "hour": hr, "minute": mi,
     }
 
@@ -201,7 +198,7 @@ def status_text(cfg):
     s = settings(cfg)
     st = load_state()
     ok, why = due(cfg)
-    lines = ["🌐 社区消息日报（dtt 多平台）",
+    lines = ["🌐 Bittensor 社区消息日报（dtt版）",
              "排程：每天 %02d:%02d 北京时间（%s）" % (s["hour"], s["minute"], "启用" if s["enabled"] else "关闭"),
              "状态：%s" % why]
     if st.get("last_day"):

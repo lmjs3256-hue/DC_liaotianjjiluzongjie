@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Bittensor 社区消息日报（dtt 关键词监控，多平台）
+"""Bittensor 社区消息日报（dtt版）（dtt 关键词监控，多平台）
 =====================================================
 与现有 DC 日报**完全隔离**：独立数据源（dtt）、独立提示词、独立文件，
 只复用 pipeline 的 AI 调用 / 结构清洗 / 飞书·TG 推送层。
@@ -170,9 +170,14 @@ def build_input(payload, cfg=None):
     ordered = sorted(by_sn, key=lambda s: (-len(by_sn[s]), s))[:MAX_SN]
     st = payload.get("stats") or {}
 
+    bounds = payload.get("bounds") or {}
+    _bs, _be = bounds.get("start"), bounds.get("end")
+    def _bstr(ts):
+        return datetime.datetime.fromtimestamp(ts, TZ).strftime("%m-%d %H:%M") if ts else "?"
+    _range = ("%s → %s" % (_bstr(_bs), _bstr(_be))) if _bs and _be else "所选日 00:00 → 当前"
     lines = [
         "平台：dtt 关键词监控（Twitter/X · Telegram · Discord）",
-        "日期：%s（北京时间自然日）" % payload.get("day", ""),
+        "日期：%s（北京时间 %s）" % (payload.get("day", ""), _range),
         "当日命中事件 %d 条（命中 SN %d 条；Twitter %s / Telegram %s / Discord %s）"
         % (st.get("total", 0), st.get("with_sn", 0),
            (st.get("by_platform") or {}).get("twitter", 0),
@@ -260,13 +265,18 @@ def run_community_day(cfg, day_str, log=print, push=True):
     import pipeline as P
 
     day_str = P._resolve_day_alias(day_str, TZ)
-    # 1) 取数（优先复用当日已落地的结果，避免重复请求；force 时重取）
+    day_label = ("昨日" if day_str == (datetime.datetime.now(TZ) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                 else ("今日" if day_str == datetime.datetime.now(TZ).strftime("%Y-%m-%d") else day_str))
+    # 1) 取数：窗口是「所选日 00:00 → 当前触发时刻」，缓存必须覆盖到当下才可复用，
+    #    否则重取（命令每次触发的时间不同，旧快照会漏掉临近时刻的新消息）。
     payload = CF.read_day(day_str, cfg)
-    if payload is None:
-        payload = CF.fetch_day(day_str, cfg, log=log)
-    else:
-        log("社区日报：复用已取数的 %s（%d 条），未重复请求 dtt"
+    if payload is not None and CF.cache_covers_now(payload, cfg):
+        log("社区日报：复用已取数的 %s（%d 条，边界覆盖到当前），未重复请求 dtt"
             % (day_str, payload.get("stats", {}).get("total", 0)))
+    else:
+        if payload is not None:
+            log("社区日报：%s 旧快照边界未覆盖当前时刻，重取中…" % day_str)
+        payload = CF.fetch_day(day_str, cfg, log=log, until_now=True)
 
     if not (payload.get("events") or []):
         digest = "📭 %s 社区关键词监控当日无命中消息。" % day_str
@@ -321,7 +331,7 @@ def run_community_day(cfg, day_str, log=print, push=True):
         log("社区日报落档跳过（不影响推送）：%s" % e)
 
     # 5) 双推
-    title = "🌐 Bittensor 社区消息日报 · %s" % day_str
+    title = "🌐 Bittensor 社区消息日报（dtt版）· %s（%s）" % (day_str, day_label)
     if flags:
         title += " ⚠️待人工核对"
     if push:

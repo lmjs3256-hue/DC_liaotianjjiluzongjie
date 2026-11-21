@@ -1295,7 +1295,9 @@ def main():
     if cfg.get("telegram_chat_id"):
         _LAST_CHAT_ID[0] = str(cfg.get("telegram_chat_id"))
     _start_kb_scheduler()
-    _start_community_scheduler()
+    # 社区日报 v1.20.0 起改为命令触发（python pipeline.py community），不再定时推送。
+    # 若用户日后在 config 里手动把 community_auto 设 true，可取消下一行注释恢复调度。
+    # _start_community_scheduler()
 
     last_hb = time.time()
     last_ver_check = time.time()

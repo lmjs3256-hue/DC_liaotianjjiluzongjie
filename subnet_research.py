@@ -2373,6 +2373,171 @@ def tidy_news_in_timeline(digest, log=print):
     return out, changes
 
 
+# ------------------------------------------------------------------ 时间线：倒序 + 上限 + 超限跟踪回填
+# v1.23.0 用户新要求：
+#   1) 时间线按真实日期倒序——最新事件排最前面（原来模型常按旧→新写，首条最旧）；
+#   2) 每份报告时间线最多保留 TIMELINE_MAX_EVENTS 条，超出的条目不在时间线里显示；
+#   3) 被截掉的事件里，凡是能对上「📌 预期跟踪」某项（含判定状态的进展），
+#      必须回填进预期跟踪段，不能因为截断把跟踪进度弄丢。
+# 放在 tidy_news_in_timeline 之后调用：那一步会重建时间线段、去重、加图例。
+TIMELINE_MAX_EVENTS = 10
+_TL_ITEM_RE = re.compile(r"^\s*[-*•]\s*")
+_TL_DATE_ANY_RE = re.compile(r"^\s*[-*•]?\s*(?:(\d{4})-)?(\d{1,2})-(\d{2})\s*[·•]")
+
+
+def _tl_event_date(line, base_year):
+    """从一条时间线事件解析 (year, month, day)；无日期返回 None。
+
+    首条常写完整 `2026-11-13`，其余写 `11-14`。缺年份时用 base_year 补齐。
+    对「跨年但只写了月日」的边界（如 12-30 与 01-02 同报告）：若月日明显大于
+    带年份条目的月日，视为上一年——这里用简单的「12 月且.base 是 1 月」兜底。
+    """
+    m = _TL_DATE_ANY_RE.match(line or "")
+    if not m:
+        return None
+    yr = int(m.group(1)) if m.group(1) else base_year
+    mo, dy = int(m.group(2)), int(m.group(3))
+    if not (1 <= mo <= 12 and 1 <= dy <= 31):
+        return None
+    return (yr, mo, dy)
+
+
+def _tl_is_tracking_progress(line, track_keywords):
+    """被截掉的事件是否属于「预期跟踪进度」。
+
+    信号：事件里带判定/进展词（兑现/证伪/解仓/上线/注册…），或命中预期跟踪段里
+    提取的专名关键词。纯群聊闲聊、无判定信号的不回填。
+    """
+    s = _RED_STRIP_RE.sub(r"\1", line or "")
+    s = re.sub(r"^\s*[-*•]\s*", "", s).strip()
+    progress_cue = re.search(
+        r"已兑现|已证伪|进行中|条件未触发|兑现|证伪|解仓|解锁|unwind|上线|开.*注册|"
+        r"注册.*(关|开)|回购|销毁|支付|到账|跌破|突破|达标|未达标|恢复|重启|"
+        r"达成|落地|通过|批准|关闭|开启|到期|交割|更名|改名|结果|确认|首次",
+        s, re.I)
+    if progress_cue:
+        return True
+    low = s.lower()
+    return any(k and len(k) >= 3 and k in low for k in track_keywords)
+
+
+def _tl_track_keywords(digest):
+    """从「📌 预期跟踪」段抽专名关键词（跳过判定词与虚词）。"""
+    kws = set()
+    m = re.search(r"\*\*(?:📌\s*)?预期跟踪\*\*\s*\n((?:-\s*.+\n?)+)", digest or "")
+    if not m:
+        return kws
+    stop = {"进行中", "条件未触发", "已兑现", "已证伪", "本次", "上次", "新增", "跟踪",
+            "兑现", "证伪", "判定", "输入", "数据", "观察", "关注", "继续", "即兑现", "即证伪"}
+    for ln in m.group(1).split("\n"):
+        s = _RED_STRIP_RE.sub(r"\1", ln.strip())
+        s = re.sub(r"^[-•]\s*", "", s)
+        for tok in re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}|[\u4e00-\u9fff]{3,8}", s):
+            t = tok.strip()
+            if t and t not in stop and t.lower() not in _GENERIC_ANCHOR_STOP:
+                kws.add(t.lower())
+    return kws
+
+
+def sort_cap_timeline(digest, log=print, max_events=TIMELINE_MAX_EVENTS):
+    """时间线按日期倒序（最新在前）、最多留 max_events 条；超出的跟踪进度回填预期跟踪段。
+
+    返回 (digest, stats)。图例行不参与排序/计数，始终留在时间线末尾。首条（最新）
+    保留完整年份，其余同年条目缩写为月-日（tidy_dates 的既有口径）。
+    """
+    stats = {"total": 0, "kept": 0, "dropped": 0, "backfilled": 0}
+    if not digest:
+        return digest, stats
+    lines = digest.split("\n")
+    # 段边界：标题到下一个 ** 标题前
+    ts = next((i for i, ln in enumerate(lines)
+               if _TIME_SECTION_RE.match(ln.strip())), None)
+    if ts is None:
+        return digest, stats
+    te = ts + 1
+    while te < len(lines) and not re.match(r"^\*\*", lines[te].strip()):
+        te += 1
+    seg = lines[ts + 1:te]
+    legend = next((ln for ln in seg if "为最新资讯" in ln), None)
+    items = [ln for ln in seg if ln.strip() and ln != legend]
+    if not items:
+        return digest, stats
+
+    # 基准年份：优先取段内出现的完整年份（通常是旧事件那条），否则用当年
+    base_year = datetime.datetime.now(TZ).year
+    for ln in items:
+        mm = re.match(r"^\s*[-*•]?\s*(\d{4})-\d{2}-\d{2}\s*[·•]", ln)
+        if mm:
+            base_year = int(mm.group(1))
+            break
+
+    dated, undated = [], []
+    for ln in items:
+        d = _tl_event_date(ln, base_year)
+        (dated if d else undated).append((d, ln))
+    # 倒序：最新事件在最前；同日保持原相对顺序（Python sort 稳定）
+    dated.sort(key=lambda x: x[0], reverse=True)
+    # undated 已经是 (None, ln) 形式，不能再包一层元组
+    ordered = dated + undated
+    kept = [ln for _d, ln in ordered[:max_events]]
+    dropped = [ln for _d, ln in ordered[max_events:]]
+    stats.update(total=len(items), kept=len(kept), dropped=len(dropped))
+
+    # 首条保留完整年份、其余同年缩写；倒序后首条是最新的，年份要同步到它
+    rebuilt = []
+    for i, ln in enumerate(kept):
+        d = _tl_event_date(ln, base_year)
+        if i == 0 and d:
+            yr, mo, dy = d
+            rebuilt.append(re.sub(r"^(\s*[-*•]?\s*)(?:\d{4}-)?(\d{1,2})-(\d{2})(\s*[·•])",
+                                  lambda m: "%s%04d-%02d-%02d%s" % (m.group(1), yr, mo, dy, m.group(4)),
+                                  ln, count=1))
+        elif d and i > 0:
+            yr, mo, dy = d
+            if yr == base_year:  # 同年才缩写，跨年保留完整年份
+                rebuilt.append(re.sub(r"^(\s*[-*•]?\s*)(?:\d{4}-)?(\d{1,2})-(\d{2})(\s*[·•])",
+                                      lambda m: "%s%02d-%02d%s" % (m.group(1), mo, dy, m.group(4)),
+                                      ln, count=1))
+            else:
+                rebuilt.append(ln)
+        else:
+            rebuilt.append(ln)
+    new_seg = rebuilt + ([legend] if legend else [])
+    lines[ts + 1:te] = new_seg
+    out = "\n".join(lines)
+
+    # 超限的跟踪进度回填到「📌 预期跟踪」，避免截断导致进度丢失
+    if dropped:
+        kws = _tl_track_keywords(out)
+        progress = [ln for ln in dropped if _tl_is_tracking_progress(ln, kws)]
+        if progress:
+            uniq, seen = [], set()
+            for ln in progress:
+                key = _RED_STRIP_RE.sub(r"\1", ln)
+                key = re.sub(r"\s+", "", key)[:80]
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(ln)
+            note_lines = []
+            for ln in uniq[:6]:
+                body = re.sub(r"^\s*[-*•]\s*", "", _RED_STRIP_RE.sub(r"\1", ln)).strip()
+                body = re.sub(r"\s*·\s*((?:✅已验证|⚠️未验证)[^·]*)$", "", body)
+                note_lines.append("- ⏳（时间线超限移入）" + body)
+            note = ("**⏳ 跟踪进度补充**（时间线仅显示最新 %d 条，以下为被截掉、但与预期跟踪直接相关的进展）：\n%s"
+                    % (max_events, "\n".join(note_lines)))
+            out = _insert_section(out, note, "📌 预期跟踪")
+            stats["backfilled"] = len(note_lines)
+            log("时间线倒序/限条：保留最新 %d 条，截掉 %d 条；其中 %d 条跟踪进度已回填预期跟踪"
+                % (len(kept), len(dropped), len(note_lines)))
+        else:
+            log("时间线倒序/限条：保留最新 %d 条，截掉 %d 条（无跟踪进度需回填）"
+                % (len(kept), len(dropped)))
+    else:
+        log("时间线倒序/限条：共 %d 条，未超 %d 条上限" % (len(items), max_events))
+    return out, stats
+
+
 def audit_numbers(digest, source_text, log=print):
     """检查报告里的带单位数字是否都在素材里。返回 (未命中列表, 命中率)。"""
     src = source_text or ""
@@ -2522,7 +2687,8 @@ _RESEARCH_PROMPT_TMPL = (
     "不能出现「明明有新资讯，报告里却一条都没有」，也**不许把资讯单列成段**——"
     "独立的「📰 最新资讯」段与时间线大面积重复，已取消。所以：\n"
     "1. 输入里只要 [X] / [X 生态圈提及] / [新闻] / [官网] / [GitHub] 段里**有任何一条**"
-    "近 %(days)d 天内的新内容，就**直接作为一条写进「🗓 重要事件时间线」**，按真实日期归位，一条都不许漏；\n"
+    "近 %(days)d 天内的新内容，就**直接作为一条写进「🗓 重要事件时间线」**，按真实日期倒序归位（最新在前）；"
+    "时间线最多 10 条，太多时优先保留最新的，超出的不必硬塞（代码层会截断并把其中的跟踪进度补进预期跟踪）；\n"
     "2. 特别是 [X] 段里标了「（用户提供）」的贴文——那是用户自己贴过来要你看的，"
     "**必须逐条写进去**，写清发布者、日期、原话要点；\n"
     "3. 每条来自外部源（X / 新闻 / 官网 / GitHub / 搜索）的事件，"
@@ -2567,7 +2733,10 @@ _RESEARCH_PROMPT_TMPL = (
     "括注写清依据，如「✅已验证（官方X+官网）」\n"
     "    · `⚠️未验证` —— 只有单一来源、只有群内说法、或只是口头承诺；"
     "括注写清缺什么，如「⚠️未验证（仅群内称，无公告）」\n"
-    "- **条数**：按事情多少写，**最多 12 条**，重要的排前面；确实没有大事就写 1-3 条并说明「本期无重大事件」。\n"
+    "- **排序（本条优先级极高）**：严格按**真实日期倒序**——**最新的事件排最前面，最旧的排最后**，"
+    "不许按重要性、来源或群聊顺序排。首条就是最近发生的那条。\n"
+    "- **条数**：**最多 10 条**（代码层会严格执行，超出的旧事件会被截掉）；确实没有大事就写 1-3 条并说明「本期无重大事件」。"
+    "近期资讯太多时优先保留最新、最重要的，旧的不必硬凑。\n"
     "- **只写真实发生的事**：不要写「与上次相比无变化」「延续上次判断」这种元评估条目——"
     "没有新事就少写一条，不要在时间线里塞占位行。\n"
     "- **GitHub 的逐条 commit 不算事件**——数据站「N commits/30d」与 GitHub「最近提交日期」"
@@ -4180,6 +4349,12 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
                      "当日抓到 SN%d 相关消息，但自动提炼未成功，暂不列出（不影响报告其它章节）。" % sn)
         digest = _insert_section(digest, _note, "📌 预期跟踪")
         log("📢 当日社区动态：无相关消息/提炼失败，已写如实说明（不保留主模型原节）")
+    # 时间线倒序 + 上限（v1.23.0）：放在社区动态之后，回填的「跟踪进度补充」节
+    # 紧挨「📌 预期跟踪」之前。此步之后不再有重写整篇的步骤，排序结果不会被覆盖。
+    try:
+        digest, _tstat = sort_cap_timeline(digest, log=log)
+    except Exception as e:
+        log("时间线倒序/限条跳过（%s）" % e)
     title = "🔬 SN%d %s · 重要事件跟踪报告（%s）" % (
         sn, meta["name"] or "未收录", datetime.datetime.now(TZ).strftime("%m-%d"))
     d = A.sn_dir(arc_dir, sn)

@@ -44,6 +44,17 @@ DEFAULT_GROUP_IDS = [
     "1002480957486",   # Subnet Summer - τ（SN 编号观点、行情）
     "1001965130471",   # Bittensor TAO Price Chat（交易员闲聊，含 const 相关）
 ]
+# groupId → 展示名（分步选群按钮/回执/单群标题共用，单一数据源）
+GROUP_LABELS = {
+    "8116469191": "TAO-update-DC",
+    "1003968896337": "Hanlin.AI",
+    "1002480957486": "Subnet Summer - τ",
+    "1001965130471": "Bittensor TAO Price Chat",
+}
+
+def group_label(gid, fallback=""):
+    """groupId → 展示名（未登记则回退到传入值）。"""
+    return GROUP_LABELS.get(str(gid), fallback or str(gid))
 # 服务端 limit 封顶 100
 PAGE_LIMIT = 100
 # 单日单群最多翻多少页（100 条/页，60 页=6000 条，足够覆盖最活跃群单日量级）

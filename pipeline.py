@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.24.0"
+__version__ = "1.25.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -4144,16 +4144,23 @@ if __name__ == "__main__":
             rest = list(args.extra)
             push = not any(x.lower() in ("nopush", "--no-push") for x in rest)
             rest = [x for x in rest if x.lower() not in ("nopush", "--no-push")]
-            if rest:
-                day = _resolve_day_alias(rest[0], datetime.timezone(datetime.timedelta(hours=8)))
-            else:
+            # 参数：day 与 group_id 顺序不敏感。group_id 为纯数字长串（TG 群 ID）。
+            day, group_id = None, None
+            for x in rest:
+                if re.fullmatch(r"\d{6,15}", str(x)):
+                    group_id = str(x)
+                elif day is None:
+                    day = _resolve_day_alias(x, datetime.timezone(datetime.timedelta(hours=8)))
+            if day is None:
                 day = (datetime.datetime.now(
                     datetime.timezone(datetime.timedelta(hours=8)))
                     - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-            res = TGD.run_tg_group_day(cfg, day, log=log, push=push)
+            res = TGD.run_tg_group_day(cfg, day, log=log, push=push, group_id=group_id)
             st = res.get("stats") or {}
-            log("TG群日报完成：%s（群消息 %d 条，严格相关 %d 条，%d 个子网落档）"
-                % (day, res.get("total", 0), st.get("related", 0), res.get("archived_sn", 0)))
+            scope = ("【%s】" % res.get("group_name")) if res.get("group_name") else ""
+            log("TG群日报完成：%s%s（群消息 %d 条，严格相关 %d 条，%d 个子网落档）"
+                % (day, scope, res.get("total", 0), st.get("related", 0),
+                   res.get("archived_sn", 0)))
         elif args.mode == "community_confirm":
             # 人工确认社区日报的某条冲突：写入对应子网档案 community_digests[].confirm
             # 用法：community_confirm 日期 SN编号 结论 [confirmed|refuted]

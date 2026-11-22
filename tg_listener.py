@@ -51,6 +51,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import pipeline as P
 import llm_profiles as LP
+import tg_group_fetch as TGF
 
 # 与 pipeline/community_fetch 一致：从 pythonw（无控制台）拉起 powershell/taskkill/
 # pipeline 等控制台子进程时抑制黑色命令窗口闪现，不影响 PIPE 捕获输出。
@@ -101,8 +102,10 @@ HELP = (
     "     /社区重推                        ← 按已确认结论重推确认版（不重新取数/不调AI）\n"
     "     确认后该结论会被投研和确认版日报引用。\n"
     "💬 /tg群、/群消息 TG群消息日报（dtt管理员群消息库，独立日报）：\n"
-    "   /tg群今日  取今日4个活跃群聊天，严格相关筛选后按群总结，飞书+TG双推\n"
-    "   /tg群      默认昨日；也可 /tg群 2026-11-20；末尾加 nopush 只生成不推送\n"
+    "   /tg群（裸命令）     ← 两步：①回执 4 群按钮选群 ②再选「昨日/今日」→生成后推送\n"
+    "   /tg群今日          取今日4个活跃群聊天，严格相关筛选后按群总结，飞书+TG双推\n"
+    "   /tg群 2026-11-20   也可带日期；末尾加 nopush 只生成不推送\n"
+    "   总结含：话题(标SN)/人物/观点三段式；转发的推特链接会抓正文核实后再提炼\n"
     "   （与 /社区 关键词日报完全隔离：这是群的原始聊天，只留SN/专名/关键人物相关）\n"
     "🤖 /模型 大模型平台切换（档案名不区分大小写：sn53/sn28；旧名 engy=sn53）：\n"
     "   /模型              列出档案+当前；/模型 sn28 切到 SN28 SayGM\n"
@@ -582,6 +585,184 @@ def _run_community_confirm(sn, note, chat_id):
     run_pipeline(["community_confirm", day, str(sn), note, status], chat_id, quiet=True)
 
 
+# ---------------------------------------------------------------------------
+# TG 群日报「分步选群 → 选日期」：裸命令 → 回执 4 群按钮 → 选群后回执「昨日/今日」
+#   → 再选日期 → 才真正生成并推送。两轮都按 chat_id 隔离、5 分钟有效。
+#   - callback_data：第1轮 tggrp:<groupId>|all|cancel；第2轮 tgday:yesterday|today|cancel
+#   - 状态挡在 handle 最前面：期间文本按「群选项 / 日期选项」解析，不落到
+#     「裸编号=投研」「ss58=地址补录」逻辑（与社区确认流程同理）。
+# ---------------------------------------------------------------------------
+_TGG_FLOW = {}          # chat_id -> {"step": "group"|"day", "gid":..., "ts":...}
+_TGG_FLOW_TTL = 300
+
+
+def _tgg_flow_clear(chat_id):
+    _TGG_FLOW.pop(str(chat_id), None)
+
+
+def _tgg_flow_active(chat_id):
+    st = _TGG_FLOW.get(str(chat_id))
+    if not st:
+        return None
+    if time.time() - st.get("ts", 0) > _TGG_FLOW_TTL:
+        _tgg_flow_clear(chat_id)
+        return None
+    return st
+
+
+def _tgg_group_keyboard():
+    """第 1 轮：4 群 + 全部 + 取消。"""
+    rows = [[{"text": TGF.GROUP_LABELS[gid], "callback_data": "tggrp:" + gid}]
+            for gid in TGF.DEFAULT_GROUP_IDS]
+    rows.append([{"text": "📊 全部 4 群", "callback_data": "tggrp:all"},
+                 {"text": "❌ 取消", "callback_data": "tggrp:cancel"}])
+    return {"inline_keyboard": rows}
+
+
+def _tgg_day_keyboard():
+    """第 2 轮：昨日 / 今日 / 取消。"""
+    return {"inline_keyboard": [[
+        {"text": "📅 昨日", "callback_data": "tgday:yesterday"},
+        {"text": "☀️ 今日", "callback_data": "tgday:today"},
+        {"text": "❌ 取消", "callback_data": "tgday:cancel"},
+    ]]}
+
+
+def _tgg_prompt(chat_id):
+    """裸命令回执第 1 轮：抛出 4 个群组可选项。"""
+    _TGG_FLOW[str(chat_id)] = {"step": "group", "gid": None, "ts": time.time()}
+    lines = ["💬 第 1 步：请选择要总结的 TG 群（点按钮，5 分钟内有效）："]
+    for i, gid in enumerate(TGF.DEFAULT_GROUP_IDS, 1):
+        lines.append("  %d️⃣ %s" % (i, TGF.GROUP_LABELS[gid]))
+    lines.append("  点「全部 4 群」维持原样；也可直接回复序号 1-4 / 群名。")
+    safe_send(chat_id, "\n".join(lines), markup=_tgg_group_keyboard())
+
+
+def _tgg_ask_day(chat_id, gid=None):
+    """第 2 轮：选定群后，回执「昨日/今日」让用户选时间范围。"""
+    _TGG_FLOW[str(chat_id)] = {"step": "day", "gid": gid, "ts": time.time()}
+    label = TGF.group_label(gid) if gid else "全部 4 群"
+    safe_send(chat_id,
+              "🗓 第 2 步：【%s】已选中，请选择总结哪天的消息：\n"
+              "  点「昨日」/「今日」，或回复 昨日 / 今日 / 具体日期（如 2026-11-20）。" % label,
+              markup=_tgg_day_keyboard())
+
+
+def _tgg_run(chat_id, gid=None, day="昨日"):
+    """真正触发单群（gid 非空）或全群总结，day 走 pipeline 的日期别名解析。"""
+    _tgg_flow_clear(chat_id)
+    label = TGF.group_label(gid) if gid else "全部 4 群"
+    day_txt = {"yesterday": "昨日", "today": "今日"}.get(day, day)
+    send_async(chat_id,
+               "💬 收到，正在总结【%s】%s的群消息，生成完毕后推送（飞书 + TG）…"
+               % (label, ("「%s」" % day_txt)))
+    args = ["tg_group", day_txt] + ([gid] if gid else [])
+    run_pipeline(args, chat_id, quiet=True)
+
+
+def _tgg_callback(cq, chat_id, from_id, allowed_users):
+    """处理内联按钮 callback_query（两轮）。返回 True 表示已消费该 update。"""
+    data = (cq.get("data") or "").strip()
+    if not (data.startswith("tggrp:") or data.startswith("tgday:")):
+        return False
+    cqid = cq.get("id") or ""
+
+    def _ack(text=""):
+        try:
+            p = {"callback_query_id": cqid}
+            if text:
+                p["text"] = text
+            tg_api(P._CFG["telegram_bot_token"], "answerCallbackQuery", p, timeout=10)
+        except Exception as e:
+            log("answerCallbackQuery 失败（忽略）：%s" % e)
+
+    if allowed_users and from_id not in allowed_users:
+        _ack("无权限")
+        return True
+    active = _tgg_flow_active(chat_id)
+    val = data.split(":", 1)[1].strip()
+    if val == "cancel":
+        _tgg_flow_clear(chat_id)
+        _ack("已取消")
+        safe_send(chat_id, "已取消 TG 群日报。")
+        return True
+    if not active:
+        _ack("已超时，请重发命令")
+        safe_send(chat_id, "⏱ 选群已超时（5 分钟），请重新发 /群消息 再选。")
+        return True
+
+    # 第 1 轮：选群 → 追问日期（不直接生成）
+    if data.startswith("tggrp:"):
+        if val == "all":
+            _ack("已选全部 4 群，请选日期")
+            _tgg_ask_day(chat_id, None)
+            return True
+        if val in TGF.GROUP_LABELS:
+            _ack("已选 %s，请选日期" % TGF.GROUP_LABELS[val])
+            _tgg_ask_day(chat_id, val)
+            return True
+        _ack("无效选项")
+        return True
+
+    # 第 2 轮：选日期 → 真正生成
+    if active.get("step") != "day":
+        _ack("请先选群")
+        safe_send(chat_id, "请先选群（点上一轮的群按钮），再选昨日/今日。")
+        return True
+    gid = active.get("gid")
+    if val in ("yesterday", "today"):
+        _ack("正在总结" + ("昨日" if val == "yesterday" else "今日"))
+        _tgg_run(chat_id, gid, val)
+        return True
+    _ack("无效选项")
+    return True
+
+
+def _tgg_flow_consume(text, chat_id):
+    """两轮状态下消费文本回复：第1轮=群选项，第2轮=日期选项。不在流程则返回 False。"""
+    st = _tgg_flow_active(chat_id)
+    if not st:
+        return False
+    t = (text or "").strip()
+    low = t.lstrip("/").lower().split("@")[0]
+    if low in ("取消", "cancel", "退出", "quit", "q"):
+        _tgg_flow_clear(chat_id)
+        safe_send(chat_id, "已取消 TG 群日报。")
+        return True
+    if t.startswith("/"):
+        _tgg_flow_clear(chat_id)
+        return False
+
+    if st.get("step") == "group":
+        if low in ("全部", "all", "5", "全群"):
+            _tgg_ask_day(chat_id, None)
+            return True
+        if low.isdigit() and 1 <= int(low) <= len(TGF.DEFAULT_GROUP_IDS):
+            _tgg_ask_day(chat_id, TGF.DEFAULT_GROUP_IDS[int(low) - 1])
+            return True
+        for gid in TGF.DEFAULT_GROUP_IDS:
+            name = TGF.GROUP_LABELS[gid].lower()
+            if low and (low in name or name in low):
+                _tgg_ask_day(chat_id, gid)
+                return True
+        safe_send(chat_id, "请回复 1-4 选群、5 全部，或点上方按钮；发 /取消 退出。")
+        return True
+
+    # 第 2 轮：日期
+    gid = st.get("gid")
+    if low in ("1", "昨日", "昨天", "yesterday", "y"):
+        _tgg_run(chat_id, gid, "yesterday")
+        return True
+    if low in ("2", "今日", "今天", "today", "t"):
+        _tgg_run(chat_id, gid, "today")
+        return True
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t):
+        _tgg_run(chat_id, gid, t)
+        return True
+    safe_send(chat_id, "请回复「昨日」或「今日」（也可写 2026-11-20 这样的日期）；发 /取消 退出。")
+    return True
+
+
 def send(chat_id, text, markup=None):
     # 纯文本发送，避免日志里的特殊字符破坏 Markdown 解析；
     # 默认随回复附 remove_keyboard —— bot 每次回复后底部按钮栏自动收起
@@ -751,14 +932,17 @@ def _run_pipeline_sync(args, chat_id):
             safe_send(chat_id, receipt)
             return
         if args and args[0] == "tg_group":
-            # TG群日报专属回执（正文已由 pipeline 推送）
-            m = re.search(r"TG群日报完成：\s*(\d{4}-\d{2}-\d{2})\s*（群消息\s*(\d+)\s*条，严格相关\s*(\d+)\s*条，(\d+)\s*个子网落档）", out)
+            # TG群日报专属回执（正文已由 pipeline 推送）；日志可能带【群名】前缀
+            m = re.search(r"TG群日报完成：\s*(\d{4}-\d{2}-\d{2})\s*(?:【([^】]+)】)?\s*（群消息\s*(\d+)\s*条，严格相关\s*(\d+)\s*条，(\d+)\s*个子网落档）", out)
             if m:
-                day, total, rel, sns = m.groups()
-                receipt = ("💬 TG群消息日报已生成并推送（飞书 + TG）\n"
+                day, gname, total, rel, sns = m.groups()
+                gid = next((x for x in args[1:] if re.fullmatch(r"\d{6,15}", str(x))), None)
+                scope = ("【%s】" % gname) if gname else ""
+                fname = "tg_group_%s%s.digest.txt" % (day, ("_" + gid) if gid else "")
+                receipt = ("💬 TG群消息日报%s已生成并推送（飞书 + TG）\n"
                            "📅 %s　📊 群消息 %s 条 → 严格相关 %s 条 · %s 个子网落档\n"
-                           "📄 exports/tg_group/tg_group_%s.digest.txt"
-                           % (day, total, rel, sns, day))
+                           "📄 exports/tg_group/%s"
+                           % (scope, day, total, rel, sns, fname))
             elif "当日无消息" in out or "无与 Bittensor 子网相关" in out:
                 receipt = "💬 TG群日报已生成：当日无相关内容（空报告，未推送正文）"
             else:
@@ -1209,6 +1393,10 @@ def handle(text, chat_id):
     # 先被这里消费，绝不能落到下面的「裸编号=投研」「ss58=地址补录」逻辑。
     if _confirm_flow_consume(text, chat_id):
         return
+    # TG 群日报选群状态：期间回复的「1」「Hanlin.AI」「全部」按群选项消费，
+    # 绝不能落到下面的「裸编号=投研」「ss58=地址补录」逻辑。
+    if _tgg_flow_consume(text, chat_id):
+        return
     parts = text.split()
     # 群里发指令可能带 @机器人名（/digest@Dtao_ribao_bot），剥掉后缀再匹配
     cmd = parts[0].lstrip("/").lower().split("@")[0]
@@ -1272,10 +1460,15 @@ def handle(text, chat_id):
     elif cmd in ("tg群", "群消息", "tg_group", "tg群消息", "tgqun",
                  "tg群今日", "tg群今天", "tg_group_today",
                  "tg群昨日", "tg群昨天", "tg_group_yesterday"):
-        # TG 群消息日报（dtt 管理员群消息库，与关键词社区日报隔离）：命令触发。
-        # /tg群 默认昨日；/tg群今日 取今日；其余参数（日期/nopush）透传 pipeline tg_group。
+        # TG 群消息日报（dtt 管理员群消息库，与关键词社区日报隔离）。
+        # v1.25.0 裸命令 → 分步选群（回执 4 群按钮 → 点击 → 单群总结 → 推送）。
+        # 带参数（今日/昨日/日期/nopush）→ 老写法直通全群，不受分步影响。
         _today_cmds = ("tg群今日", "tg群今天", "tg_group_today")
         _yest_cmds = ("tg群昨日", "tg群昨天", "tg_group_yesterday")
+        _bare_cmds = ("tg群", "群消息", "tg_group", "tg群消息", "tgqun")
+        if cmd in _bare_cmds and len(parts) == 1:
+            _tgg_prompt(chat_id)
+            return
         if cmd in _today_cmds:
             preset = ["今日"]
         elif cmd in _yest_cmds:
@@ -1667,6 +1860,18 @@ def main():
                 continue
             for u in resp.get("result", []):
                 offset = u["update_id"] + 1
+                # 内联按钮回调（TG 群日报分步选群）：独立于文本消息分发。
+                # 必须 answerCallbackQuery，否则客户端按钮一直转圈。
+                cq = u.get("callback_query") or {}
+                if cq:
+                    cq_chat = str((cq.get("message") or {}).get("chat", {}).get("id", ""))
+                    cq_from = str((cq.get("from") or {}).get("id", ""))
+                    log("收到按钮回调 chat=%s data=%s" % (cq_chat, cq.get("data")))
+                    try:
+                        _tgg_callback(cq, cq_chat, cq_from, allowed_users)
+                    except Exception as e:
+                        log("处理按钮回调异常（已忽略）：%s" % e)
+                    continue
                 msg = u.get("message") or {}
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 from_id = str(msg.get("from", {}).get("id", ""))

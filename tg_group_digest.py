@@ -21,6 +21,7 @@ import re
 
 import community_fetch as CF
 import tg_group_fetch as TGF
+import tweet_fetch as TF
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -181,6 +182,23 @@ def _body_clean(e):
     return body.strip()
 
 
+def _tweet_lines(e):
+    """把核实过的推文正文附到消息行后：模型据此提炼内容，而不是只写「转发了链接」。
+
+    核实成功 → 给正文（不贴原链接）；失败 → 如实标注，明确禁止编造。
+    """
+    out = []
+    for tw in (e.get("_tweets") or []):
+        if tw.get("ok") and tw.get("text"):
+            who = ("（%s）" % tw["author"]) if tw.get("author") else ""
+            out.append("  ↳ 🔗推文核实%s：%s"
+                       % (who, CD._clean(tw["text"], TF.MAX_TWEET_CHARS)))
+        else:
+            out.append("  ↳ 🔗推文核实：%s；只写该消息里已有的上下文，禁止编造推文正文。"
+                       % (tw.get("note") or "内容未能核实"))
+    return out
+
+
 def build_input(payload, cfg=None):
     """严格相关筛选 + 按群分组 + 关键人物单列，返回给模型的输入文本。
 
@@ -230,6 +248,7 @@ def build_input(payload, cfg=None):
             author = _display_author(e.get("author"), cfg)
             t = e.get("_time") or "??:??"
             lines.append("- [%s][%s] %s" % (t, author, CD._clean(body, MAX_MSG_CHARS)))
+            lines.extend(_tweet_lines(e))
             n += 1
             if n >= MAX_PER_GROUP:
                 lines.append("  …（该群另有 %d 条已省略）" % (len(es) - n))
@@ -254,6 +273,7 @@ def build_input(payload, cfg=None):
                 e.get("groupName") or "",
                 _display_author(e.get("author"), cfg),
                 CD._clean(body, MAX_MSG_CHARS)))
+            lines.extend(_tweet_lines(e))
 
     stats = {
         "total": len(events),
@@ -272,16 +292,30 @@ TG_GROUP_SYSTEM_PROMPT = (
     "\n"
     "【输出结构（严格按顺序，标题一律 **加粗**；无内容的小节整节省略）】\n"
     "**🔥 群内热点**（当天群里被反复提及、或明显重要的事件，3-6 条；"
-    "每条一句说清「谁 + 什么事」，关键主体与 **SN编号** 加粗，标群名）\n"
+    "每条一句说清「**话题**（关联 **SN**）：**人物** 的什么观点」，"
+    "关键主体与 **SN编号** 加粗，标群名）\n"
     "**📢 子网动态**（官方 bot 转发的 ⛳sn:NN 动态，按 SN 分组：每个有实质的 SN 写一块，"
     "格式「**SN53**（N 条）」下接 1-2 条要点；同一 SN 的多条零散播报合并成一句，"
     "不逐条复述机器人腔。查不到子网名就只写编号，不要编名字）\n"
     "**💬 分群讨论**（按群名分组，如 Hanlin.AI / Subnet Summer - τ；"
-    "每条写清「发言人：真正观点」，重点写清看多/看空、质疑、依据、指向哪个子网或机制；"
-    "玩笑/调侃如实写，不硬拔高）\n"
+    "每条必须凑齐三段：**①话题**（与 Bittensor 哪个子网/机制相关，标 SN）"
+    "→ **②人物**（用输入里的显示名）→ **③观点**（他真正的立场：看多/看空/质疑/依据/指向）；"
+    "玩笑调侃如实写、不硬拔高；与子网无关的话题不列）\n"
+    "**🔗 推文核实**（输入里带「↳ 🔗推文核实」的消息逐条写："
+    "**谁转发** + **推文作者** + **推文实际讲了什么**（已核实正文）+ 关联哪个 **SN**；"
+    "标的「内容未能核实」的如实说明、只写该消息里已有的上下文，**绝不编造推文内容**；"
+    "**严禁只写「某人转发了一条推特链接」这种空话**；本日无推文链接则整节省略）\n"
     "**👀 关键人物观点**（输入末尾「关键人物发言」里的人必须单列、逐条提炼真正立场，"
     "严禁当普通群友合并或一句带过；人名用输入里的显示名，如 const、iuac、rrik）\n"
     "**💡 一句话总结**（当天群内情绪与主线，一句收束）\n"
+    "\n"
+    "【三段式与推文核实（最高优先级）】\n"
+    "- 每条讨论必须同时有「话题（标 SN）+ 人物 + 观点」，缺任一不算合格；"
+    "观点要写清词达意的立场，不写「已准备接入」这种没头没尾的表述。\n"
+    "- 转发推特链接的消息，**必须写出推文正文的实质内容**（输入已在「↳ 🔗推文核实」给出），"
+    "不能只点出人物和「转发链接」；正文是英文的翻成中文短句再提炼，标清关联 SN。\n"
+    "- 核实失败的推文如实写「内容未能核实」，可根据群里已有上下文判断是否与子网相关，"
+    "但不得补原文没有的推文细节。\n"
     "\n"
     "【人名与写法（硬性）】\n"
     "- 人名照抄输入 `<>`/方括号里的显示名（已是规范名：备注名优先、映射后 iuac/rrik），"
@@ -292,7 +326,8 @@ TG_GROUP_SYSTEM_PROMPT = (
     "利好讲清「谁把什么导向哪里、预期效果」，不要只写「已准备接入」这种没头没尾的表述。\n"
     "\n"
     "【铁律】\n"
-    "- 不贴任何原始链接 / x.com / discord.gg 地址；链接内容有信息就提炼成一句，没有就略。\n"
+    "- 不贴任何原始链接 / x.com / discord.gg 地址；推文链接的正文已从「↳ 🔗推文核实」给出，"
+    "必须提炼进「🔗 推文核实」节，不许贴链接、更不许只写「转发链接」四个字。\n"
     "- **禁止编造**：不补原文没有的数字、人名、SN 编号、交易细节；原文没有就说没有。\n"
     "- 官方 bot 的「⛳sn:NN 用户正在输入」「请打开 DC 查看」这类占位不算实质内容，不写进报告。\n"
     "- 与 Bittensor 子网、代币机制、团队动态无关的话题不列。\n"
@@ -301,7 +336,7 @@ TG_GROUP_SYSTEM_PROMPT = (
     "- 关键主体 **加粗**：人物、**SN编号/子网名**、代币、事件、关键数字。\n"
     "- emoji 标程度：🔥 热点、✅ 落地、⚠️ 风险、📌 关注、❌ 利空。\n"
     "- 每条单独成行用 - 项目符号，小节间空行，适合手机端；不用 # 标题、不用 > 引用。\n"
-    "- **字数上限 2500 字**（含标点）；消息少就少写，简洁+信息全=合格。\n"
+    "- **字数上限 3000 字**（含标点）；消息少就少写，简洁+信息全=合格。\n"
     "- 禁止废话：不写「此外」「总体来看」「可以看出」这类填充词；不复述已说过的事实；"
     "一条只说一件事。\n"
     "- 绝对不许在正文里写任何字数标注或元信息。\n"
@@ -312,8 +347,11 @@ def _out_dir(cfg=None):
     return TGF._out_dir(cfg)
 
 
-def run_tg_group_day(cfg, day_str, log=print, push=True):
-    """主流程：取数 -> 严格筛选构建 -> AI 生成 -> 清洗 -> 落档 -> 双推。"""
+def run_tg_group_day(cfg, day_str, log=print, push=True, group_id=None):
+    """主流程：取数 -> (单群过滤) -> 推文核实 -> 严格筛选构建 -> AI 生成 -> 清洗 -> 落档 -> 双推。
+
+    group_id：非空则只总结该群（分步选群点击后传入），标题与落盘文件名带群标识。
+    """
     import pipeline as P
 
     day_str = P._resolve_day_alias(day_str, TZ)
@@ -331,9 +369,33 @@ def run_tg_group_day(cfg, day_str, log=print, push=True):
             log("TG群日报：%s 旧快照边界未覆盖当前时刻，重取中…" % day_str)
         payload = TGF.fetch_day(day_str, cfg, log=log, until_now=True)
 
+    # 1.5) 单群模式：只保留选中群的事件（分步选群点击后走这里）
+    group_name = ""
+    if group_id:
+        gid = str(group_id).strip()
+        before = len(payload.get("events") or [])
+        only = [e for e in (payload.get("events") or [])
+                if str(e.get("groupId")) == gid
+                or (e.get("groupName") or "").strip().lower() == gid.lower()]
+        payload = dict(payload)
+        payload["events"] = only
+        group_name = TGF.group_label(gid, gid)
+        log("TG群日报单群模式：%s，保留 %d/%d 条" % (group_name, len(only), before))
+
     if not (payload.get("events") or []):
-        digest = "📭 %s TG 群消息库当日无消息。" % day_str
-        return {"ok": True, "day": day_str, "digest": digest, "empty": True}
+        digest = "📭 %s %s当日无消息。" % (day_str, (group_name + " " if group_name else "TG 群消息库 "))
+        return {"ok": True, "day": day_str, "digest": digest, "empty": True,
+                "group_id": group_id, "group_name": group_name}
+
+    # 1.8) 推文链接核实：对相关消息抓正文（失败如实标注，不编造）
+    try:
+        anchor_set = _anchors(cfg)
+        cand = [e for e in payload["events"] if _strict_related(e, cfg, anchor_set)]
+        vf = TF.verify_links(cand, cfg, log=log)
+        log("TG群日报推文核实：%d 条消息含链接，抓取 %d / 缓存 %d / 失败 %d"
+            % (vf["checked"], vf["fetched"], vf["cached"], vf["failed"]))
+    except Exception as e:
+        log("TG群日报推文核实跳过（不影响生成）：%s" % e)
 
     # 2) 严格筛选 + 构建输入
     text_block, stats = build_input(payload, cfg)
@@ -356,10 +418,12 @@ def run_tg_group_day(cfg, day_str, log=print, push=True):
     except Exception:
         pass
 
-    # 3) 落盘（独立文件）
+    # 3) 落盘（单群用独立文件名，不覆盖全群日报）
     out_dir = _out_dir(cfg)
     os.makedirs(out_dir, exist_ok=True)
-    dp = os.path.join(out_dir, "tg_group_%s.digest.txt" % day_str)
+    safe_gid = re.sub(r"[^\w-]", "", str(group_id)) if group_id else ""
+    fname = "tg_group_%s%s.digest.txt" % (day_str, ("_" + safe_gid) if safe_gid else "")
+    dp = os.path.join(out_dir, fname)
     with open(dp, "w", encoding="utf-8") as f:
         f.write(digest.strip())
 
@@ -381,7 +445,8 @@ def run_tg_group_day(cfg, day_str, log=print, push=True):
         log("TG群日报落档跳过（不影响推送）：%s" % e)
 
     # 5) 双推
-    title = "💬 Bittensor TG 群消息日报 · %s（%s）" % (day_str, day_label)
+    scope = ("【%s】" % group_name) if group_name else ""
+    title = "💬 Bittensor TG 群消息日报%s · %s（%s）" % (scope, day_str, day_label)
     if push:
         log("TG群日报推送：飞书 + TG")
         try:
@@ -394,7 +459,8 @@ def run_tg_group_day(cfg, day_str, log=print, push=True):
             log("TG群日报 TG 推送失败：%s" % e)
 
     return {"ok": True, "day": day_str, "digest": digest, "stats": stats,
-            "path": dp, "archived_sn": archived, "total": stats["total"]}
+            "path": dp, "archived_sn": archived, "total": stats["total"],
+            "group_id": group_id, "group_name": group_name}
 
 
 if __name__ == "__main__":

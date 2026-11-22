@@ -3746,6 +3746,30 @@ _PEOPLE_SUMMARY_PROMPT = (
 )
 
 
+_SN_CHANNEL_SUMMARY_PROMPT = (
+    "你是投研助理。下面是某子网 **DC 频道**近两日的直接讨论（dtt 按该子网关键词组"
+    "精确抓取，已确认来自本子网频道）。把这些发言**提炼成中文短句**，再给一句小结。\n"
+    "\n"
+    "【输出格式（严格照此，两段）】\n"
+    "第一段：每条一行，按人聚合、同一人同观点合并：\n"
+    "- 人名(dc) 表示：一句中文要点\n"
+    "- 人名(dc) 表示：一句中文要点\n"
+    "第二段：以「小结：」开头的一句话，概括这组讨论整体在说什么 / 指向什么。\n"
+    "\n"
+    "【硬性规则】\n"
+    "- **必须翻译成中文**，哪怕原文是英文——这是给中文投研报告看的，禁止照抄英文原文。\n"
+    "- 写内容要点（结论/数字/态度/对象），一句话讲清；不贴任何链接、不抄整段原文、"
+    "不臆测原文没有的技术细节（模型/架构/参数）。\n"
+    "- 人名直接写纯文本显示名，**不带尖括号 <>**：有备注用备注名、没备注只取名称主体"
+    "（去 @handle/辨识码/emoji）；来源固定写 `(dc)` 半角简写，不许写 Discord 全称。\n"
+    "- 线索里 `<人名>` 只是显示名标记，不是让你把尖括号抄进结果。\n"
+    "- 小结只用上面提炼出的内容归纳，不臆测、不给投资建议、不推断发言人的真实身份"
+    "（频道昵称不等于公司/项目方）。\n"
+    "- 每人最多 3 条、每条不超过 40 字；发言很少就少写，一条有效内容都没有就只输出「无」。\n"
+    "- 不要输出标题、解释、总数统计。\n"
+)
+
+
 def _sn_event_anchors(events, cfg=None, sn=None, max_terms=40):
     """从当日 dtt 消息里抽「本子网当日专属议题词组」，作为未标 SN 消息的捞回线索。
 
@@ -4066,11 +4090,13 @@ def _today_community_block(cfg, sn, day_str=None, log=print):
     return block, n, ("hit" if n else "empty")
 
 
-def _sn_channel_report_section(cfg, sn, day_str, meta, log=print, max_lines=12):
-    """生成报告里的「🔎 本子网频道讨论」节（v1.27.0）。
+def _sn_channel_report_section(cfg, sn, day_str, meta, log=print, max_lines=12, llm=None):
+    """生成报告里的「🔎 本子网频道讨论补充」节（v1.27.0 / v1.30.0）。
 
-    直接从子网频道落盘结果组装中文短句，不依赖主模型（社区动态节是代码层
-    接管重建的，主模型写的会被删掉）。取数失败/无消息返回 ""（报告不写此节）。
+    v1.30.0：调小模型把频道原文**提炼成中文短句 + 一句小结**，格式对齐
+    「📢 当日社区动态」节。原实现直接抄原文堆一行（英文频道就成了英文堆砌、
+    无中文总结，SN46 反例），已废弃。提炼失败才回退到规范化原文逐条列。
+    取数失败/无消息返回 ""（报告不写此节）。
     """
     try:
         import community_fetch as CF
@@ -4084,35 +4110,93 @@ def _sn_channel_report_section(cfg, sn, day_str, meta, log=print, max_lines=12):
     events = payload.get("events") or []
     if not events:
         return ""
-    # 按人聚合：同一发言人多条合并，观点/数字/对象都在，禁止只写「有人提及」
+    # 按人聚合：同一发言人多条合并；保留显示名（供提炼标注）与原文摘录（供回退）
     by_author = {}
     order = []
     for e in sorted(events, key=lambda x: x.get("occurredAt") or 0, reverse=True):
-        au = CD._display_author(e.get("author") or "?", cfg)
-        key = au
-        if key not in by_author:
-            by_author[key] = []
-            order.append(key)
-        c = CD._clean(e.get("content"), 160)
-        by_author[key].append("[%s] %s" % (e.get("time") or "??:??", c))
+        au = CD._clean(CD._display_author(e.get("author") or "?", cfg), 40)
+        if au not in by_author:
+            by_author[au] = []
+            order.append(au)
+        by_author[au].append(CD._clean(e.get("content"), 160))
     if not order:
         return ""
-    lines = []
-    for au in order[:max_lines]:
-        items = by_author[au][:3]
-        joined = "；".join(items)
-        lines.append("- <%s> %s" % (CD._clean(au, 40), joined))
-    n_people = len(order)
-    n_more = max(0, n_people - max_lines)
-    windows = "、".join(w.get("label", "?") for w in (payload.get("windows") or []))
-    more = ("（另有 %d 位发言人的频道消息从略）" % n_more) if n_more else ""
     plabel = "DC" if platform == "discord" else platform.upper()
-    head = ("**🔎 本子网频道讨论补充（%s 频道，%s，dtt 关键词组精确抓取）**%s\n"
-            % (plabel, windows, more))
+    windows = "、".join(w.get("label", "?") for w in (payload.get("windows") or []))
+    n_more = max(0, len(order) - max_lines)
+    more = ("（另有 %d 位发言人的频道消息从略）" % n_more) if n_more else ""
+    head = "**🔎 本子网频道讨论补充（%s 频道 · %s）**%s\n" % (plabel, windows or day_str, more)
     tail = ("\n> 以上为 %s 子网频道近两日直接讨论，⚠️未验证，仅供补充与交叉核验；"
-            "与链上/数据站结论冲突时以链上为准并保留此线索待人工确认。"
-            % plabel)
-    return head + "\n".join(lines) + tail
+            "与链上/数据站结论冲突时以链上为准并保留此线索待人工确认。" % plabel)
+
+    # ---- 构造提炼线索：`<显示名>` 标记 + 原文（时间不塞进内容，避免堆一坨）----
+    clues = []
+    for au in order[:max_lines]:
+        for c in by_author[au][:3]:
+            if c:
+                clues.append("- <%s> 说：%s" % (au, c))
+    if not clues:
+        return ""
+
+    def _fallback():
+        """提炼失败回退：规范化原文逐条列，不堆一坨、不带尖括号和技术黑话。"""
+        fb = []
+        for au in order[:max_lines]:
+            for c in by_author[au][:2]:
+                if c:
+                    fb.append("- %s(%s) 表示：%s ⚠️未验证" %
+                              (au, "dc" if platform == "discord" else platform.lower(), c))
+        return head + "\n".join(fb) + tail if fb else ""
+
+    sn_name = (meta or {}).get("name") or "未收录"
+    body = ("【本子网：SN%d %s】\n" % (sn, sn_name)
+            + "【DC 频道近两日讨论线索（`<>` 内为显示名，直接用）】\n"
+            + "\n".join(clues) + "\n")
+    # 无 llm 时尝试用项目默认小模型，彻底失败才回退规范化原文
+    _call = llm
+    if _call is None:
+        try:
+            import pipeline
+            def _call(b, sp=None):
+                return pipeline.call_deepseek(cfg, b, system_prompt=sp)
+        except Exception:
+            _call = None
+    if _call is None:
+        return _fallback()
+    try:
+        out = (_call(body, _SN_CHANNEL_SUMMARY_PROMPT) or "").strip()
+    except Exception as e:
+        log("   ⚠️ 频道讨论中文提炼失败（%s），回退规范化原文" % str(e)[:120])
+        return _fallback()
+    if not out or out.strip() in ("无", "无。"):
+        return _fallback()
+
+    # ---- 清洗提炼输出：去尖括号/链接/emoji，来源统一 (dc)，分离要点与小结 ----
+    kept, summary = [], ""
+    for ln in out.splitlines():
+        ln = re.sub(r"^\s*[-•*]\s*", "", ln).strip()
+        ln = re.sub(r"https?://\S+", "", ln).strip()
+        ln = re.sub(r"</[^>]+>", "", ln)
+        ln = re.sub(r"[<>]", "", ln).strip()
+        ln = re.sub(r"[\u0370-\u03ff\u2190-\u2bff\U0001f000-\U0001faff\ufe0f\u200d]", "", ln)
+        ln = re.sub(r"\s+", " ", ln).strip()
+        if not ln:
+            continue
+        if ln.startswith("小结"):
+            summary = re.sub(r"^小结[：:]\s*", "", ln).strip()
+            continue
+        # 人名(来源) 表示：… —— 来源统一成 (dc)，人名再清洗一次
+        m = re.match(r"^(.+?)\s*(?:\((?:dc|discord|Discord|X|tg|Telegram)\))?\s+(表示|转推|回复)\b(.+)$", ln)
+        if m:
+            nm = CD._clean(CD._display_author(m.group(1).strip(), cfg), 40)
+            ln = "%s(dc) %s%s" % (nm, m.group(2), m.group(3).strip())
+        kept.append(ln)
+    if not kept and not summary:
+        return _fallback()
+    out_lines = ["- " + x + " ⚠️未验证" for x in kept[:max_lines]]
+    if summary:
+        out_lines.append("小结：%s ⚠️未验证" % summary)
+    return head + "\n".join(out_lines) + tail
 
 
 def _sn_channel_block(cfg, sn, day_str, log=print, days=2):
@@ -4616,7 +4700,7 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
     #    作为全网抓取之外的补充与交叉核验。代码层生成，不受主模型原节删除影响。
     if _snch_state == "hit":
         try:
-            _ch_sec = _sn_channel_report_section(cfg, sn, today, meta, log=log)
+            _ch_sec = _sn_channel_report_section(cfg, sn, today, meta, log=log, llm=llm)
             if _ch_sec:
                 digest = _insert_section(digest, _ch_sec, "📌 预期跟踪")
                 log("🔎 本子网频道讨论补充：已写入报告独立节")

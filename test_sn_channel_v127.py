@@ -63,21 +63,48 @@ with open(out, "w", encoding="utf-8") as f:
 got = CF.read_sn_channel(51, "2026-11-22", cfg_test, platform="discord")
 check("落盘/读取往返", got and got["stats"]["total"] == 2)
 
-# ---- 4. 报告节生成（mock 读取指向临时目录）
+# ---- 4. 报告节生成（mock 读取指向临时目录 + mock llm，v1.30.0 中文提炼）
 _orig_read = CF.read_sn_channel
 _read_cfg = cfg_test
 CF.read_sn_channel = lambda sn, day, cfg=None, platform="discord": _orig_read(sn, day, _read_cfg, platform=platform)
+
+# mock 小模型：返回中文短句 + 小结（含尖括号/全称测试清洗鲁棒性）
+_MOCK_OUT = ("<alice>(Discord) 表示：SN51 本周收入创新高，估值偏低\n"
+             "- bob(dc) 表示：团队回应回购质疑，下月公布细节\n"
+             "小结：两条围绕收入创新高与回购质疑，整体情绪偏谨慎。")
+def _mock_llm(body, sp=None):
+    return _MOCK_OUT
+
 try:
     sec = SR._sn_channel_report_section(_read_cfg, 51, "2026-11-22",
-                                        {"sn": 51, "name": "LAIR"}, log=lambda *a: None)
+                                        {"sn": 51, "name": "LAIR"}, log=lambda *a: None,
+                                        llm=_mock_llm)
     check("报告节生成", bool(sec) and "🔎 本子网频道讨论补充" in sec)
-    check("报告节含观点", bool(sec) and "估值偏低" in sec and "回购质疑" in sec)
+    check("报告节含中文提炼观点", bool(sec) and "估值偏低" in sec and "回购质疑" in sec)
     check("报告节带未验证标记", bool(sec) and "⚠️未验证" in sec)
     check("报告节不贴链接", bool(sec) and "http" not in sec)
+    check("报告节有小结", bool(sec) and "小结：" in sec and "整体情绪偏谨慎" in sec)
+    check("来源统一dc简写", "(dc)" in sec and "Discord" not in sec)
+    check("去尖括号标签", not __import__("re").search(r"<[^>]+>", sec))  # 引用块 '>' 是合法 markdown
+    check("标题无技术黑话", "关键词组精确抓取" not in sec)
+    # 每条中文短句独立成行（不按 [时间]原文；原文 堆一行）
+    body_lines = [l for l in sec.splitlines() if l.startswith("- ")]
+    check("要点逐条成行", len(body_lines) >= 2 and all("表示：" in l for l in body_lines))
+    # 提炼失败回退：规范化原文逐条列，不堆一坨
+    def _fail_llm(body, sp=None):
+        raise RuntimeError("mock 提炼失败")
+    sec_fb = SR._sn_channel_report_section(_read_cfg, 51, "2026-11-22",
+                                           {"sn": 51, "name": "LAIR"}, log=lambda *a: None,
+                                           llm=_fail_llm)
+    check("失败回退仍有节", bool(sec_fb) and "🔎 本子网频道讨论补充" in sec_fb)
+    fb_body = [l for l in sec_fb.splitlines() if l.startswith("- ")]
+    check("回退逐条成行", len(fb_body) >= 2 and all("；" not in l for l in fb_body))
+    check("回退去尖括号标签", not __import__("re").search(r"<[^>]+>", sec_fb))
     # 无命中返回空
     CF.read_sn_channel = lambda *a, **k: None
     sec0 = SR._sn_channel_report_section({}, 117, "2026-11-22",
-                                         {"sn": 117, "name": "Everyframe"}, log=lambda *a: None)
+                                         {"sn": 117, "name": "Everyframe"}, log=lambda *a: None,
+                                         llm=_mock_llm)
     check("无命中不生成节", sec0 == "")
 finally:
     CF.read_sn_channel = _orig_read

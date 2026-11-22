@@ -1288,11 +1288,23 @@ def _start_research(sn_arg, days_n, chat_id, feedback=""):
     except Exception:
         pass
     days = int(days_n) if days_n else int(cfg.get("research_days", 14) or 14)
+    # 回执里如实列出本次实际会跑的 dtt 采集环节（v1.27.1）：按配置开关动态生成，
+    # 免得关了某一路还说「正在采集」。默认两路都开。
+    _comm_on = cfg.get("research_community_today", True)
+    _chn_on = cfg.get("research_sn_channel", True)
+    if _comm_on and _chn_on:
+        _dtt_step = " → dtt 社区消息 + 本子网 DC 频道（当日/昨日）"
+    elif _comm_on:
+        _dtt_step = " → dtt 社区消息"
+    elif _chn_on:
+        _dtt_step = " → dtt 本子网 DC 频道（当日/昨日）"
+    else:
+        _dtt_step = ""
     if feedback:
         send_async(chat_id, "🔬 收到，**按你的反馈重做 SN%d%s 的投研报告**（回看 %d 天）。\n"
                             "反馈：%s\n"
-                            "会重新核对名称/事实并重抓全网，约 1-3 分钟…"
-                            % (sn, (" " + name) if name else "", days, feedback[:200]))
+                            "会重新核对名称/事实并重抓全网%s，约 1-3 分钟…"
+                            % (sn, (" " + name) if name else "", days, feedback[:200], _dtt_step))
         # 反馈必须原样传（含空格标点）：pipeline 侧靠整句理解「改名为 X」这种句式，
         # 拆成 token 再拼回去容易丢中文标点和语气词。`~fb` 是分隔符（不能用 `--fb`，
         # argparse 会把 `-` 开头的 token 当选项直接报错）。
@@ -1300,9 +1312,9 @@ def _start_research(sn_arg, days_n, chat_id, feedback=""):
                      + ["~fb", feedback], chat_id, quiet=True)
         return
     send_async(chat_id, "🔬 收到，正在做 **SN%d%s** 的重要事件跟踪报告（回看 %d 天档案）。\n"
-                        "流程：调取本地子网档案 → 抓取链上数据站/官网/GitHub/新闻/搜索/X "
+                        "流程：调取本地子网档案 → 抓取链上数据站/官网/GitHub/新闻/搜索/X%s "
                         "→ 交叉核验 → 生成报告，约 1-3 分钟…"
-                        % (sn, (" " + name) if name else "", days))
+                        % (sn, (" " + name) if name else "", days, _dtt_step))
     run_pipeline(["research", str(sn)] + ([days_n] if days_n else []), chat_id, quiet=True)
 
 

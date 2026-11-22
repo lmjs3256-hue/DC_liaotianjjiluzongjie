@@ -3625,10 +3625,10 @@ def _format_community_today(payload, sn, limit=15, cfg=None):
         t = e.get("occurredAt")
         tstr = (datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%H:%M")
                 if t else "??:??")
-        plat = CD.PLAT_CN.get(e.get("platform"), e.get("platform") or "未知")
-        author = CD._clean(e.get("author") or "?", 40)
+        plat = CD._plat_short(e.get("platform"))
+        author = CD._clean(CD._display_author(e.get("author") or "?", cfg), 40)
         content = CD._clean(e.get("content"))[:320]
-        lines.append("- [%s][%s] <%s> %s [社区]" % (tstr, plat, author, content))
+        lines.append("- [%s](%s) <%s> %s [社区]" % (tstr, plat, author, content))
     b = (payload or {}).get("bounds") or {}
 
     def _ts(v):
@@ -3705,11 +3705,13 @@ _PEOPLE_SUMMARY_PROMPT = (
     "不在这里做；哪怕发言人是创始人，只要与本子网无关也不写。\n"
     "\n"
     "【输出格式（每条一行，严格照此）】\n"
-    "- 人名 转推 @对象：一句话内容要点\n"
-    "- 人名 回复 @对象：一句话内容要点\n"
-    "- 人名 表示：一句话内容要点\n"
+    "- 人名(来源) 转推 @对象：一句话内容要点\n"
+    "- 人名(来源) 回复 @对象：一句话内容要点\n"
+    "- 人名(来源) 表示：一句话内容要点\n"
     "（本人发言用「表示」；转推用「转推 @谁」；回复/提及用「回复 @谁」；"
-    "对象若线索里写了 @某人 就带上，没写就不硬造。）\n"
+    "对象若线索里写了 @某人 就带上，没写就不硬造。"
+    "**「来源」紧跟人名、用半角括号**：线索标 (X) 就写 (X)、标 (dc) 就写 (dc)、标 (tg) 就写 (tg)，"
+    "照抄线索里的来源简写，不许写 Twitter/Telegram/Discord 全称、不许漏。）\n"
     "\n"
     "【相关判定：满足至少一条才写】\n"
     "1. 线索的 SN 归属就是本子网；\n"
@@ -3731,9 +3733,10 @@ _PEOPLE_SUMMARY_PROMPT = (
     "同一人多条同观点才合并。\n"
     "- 写内容要点、不是抄原文：抓结论/数字/态度，一句话讲清；"
     "**不许贴任何 URL、t.co 链接、x.com 链接**。同一人同一观点合并成一条。\n"
-    "- 人名**直接写纯文本**（如 `const 表示：`、`cats 转推 @MSBIntel：`），"
+    "- 人名**直接写纯文本**（如 `const(X) 表示：`、`cats(X) 转推 @MSBIntel：`），"
     "**输出里绝对不要带尖括号 `<` `>`**——输入线索里的 `<cats>` 只是标记显示名的格式，"
-    "不是让你把尖括号抄进结果。禁止 @handle 当人名、consttt、_数字后缀、备注标签；"
+    "不是让你把尖括号抄进结果。人名有备注就用备注名、没备注就只取名称主体（@handle/辨识码/"
+    "装饰符号全去掉），禁止 @handle 当人名、consttt、_数字后缀、备注标签；"
     "被转推/回复的对象若是关键人物用 @显示名（@const），其他对象保留其 @handle。\n"
     "- 只写消息里明确有的内容，**不许臆测技术细节**（如模型类型、架构、参数规模）；"
     "原文只说「击败 Salesforce」就只写到这，不要自行补成「多模态大模型」之类。\n"
@@ -3943,9 +3946,10 @@ def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
     for e in mine[:70]:
         c = CD._clean(e.get("content"), max_chars)
         nm = CD._clean(CD._display_author(e.get("author"), cfg), 40)
+        plat = CD._plat_short(e.get("platform"))
         mark = "★创始人" if _is_key(e) else ("标本SN" if _sn_hit(e) else "关键词命中")
-        lines.append("- <%s>[%s] 形态=%s；SN归属=%s；内容=%s"
-                     % (nm, mark, CD._msg_kind(e, cfg),
+        lines.append("- <%s>(%s)[%s] 形态=%s；SN归属=%s；内容=%s"
+                     % (nm, plat, mark, CD._msg_kind(e, cfg),
                         ",".join(str(x) for x in (e.get("sn") or [])) or "未标注",
                         c))
     sn_name = (meta or {}).get("name") or "未收录"
@@ -3969,6 +3973,13 @@ def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
     for n in names:
         key_alias[n + "_reborn"] = n
         key_alias[n + "tt"] = n
+    # 人名→来源简写（v1.27.3）：模型漏写来源时按该人原始消息平台补齐
+    name2plat = {}
+    for e in mine:
+        nm_e = CD._clean(CD._display_author(e.get("author"), cfg), 40)
+        pl_e = CD._plat_short(e.get("platform"))
+        if nm_e and pl_e and nm_e not in name2plat:
+            name2plat[nm_e] = pl_e
     for ln in out.splitlines():
         ln = re.sub(r"^\s*[-•*]\s*", "", ln).strip()
         ln = re.sub(r"https?://\S+", "", ln).strip()  # 兜底删链接
@@ -3981,12 +3992,22 @@ def _people_summary_block(payload, cfg, sn, meta, llm, log=print, max_chars=180,
         # 兜底：清掉行内残留的 emoji / 希腊字母装饰（τ、🌊、✠ 等），保留 ASCII handle
         ln = re.sub(r"[\u0370-\u03ff\u2190-\u2bff\U0001f000-\U0001faff\ufe0f\u200d]", "", ln)
         ln = re.sub(r"\s+", " ", ln).strip()
-        # 行首「人名 动作」部分再做一次显示名简化（如 Rayah τensor → Rayah）
+        # 行首重建：人名(来源) + 动作。人名再清洗一次；来源缺失/非简写时按平台补 (X)/(dc)/(tg)
         m = re.match(r"^(.+?)\s+(转推|回复|表示)\b", ln)
         if m:
-            head_plain = CD._simplify_name(m.group(1))
-            if head_plain != m.group(1):
-                ln = head_plain + ln[m.end(1):]
+            head = m.group(1).strip()
+            # 去掉模型可能带上的 (来源) 或全角括号内容，只留人名主体
+            head = re.sub(r"[（(](?:Twitter/X|Twitter|Telegram|Discord|X|dc|tg|X 生态圈提及)[）)]\s*$",
+                          "", head, flags=re.I).strip()
+            head = CD._clean(CD._display_author(head, cfg), 40)  # 备注优先/名称主体
+            plat = name2plat.get(head, "")
+            if not plat:  # 名称对不上时按子串再找一次
+                for nm_e, pl_e in name2plat.items():
+                    if nm_e and (nm_e in head or head in nm_e):
+                        plat = pl_e
+                        break
+            head_out = "%s(%s)" % (head, plat) if plat else head
+            ln = head_out + ln[m.end(1):]
         if ln and ln not in ("无", "无。") and len(kept) < 45:
             kept.append(ln)
     if not kept:
@@ -4128,9 +4149,9 @@ def _sn_channel_block(cfg, sn, day_str, log=print, days=2):
         if key in seen:
             continue
         seen.add(key)
-        author = CD._clean(e.get("author") or "?", 44)
+        author = CD._clean(CD._display_author(e.get("author") or "?", cfg), 40)
         content = CD._clean(e.get("content"))[:300]
-        lines.append("- [DC频道][%s] <%s> %s" % (e.get("time") or "??:??", author, content))
+        lines.append("- [DC频道](dc)[%s] <%s> %s" % (e.get("time") or "??:??", author, content))
     kws = payload.get("keyword_ids") or []
     head = ("SN%d 的 %s 子网频道近 %d 日讨论（dtt 按本子网关键词组[%s]精确抓取，"
             "北京时间 %s；**未经证实，是线索不是证据**）：\n%s\n"

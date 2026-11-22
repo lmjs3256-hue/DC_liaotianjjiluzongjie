@@ -27,6 +27,13 @@ TZ = datetime.timezone(datetime.timedelta(hours=8))
 # 平台显示名
 PLAT_CN = {"twitter": "Twitter/X", "telegram": "Telegram",
            "discord": "Discord", "manual": "手动录入"}
+# 来源简写（v1.27.3）：社区动态里来源直接写 (X)/(dc)/(tg)，不再写全称/中文平台名
+PLAT_SHORT = {"twitter": "X", "x": "X", "telegram": "tg", "discord": "dc", "manual": "手动"}
+
+
+def _plat_short(platform):
+    """平台 → 简写 X / dc / tg；未知平台原样返回（小写）。"""
+    return PLAT_SHORT.get(str(platform or "").lower(), str(platform or "?"))
 
 # 单条消息正文截断（社区里长文很多，截断防止输入爆炸）
 MAX_MSG_CHARS = 320

@@ -8,11 +8,20 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.27.2** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.27.3** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.27.3 — 2026-11-22
+
+**社区动态人名与来源显示简化：备注/名称主体 + (X)/(dc)/(tg)**
+
+- **问题**：社区动态里人名显示原始长账号（`Millie@AltcoinMillie`、`consttt,备注:const`、`TheBittensorBureau@…`），来源写全称平台名（Twitter/X / Discord / Telegram），冗长。
+- **来源简写**：`community_digest._plat_short()` 统一映射到 `X` / `dc` / `tg`；投研社区动态输入段、提炼 prompt、DC 频道补充段全部改用简写，格式 `人名(X) 表示：…`。
+- **人名清洗**：输入段（`_format_community_today`、`_sn_channel_block`）原本直接用原始 author，现统一走 `CD._display_author()`（备注优先、无备注取名称主体、去 @handle/辨识码/emoji）；提炼 prompt 强化人名规则；输出兜底按人名反查平台补来源，即使模型漏写/写全称也能修正为 `Millie(X)`、`92(dc)`。
+- 验证：`test_author_source_v1273.py` 20/20；全量回归（台账/DC频道/生命周期/TG群日报/时间线）全绿。
 
 ## v1.27.2 — 2026-11-22
 

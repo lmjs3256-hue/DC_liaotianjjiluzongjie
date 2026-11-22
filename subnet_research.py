@@ -2432,6 +2432,9 @@ def _tl_progress_state(line, track_keywords):
     kw_hit = any(k and len(k) >= 3 and k in low for k in track_keywords)
     if not cues and not kw_hit:
         return False, ""
+    # 「计划/将/拟 X 周内上线」是官宣计划，不是已上线（v1.27.2 修正误判）
+    if re.search(r"(?:计划|拟|将|预计)\s*.{0,16}?(?:上线|推出|发布|开.{0,4}注册)", s):
+        return True, "已官宣计划，待落地"
     # 多个信号词时按「判定强度」取最高的那个，别被「首次」这类弱词抢先
     allcues = " ".join(cues)
     if any(w in allcues for w in ("已兑现", "证伪", "未达标", "跌破")):
@@ -2449,10 +2452,81 @@ def _tl_progress_state(line, track_keywords):
     return True, state
 
 
-def _tl_ledger_line(line, state, base_year, truncated):
-    """把一条时间线事件改写成台账条目：`时间 · 事情 · 现在进展`。
+# 台账精炼辅助（v1.27.2）：把时间线原文抽成「时间 · 人物 · 事件 · 进展」四要素。
+# 用户要求：不贴一堆原文、语言简洁精炼、人物必须点名（禁止「群内有人称」这种泛化壳）。
+_TL_SPEAKER_RE = re.compile(
+    r"^(?:群内|群里|社区|群聊)?\s*(?:有人称|有人说|有人表示|有人提到|有人爆料|称|传闻|传言)\s*[（(]([^）)]+)[）)]\s*[：:]\s*")
+_TL_SRC_TAG_RE = re.compile(
+    r"\[(?:X|群聊|官网|GitHub|新闻|搜索|社区|X生态圈提及|bittensor\.ai|taostats|dtaoscan|DC频道)[^\]]*\]", re.I)
+_TL_VERIFY_TAIL_RE = re.compile(r"\s*[·|]\s*(?:✅已验证|⚠️未验证)[^\n]*$")
 
-    truncated=True 时加「主线未显示」标注，告诉读者该事件因时间线限 10 条被截掉。
+
+def _tl_condense(text, limit=58):
+    """把一段事件正文压成一句精炼短句：去来源/验证标记，按分号取核心，超长在标点处收口。"""
+    s = _RED_STRIP_RE.sub(r"\1", text or "")
+    s = _TL_SRC_TAG_RE.sub("", s)
+    s = _TL_VERIFY_TAIL_RE.sub("", s)
+    s = s.replace("**", "").strip()
+    s = re.sub(r"^📰\s*", "", s).strip()
+    s = re.sub(r"\s+", " ", s)
+    parts = [p.strip() for p in re.split(r"[；;。]", s) if p.strip()]
+    if not parts:
+        return s[:limit]
+    core = parts[0]
+    if len(core) < 8 and len(parts) > 1:
+        core = core + "；" + parts[1]
+    if len(core) <= limit:
+        return core
+    # 超长：优先在逗号处收口，避免拦腰截断半个词
+    segs = re.split(r"[，,]", core)
+    out = ""
+    for seg in segs:
+        if len(out) + len(seg) + 1 > limit and out:
+            break
+        out = (out + "，" + seg).strip("，")
+    return (out or core[:limit]).rstrip("，、 ") + "…"
+
+
+def _tl_actor_and_event(body):
+    """从时间线正文抽 (人物/主体, 剩余事件, 是否群内传闻)。人物必须点名。"""
+    s = body or ""
+    s = s.replace("**", "").strip()
+    s = re.sub(r"^📰\s*", "", s).strip()
+    m = _TL_SPEAKER_RE.match(s)
+    if m:
+        # 括号内常为「11-17，Nav」，取逗号后最后一段作为发言人
+        name = re.split(r"[，,]", m.group(1))[-1].strip()
+        return (name + "（群内）") if name else "群友", s[m.end():], True
+    if "官方 X" in s or "[X]" in s:
+        actor = "官方 X"
+    elif "[GitHub]" in s or "代码仓库" in s or "commit" in s.lower():
+        actor = "GitHub"
+    elif "[官网]" in s:
+        actor = "官网"
+    elif "[新闻]" in s:
+        actor = "媒体"
+    elif "[搜索]" in s:
+        actor = "搜索"
+    elif any(t in s for t in ("[taostats]", "[bittensor.ai]", "[dtaoscan]")):
+        actor = "数据站"
+    else:
+        actor = "外部源"
+    # 去掉正文开头与主体列重复的主语，避免「官方 X · 官方 X 连发三条…」
+    for lead in (actor, actor.replace("官方 ", "")):
+        if lead and s.startswith(lead):
+            rest = s[len(lead):].lstrip(" ：:，,·")
+            if rest:
+                s = rest
+            break
+    return actor, s, False
+
+
+def _tl_ledger_line(line, state, base_year, truncated):
+    """把一条时间线事件改写成精炼台账：`时间 · 人物 · 事件 · 进展`。
+
+    v1.27.2：不再整段照搬原文。人物/主体点名（群聊取发言人、外部源取发布方），
+    事件压成一句短句，验证状态收进「进展」列；只有事件本身有歧义时才保留稍多信息。
+    truncated=True 时加「主线未显示」标注。
     """
     s = _RED_STRIP_RE.sub(r"\1", line or "")
     s = re.sub(r"^\s*[-*•]\s*", "", s).strip()
@@ -2462,13 +2536,21 @@ def _tl_ledger_line(line, state, base_year, truncated):
         date_s = ("%04d-%02d-%02d" if yr != base_year else "%02d-%02d") % (
             (yr, mo, dy) if yr != base_year else (mo, dy))
     else:
-        date_s = "日期未标注"
-    # 去掉开头残留日期、markdown 加粗、**📰** 前缀；保留验证状态与来源标记 [X]/[群聊]
+        date_s = "日期未标"
     body = re.sub(r"^(?:\d{4}-)?\d{1,2}-\d{2}\s*[·•]\s*", "", s).strip()
-    body = body.replace("**", "").strip()
-    body = re.sub(r"^📰\s*", "", body).strip()
-    flag = " · ⚠️主线未显示（时间线超限移入）" if truncated else ""
-    return "- %s · %s · 现在进展：%s%s" % (date_s, body, state, flag)
+    actor, event, is_rumor = _tl_actor_and_event(body)
+    event = _tl_condense(event)
+    if is_rumor and event:
+        event = "称：" + event  # 点明这是「某人称」的观点，不是既定事实
+    verified = "✅已验证" in s
+    if is_rumor:
+        progress = "⚠️群内说法，待核实"
+    elif verified:
+        progress = "✅" + (state or "已发生")
+    else:
+        progress = state or "待核实"
+    flag = " · ⚠️主线未显示" if truncated else ""
+    return "- %s · %s · %s · 进展：%s%s" % (date_s, actor, event, progress, flag)
 
 
 def _tl_track_keywords(digest):
@@ -2566,8 +2648,8 @@ def sort_cap_timeline(digest, log=print, max_events=TIMELINE_MAX_EVENTS):
         if has:
             ledger.append(_tl_ledger_line(ln, state, base_year, ln in dropped_set))
     if ledger:
-        note = ("**⏳ 进展台账**（所有有进展事件的现状；时间线仅显示最新 %d 条，"
-                "标注「主线未显示」者因超限被截掉、但在此保留其进度）：\n%s"
+        note = ("**⏳ 进展台账**（时间 · 人物 · 事件 · 进展；主线仅显示最新 %d 条，"
+                "标「主线未显示」者因超限被截掉、但在此保留进度）：\n%s"
                 % (max_events, "\n".join(ledger)))
         out = _insert_section(out, note, "📌 预期跟踪")
         stats["backfilled"] = sum(1 for ln in dropped if _tl_progress_state(ln, kws)[0])

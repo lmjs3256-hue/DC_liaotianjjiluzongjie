@@ -939,6 +939,13 @@ def attach_community_digest(cfg, day, sn, excerpt, platforms=None, source_file="
         "generated_at": now,
         "kind": "community_digest",
     }
+    # 关键：同一 (date, sn) 重跑（用户再次 /社区日报）时，**必须保留已有的人工确认**。
+    # 否则重跑会把 confirm 字段整条覆盖掉，导致用户确认过的冲突又显示「待人工确认」
+    # （2026-11-22 SN55 就踩过这个坑）。manual confirm 是人工决策，不能被机器重跑抹掉。
+    old = next((x for x in (arc.get("community_digests") or [])
+                if x.get("date") == day and x.get("sn") == sn), None)
+    if old and old.get("confirm"):
+        rec["confirm"] = old["confirm"]
     lst = [x for x in (arc.get("community_digests") or [])
            if not (x.get("date") == day and x.get("sn") == sn)]
     lst.insert(0, rec)
@@ -946,7 +953,9 @@ def attach_community_digest(cfg, day, sn, excerpt, platforms=None, source_file="
     arc["updated_at"] = now
     save_archive(arc_dir, arc)
     save_md(arc_dir, arc)
-    log("社区日报落档：SN%d ← %s 社区线索（累计 %d 条）" % (sn, day, len(arc["community_digests"])))
+    log("社区日报落档：SN%d ← %s 社区线索（累计 %d 条）%s"
+        % (sn, day, len(arc["community_digests"]),
+           "（已保留人工确认）" if rec.get("confirm") else ""))
     return arc
 
 

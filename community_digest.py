@@ -164,11 +164,18 @@ def build_conflict_section(conflicts, confirms=None):
     n_confirmed = sum(1 for k, v in confirms.items() if v.get("status") == "confirmed")
     n_refuted = sum(1 for k, v in confirms.items() if v.get("status") == "refuted")
     title_bits = ["%d 处 · 社区消息与历史档案结论冲突" % len(conflicts)]
-    if n_confirmed or n_refuted:
-        title_bits.append("已人工确认 %d 处（核实 %d / 推翻 %d）" % (n_confirmed + n_refuted, n_confirmed, n_refuted))
+    n_done = n_confirmed + n_refuted
+    if n_done and n_done >= len(conflicts):
+        label = "✅ 冲突已人工确认"
+        title_bits.append("核实 %d / 推翻 %d，以人工结论为准" % (n_confirmed, n_refuted))
+    elif n_done:
+        label = "⚠️ 部分待人工确认"
+        title_bits.append("已确认 %d 处（核实 %d / 推翻 %d），其余请核对后再采信"
+                          % (n_done, n_confirmed, n_refuted))
     else:
+        label = "⚠️ 待人工确认"
         title_bits.append("请核对后再采信")
-    header = "**⚠️ 待人工确认（%s）**\n\n" % "，".join(title_bits)
+    header = "**%s（%s）**\n\n" % (label, "，".join(title_bits))
     blocks = []
     for i, c in enumerate(conflicts, 1):
         c = c.strip().lstrip("-").strip()
@@ -212,6 +219,18 @@ def build_conflict_section(conflicts, confirms=None):
             line += "\n　%s（%s）：%s" % (tag, cf.get("at") or "—", cf.get("note") or "（无批注）")
         blocks.append(line)
     return header + "\n\n".join(blocks)
+
+
+def conflicts_all_confirmed(flags, confirms):
+    """冲突专区里点名的 SN 是否全部已有人工确认（决定标题是否还打「待核对」）。"""
+    if not flags or not confirms:
+        return False
+    sns = []
+    for c in flags:
+        m = re.search(r"SN\s*(\d+)", c, re.I)
+        if m:
+            sns.append(int(m.group(1)))
+    return bool(sns) and all(s in confirms for s in sns)
 
 
 COMMUNITY_SYSTEM_PROMPT = (
@@ -567,11 +586,21 @@ def run_community_day(cfg, day_str, log=print, push=True):
     #    之前只在顶部写一句泛泛提示、冲突仍埋在长文条目里，群里根本看不见；
     #    现在正文里的冲突行被移走、集中进「⚠️ 待人工确认」专区，一眼可见。
     flags = [ln.strip() for ln in (digest or "").splitlines() if "待人工确认" in ln]
+    # 关键：读档案里**此前已人工确认**的结论一并渲染。否则用户确认过的冲突，
+    # 下次重跑社区日报又会从零标成「待人工确认」（2026-11-22 SN55 踩过这个坑）。
+    confirms = {}
+    try:
+        import subnet_archive as SA
+        confirms = SA.get_community_confirms(cfg, day_str) or {}
+    except Exception as e:
+        log("读取档案人工确认失败（不影响生成）：%s" % e)
     if flags:
         log("⚠️⚠️ 社区日报交叉核对：%d 处「待人工确认」（社区消息与历史结论冲突）：%s"
             % (len(flags), " | ".join(flags[:5])))
+        if confirms:
+            log("   其中 %d 个 SN 此前已人工确认，专区将直接标注核实/推翻结论" % len(confirms))
         body, _ = extract_conflicts(digest)
-        digest = build_conflict_section(flags) + "\n\n" + body
+        digest = build_conflict_section(flags, confirms=confirms) + "\n\n" + body
     else:
         log("✅ 社区日报交叉核对通过（未发现与历史结论的明显冲突）")
 
@@ -613,10 +642,13 @@ def run_community_day(cfg, day_str, log=print, push=True):
 
     # 5) 双推
     title = "🌐 Bittensor 社区消息日报（dtt版）· %s（%s）" % (day_str, day_label)
+    all_confirmed = conflicts_all_confirmed(flags, confirms)
     if flags:
-        title += " ⚠️待人工核对"
+        title += " ✅人工已确认" if all_confirmed else " ⚠️待人工核对"
     if push:
-        log("社区日报推送：飞书 + TG%s" % ("（标题已打待核对标记）" if flags else ""))
+        log("社区日报推送：飞书 + TG%s"
+            % ("（标题已打待核对标记）" if flags and not all_confirmed
+               else "（标题标注人工已确认）" if all_confirmed else ""))
         try:
             P.push_feishu(cfg, title, digest)
         except Exception as e:
@@ -674,7 +706,8 @@ def push_confirmed_version(cfg, day_str, log=print, push=True):
     new_section = build_conflict_section(conflicts, confirms)
     # 从落盘 digest 中剥离旧专区：旧专区从开头到第一个板块标题（**🔥 / **🧩 等）
     body = digest
-    m = re.search(r"^\*\*⚠️ 待人工确认", body)
+    # 兼容三种专区标题（全部确认 / 部分确认 / 原先的待确认），避免重推时旧专区没被剥离而叠加
+    m = re.search(r"^\*\*(?:✅ 冲突已人工确认|⚠️ 部分待人工确认|⚠️ 待人工确认)", body)
     if m:
         rest = body[m.end():]
         # 找下一个加粗板块标题行作为正文起点

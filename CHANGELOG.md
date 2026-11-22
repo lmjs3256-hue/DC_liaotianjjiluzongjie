@@ -8,11 +8,23 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.22.5** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.22.6** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.22.6 — 2026-11-22
+
+**修复：重跑社区日报会把已人工确认的冲突又显示成「待人工确认」**
+
+- 用户反馈：SN55 的 $120K 收入冲突 00:01 已经 `/社区确认`（「按外部投研报告为准，社区消息做情绪参考」）并成功重推确认版，但 12:09 再发 `/community` 重跑后，专区又标成「待人工确认」。
+- 根因（两处）：① `subnet_archive.attach_community_digest()` 同一 `(date, sn)` 重跑时整条覆盖 `community_digests[]`，把人工写入的 `confirm` 字段抹掉；② `community_digest.run_community_day()` 生成专区时调用 `build_conflict_section(flags)` 没传档案里已有的确认，每次都从零渲染。
+- 修复：
+  - `attach_community_digest()` 重跑时先读出旧条目的 `confirm` 并拷进新记录，人工决策不被机器重跑覆盖（日志追加「已保留人工确认」）。
+  - `run_community_day()` 生成时调 `SA.get_community_confirms(cfg, day_str)` 一并传入专区渲染；`build_conflict_section()` 全确认时标题改「✅ 冲突已人工确认」，部分确认标「⚠️ 部分待人工确认」，标题同步不再误打「⚠️待人工核对」。
+  - `push_confirmed_version()` 剥离旧专区兼容三种标题，避免重推叠加。
+- 验证：SN55 确认记录从 run.log 恢复到档案；重跑落档后 `confirm` 仍在；专区渲染显示「✅ 人工已核实（2026-11-22 00:01）：按外部投研报告为准…」。
 
 ## v1.22.5 — 2026-11-22
 

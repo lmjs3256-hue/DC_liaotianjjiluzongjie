@@ -4,7 +4,7 @@
 > 用 AI 总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.29.1** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.29.2** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 **当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
@@ -615,7 +615,8 @@ TG 窗口用一眼可辨的独立命令：`/社区今日` = 今日 00:00→当�
   - 末尾加 `nopush` 只生成不推。
   - 命令行等价：`python pipeline.py gamma [list|snapshot|week|month|detail|cross|crossweek|crossmonth] [SN] [nopush]`。
 - **内容与口径**：
-  - 机制1：开通列表=所有 `gamma_enabled` 的子网；收支表=每子网累计铸造（收入侧，烧 alpha 换来）、
+  - 机制1：开通列表=所有 `gamma_enabled` 的子网，**按 SN 编号升序**排列、名称统一显示为蓝色可点链接
+    （`[名称](taostats.io/subnets/<SN>)`，编号仍为普通字）；收支表=每子网累计铸造（收入侧，烧 alpha 换来）、
     花费（支出侧，客户用掉）、未花余额、烧 alpha 量、笔数；周/月=北京时间自然周（周一 00:00）/自然月（1 号 00:00）
     起的流水按子网聚合 + 主要付款方；单子网=累计收支 + 最近付款流水。
   - 机制2（跨子网支付）：**配置比例**（`gamma_emission_shares`，承诺上限，u64÷(2^64−1) 得百分比）与

@@ -32,6 +32,17 @@ ck(G.short_addr(None) == "未知", "地址空值")
 ck(G.sn_name(51) == "SN51 lium.io", "SN名称-本地KB")
 ck(G.sn_name(999).startswith("SN999"), "SN名称-未知回退")
 
+# 2b) 蓝色链接名称（v1.29.2：开通列表名称统一蓝色链接）
+lk = G.sn_name_link(51)
+ck(lk == "SN51 [lium.io](https://taostats.io/subnets/51)", "名称链接格式SN51")
+ck(lk.startswith("SN51 [") and lk.endswith(")"), "编号普通字+名称包链接")
+ck(G.sn_name_link(117) == "SN117 [everyframe.studio](https://taostats.io/subnets/117)", "名称链接SN117域名")
+ck(G.sn_name_link(999) == "SN999", "未知SN无名称不包链接")
+# 链接语法在两通道转义后必须完好（否则蓝色链接会失效）
+import pipeline as _P
+ck(_P._tg_md(_P.mark_changes_tg(lk)) == lk, "TG转义不破坏链接")
+ck(_P.mark_changes_feishu(lk) == lk, "飞书转义不破坏链接")
+
 # 3) 开通子网过滤+排序
 rows = [
     {"netuid": 51, "gamma_enabled": True, "gamma_spent": rao(100)},
@@ -78,6 +89,24 @@ tot_mint = sum(G.g_rao(d.get("gamma_minted")) for d in [
 shown = format(tot_mint, ",.2f")
 ck(shown == "59,855.50", "汇总Γ值不双重换算")
 ck(shown != G.fmt_g(tot_mint), "汇总值不得再传fmt_g")
+
+# 9) 开通列表按编号升序 + 名称链接（v1.29.2），mock fetch_subnets 不依赖网络
+_orig_fetch = G.fetch_subnets
+try:
+    G.fetch_subnets = lambda cfg, log=None: [
+        {"netuid": 117, "gamma_enabled": True, "gamma_spent": rao(1)},
+        {"netuid": 25, "gamma_enabled": True, "gamma_spent": rao(2)},
+        {"netuid": 51, "gamma_enabled": True, "gamma_spent": rao(3)},
+        {"netuid": 80, "gamma_enabled": True, "gamma_spent": rao(4)},
+    ]
+    rr = G.run_gamma({}, "list", push=False)
+    body = rr["digest"]
+    sn_order = [int(l.split(". SN")[1].split(" ")[0])
+                for l in body.splitlines() if ". SN" in l]
+    ck(sn_order == [25, 51, 80, 117], "开通列表按编号升序")
+    ck("[lium.io](https://taostats.io/subnets/51)" in body, "列表名称蓝色链接")
+finally:
+    G.fetch_subnets = _orig_fetch
 
 print("PASS %d / FAIL %d" % (len(PASS), len(FAIL)))
 for n in FAIL:

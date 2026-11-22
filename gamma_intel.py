@@ -170,6 +170,22 @@ def sn_name(sn, kb=None):
     return ("SN%d %s" % (sn, name)) if name else ("SN%d" % sn)
 
 
+def sn_name_link(sn, kb=None):
+    """SN编号 + 蓝色链接名称：SN%d [名称](taostats详情页)。
+
+    只把名称包成链接、编号留普通字，飞书 lark_md 与 TG 旧版 Markdown
+    都把 [文字](url) 渲染成蓝色可点链接——与 lium.io/everyframe.studio
+    这类域名自动变蓝的效果一致。链接用项目既有惯例 /subnets/<编号>。
+    URL 无下划线，不会被 TG _tg_md 的 '_' 转义破坏。
+    """
+    kb = kb if kb is not None else _kb()
+    subs = (kb or {}).get("subnets") or {}
+    d = subs.get(str(sn)) or {}
+    name = str(d.get("name") or "").strip()
+    url = "https://taostats.io/subnets/%d" % int(sn)
+    return ("SN%d [%s](%s)" % (int(sn), name, url)) if name else ("SN%d" % int(sn))
+
+
 def enabled_subnets(rows):
     """按 gamma_enabled 过滤并按花费降序。"""
     out = [d for d in rows if d.get("gamma_enabled")]
@@ -253,7 +269,8 @@ def _table_row(sn, minted, spent, outstanding, burned, mc, sc, kb=None):
 def report_list(cfg, log=None, now=None):
     """开通 Gamma 支付的子网列表（用户要的专门入口）。"""
     rows = fetch_subnets(cfg, log)
-    enabled = enabled_subnets(rows)
+    # 开通列表按子网编号从小到大排（收支总览仍按花费降序，两处口径不同）
+    enabled = sorted(enabled_subnets(rows), key=lambda d: int(d["netuid"]))
     now = now or datetime.datetime.now(_TZ8)
     lines = ["📋 已开通 Gamma 支付的子网（共 %d 个，SN编号+名称）" % len(enabled), ""]
     lines.append("截至：%s（北京时间，链上最新区块数据）" % now.strftime("%Y-%m-%d %H:%M"))
@@ -269,7 +286,7 @@ def report_list(cfg, log=None, now=None):
                          for s in shares]
                 extra = "；emission 分配→ " + "、".join(parts)
             lines.append("%d. %s ｜ 花费 %s Γ ｜ 未花 %s%s" % (
-                i, sn_name(int(d["netuid"])), fmt_g(d.get("gamma_spent")),
+                i, sn_name_link(int(d["netuid"])), fmt_g(d.get("gamma_spent")),
                 fmt_g(d.get("gamma_outstanding")), extra))
     lines.append("")
     lines.append("说明：开通=子网已打开 Gamma 开关；「花费」是客户用掉的服务信用（1Γ≈1美元），")

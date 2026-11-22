@@ -856,12 +856,18 @@ def _ga_ask_scope(chat_id, act):
 
 
 def _ga_run(chat_id, act, sn=None):
-    """真正触发 Gamma 查询。"""
-    _ga_flow_clear(chat_id)
+    """真正触发 Gamma 查询。
+
+    关键（v1.29.1 修复）：查完不清状态，而是回到第 1 轮功能菜单并刷新 5 分钟计时。
+    这样用户在时效内可连续点菜单里任意多项（列表→收支→周→跨网…），
+    不再出现「查完一项后再点其他项就报已超时」。只有主动取消 / 真正超时才清。
+    """
+    _GA_FLOW[str(chat_id)] = {"step": "action", "act": None, "ts": time.time()}
     act_txt = _GA_ACT_LABEL.get(act, act)
     scope_txt = ("SN%s" % sn) if sn is not None else "全网"
     send_async(chat_id,
-               "📊 收到，正在查询 Gamma【%s·%s】链上数据，生成完毕后推送（飞书 + TG）…"
+               "📊 收到，正在查询 Gamma【%s·%s】链上数据，生成完毕后推送（飞书 + TG）…\n"
+               "（菜单仍保留，5 分钟内可继续点其他项）"
                % (act_txt, scope_txt))
     args = ["gamma", act] + ([str(sn)] if sn is not None else [])
     run_pipeline(args, chat_id, quiet=True)

@@ -268,7 +268,7 @@ def report_list(cfg, log=None, now=None):
                 parts = ["SN%s %s" % (s.get("target_netuid"), format(share_pct(s.get("share")), ".1f") + "%")
                          for s in shares]
                 extra = "；emission 分配→ " + "、".join(parts)
-            lines.append("%d. %s ｜ 花费 %s Γ ｜ 未花 %s Γ%s" % (
+            lines.append("%d. %s ｜ 花费 %s Γ ｜ 未花 %s%s" % (
                 i, sn_name(int(d["netuid"])), fmt_g(d.get("gamma_spent")),
                 fmt_g(d.get("gamma_outstanding")), extra))
     lines.append("")

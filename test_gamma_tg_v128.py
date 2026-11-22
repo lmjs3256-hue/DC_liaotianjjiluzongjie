@@ -42,7 +42,8 @@ reset()
 T.handle("/gamma", CHAT)
 T.handle("列表", CHAT)
 ck(len(_runs) == 1 and _runs[0][0][:2] == ["gamma", "list"], "文本选列表→直接跑gamma list")
-ck(not T._ga_flow_active(CHAT), "列表跑完清空状态")
+ck(T._ga_flow_active(CHAT) and T._ga_flow_active(CHAT)["step"] == "action",
+   "列表跑完保留菜单(不超时)")
 
 # 3) 文本回复「周」→ 第2轮 scope
 reset()
@@ -159,6 +160,36 @@ T.handle("/gamma", CHAT)
 T._ga_callback({"id": "x", "data": "gama:crossweek"}, CHAT, "u1", [])
 ck(T._ga_flow_active(CHAT) and T._ga_flow_active(CHAT)["act"] == "crossweek",
    "callback选跨网周进scope")
+
+# --- v1.29.1 修复：查完一次后菜单仍有效，5分钟内可连续点其他项 ---
+# 22) 文本路径连续查询：列表 → 收支（第二次不再报超时）
+reset()
+T.handle("/gamma", CHAT)
+T.handle("列表", CHAT)                       # 第一次查列表，跑完后状态回到菜单
+ck(len(_runs) == 1, "首次列表查询成功")
+T.handle("收支", CHAT)                       # 立刻再点收支
+ck(T._ga_flow_active(CHAT) and T._ga_flow_active(CHAT)["step"] == "scope",
+   "查完列表后菜单仍有效→收支进第2轮(未超时)")
+T.handle("全网", CHAT)
+ck(len(_runs) == 2 and _runs[1][0] == ["gamma", "snapshot"],
+   "5分钟内连续查询：列表→收支全网都成功")
+
+# 23) callback 路径连续查询：查完 week 后再点 cross
+reset()
+T.handle("/gamma", CHAT)
+T._ga_callback({"id": "x", "data": "gama:week"}, CHAT, "u1", [])
+T._ga_callback({"id": "x", "data": "gaday:all"}, CHAT, "u1", [])
+ck(len(_runs) == 1 and _runs[0][0] == ["gamma", "week"], "首查 week 成功")
+T._ga_callback({"id": "x", "data": "gama:cross"}, CHAT, "u1", [])   # 再点跨网
+ck(T._ga_flow_active(CHAT) and T._ga_flow_active(CHAT)["step"] == "scope",
+   "查完 week 后 callback 再点跨网仍有效(未超时)")
+T._ga_callback({"id": "x", "data": "gaday:all"}, CHAT, "u1", [])
+ck(len(_runs) == 2 and _runs[1][0] == ["gamma", "cross"], "callback 连续查询：week→cross 都成功")
+
+# 24) 真超时仍生效：菜单放太久（ts 过期）再点应提示超时
+reset()
+T._GA_FLOW[CHAT] = {"step": "action", "act": None, "ts": time.time() - 400}
+ck(T._ga_flow_active(CHAT) is None, "超过5分钟真超时仍清除(不被误保留)")
 
 print("PASS %d / FAIL %d" % (len(PASS), len(FAIL)))
 for n in FAIL:

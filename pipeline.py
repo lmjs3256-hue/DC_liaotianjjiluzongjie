@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.23.1"
+__version__ = "1.24.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -4008,7 +4008,7 @@ if __name__ == "__main__":
     ap.add_argument("-V", "--version", action="version",
                     version="DTAO price-talk pipeline v%s" % __version__)
     ap.add_argument("mode", nargs="?", default="daily",
-                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research", "wallet", "community", "community_confirm", "community_reconfirm"],
+                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research", "wallet", "community", "community_confirm", "community_reconfirm", "tg_group"],
                     help="daily=导出并推送（可跟日期，省略则前一天）；weekly=周报；"
                          "repush=仅补推已生成的日报（不重导/不重算）；"
                          "resummarize=按反馈重总结（日期 反馈内容 [tg|feishu]）；"
@@ -4136,6 +4136,24 @@ if __name__ == "__main__":
             res = CD.run_community_day(cfg, day, log=log, push=push)
             log("社区日报完成：%s（%d 条消息，%d 个子网落档）"
                 % (day, res.get("total", 0), res.get("archived_sn", 0)))
+        elif args.mode == "tg_group":
+            # TG 群消息日报：取 dtt 管理员群消息库 -> 严格相关筛选 -> 按群总结 -> 落档 -> 双推
+            # 与关键词社区日报（community）完全隔离：独立数据源/提示词/文件/命令。
+            import tg_group_digest as TGD
+            cfg = load_config()
+            rest = list(args.extra)
+            push = not any(x.lower() in ("nopush", "--no-push") for x in rest)
+            rest = [x for x in rest if x.lower() not in ("nopush", "--no-push")]
+            if rest:
+                day = _resolve_day_alias(rest[0], datetime.timezone(datetime.timedelta(hours=8)))
+            else:
+                day = (datetime.datetime.now(
+                    datetime.timezone(datetime.timedelta(hours=8)))
+                    - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            res = TGD.run_tg_group_day(cfg, day, log=log, push=push)
+            st = res.get("stats") or {}
+            log("TG群日报完成：%s（群消息 %d 条，严格相关 %d 条，%d 个子网落档）"
+                % (day, res.get("total", 0), st.get("related", 0), res.get("archived_sn", 0)))
         elif args.mode == "community_confirm":
             # 人工确认社区日报的某条冲突：写入对应子网档案 community_digests[].confirm
             # 用法：community_confirm 日期 SN编号 结论 [confirmed|refuted]

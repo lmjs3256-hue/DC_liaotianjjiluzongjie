@@ -57,6 +57,13 @@
   "dtt_email": "",
   "dtt_password": "",
   "dtt_login_days": 90,
+  "tg_group_ids": [
+    "8116469191",
+    "1003968896337",
+    "1002480957486",
+    "1001965130471"
+  ],
+  "tg_group_output_dir": "exports/tg_group",
   "daily_key_authors": [
     "5GuRL",
     "Fish | lium.io",

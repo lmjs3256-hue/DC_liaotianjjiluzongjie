@@ -4,7 +4,7 @@
 > 用 AI 总结成一份手机端友好的中文日报 → 推送到 **飞书群** 和 **Telegram**。
 > 可以手动触发，也可以直接在 Telegram 里发一句话就让它干活。
 
-**当前版本：v1.23.1** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
+**当前版本：v1.24.0** ｜ 更新记录见 **[CHANGELOG.md](CHANGELOG.md)**
 **当前模型：A·DeepSeek V4.1 + B·Kimi K3（对比模式，Engy / Bittensor SN53）** ｜ 换模型只改 `config.json`，见 [常见问题](#九常见问题排错)
 
 ## ✨ 核心特性
@@ -196,6 +196,8 @@ python pipeline.py
   "dtt_email": "",                                 // dtt 账号邮箱：填了+密码则会话失效时自动重新登录续期（本地、不入库；留空=手动登录）
   "dtt_password": "",                              // dtt 账号密码（本地明文、不入库；介意可留空手动登录）
   "dtt_login_days": 90,                            // 目标登录周期说明（实际由站点服务端签发的会话有效期决定）
+  "tg_group_ids": [],                              // TG群日报采集的群ID（v1.24.0，留空用默认4个活跃群；管理员群消息库）
+  "tg_group_output_dir": "exports/tg_group",       // TG群日报取数 JSON 与 digest 的落地目录
   "pw_browser_cli": "",                            // 浏览器 CLI 路径（留空用默认：~/.workbuddy/skills/playwright-browser-use/pw-browser）
   "community_output_dir": "exports/community",     // 社区日报取数 JSON 与 digest 的落地目录
   "llm_verify_pass": true,                         // 两遍成稿：第二遍带原文校对（数字归属/人物-子网归属/残留英文），失败自动回退初稿
@@ -559,6 +561,22 @@ TG 窗口用一眼可辨的独立命令：`/社区今日` = 今日 00:00→当�
   介意明文密码就留空，失效时按提示手动在 Edge 登录。
 - **与 DC 日报隔离**：独立数据源、独立提示词、独立文件（`exports/community/`），双推但互不污染；
   按 SN 拆段落档到各子网档案 `community_digests[]`，供投研报告查询参考。
+
+**💬 TG 群消息日报（v1.24.0，独立日报）**
+
+发 `/tg群`（或 `/群消息`、`/tg_group`）生成；`/tg群今日` 取今日、`/tg群昨日` 昨日（默认），
+可 `/tg群 2026-11-20` 指定日、末尾加 `nopush` 只生成不推送。命令行等价：
+`python pipeline.py tg_group [昨日|今日|日期] [nopush]`。推送标题「💬 Bittensor TG 群消息日报」，
+落 `exports/tg_group/`。
+
+- **数据源**：dtt 账号升级管理员后新开放的**群消息库** `/api/group-messages`——是 TG 群的
+  原始聊天全文，与关键词监控事件表**完全隔离**（无关键词字段）。默认接 4 个活跃群
+  （TAO-update-DC / Hanlin.AI / Subnet Summer - τ / Bittensor TAO Price Chat），
+  `config.tg_group_ids` 可覆盖。
+- **严格相关**：群聊噪音大，只保留命中 SN 编号 / 项目专名 / `research_sn_anchors` /
+  关键人物（const、iuac、rrik）/ 中文的消息；Gm、纯表情、纯链接、机器人指令、无关通知一律剔除。
+  按群分组 + 关键人物**本人**发言单列（别人提到 const 不算 const 观点），复用人名映射与词必达意，
+  不贴原始链接。与 DC 日报、社区日报三者全隔离。
 
 **怎么喂给日报**：不是把整表塞进提示词。生成时只挑**当天消息里提到的编号**（显式 `SNxx`、1–256 的裸数字、
 以及只写名字的「Engy」反查编号），**最多 45 条**，并附硬约束：

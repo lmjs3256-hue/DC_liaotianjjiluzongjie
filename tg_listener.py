@@ -100,6 +100,10 @@ HELP = (
     "     /社区确认 55 收入属实            ← 也可一条写完（老写法仍有效）\n"
     "     /社区重推                        ← 按已确认结论重推确认版（不重新取数/不调AI）\n"
     "     确认后该结论会被投研和确认版日报引用。\n"
+    "💬 /tg群、/群消息 TG群消息日报（dtt管理员群消息库，独立日报）：\n"
+    "   /tg群今日  取今日4个活跃群聊天，严格相关筛选后按群总结，飞书+TG双推\n"
+    "   /tg群      默认昨日；也可 /tg群 2026-11-20；末尾加 nopush 只生成不推送\n"
+    "   （与 /社区 关键词日报完全隔离：这是群的原始聊天，只留SN/专名/关键人物相关）\n"
     "🤖 /模型 大模型平台切换（档案名不区分大小写：sn53/sn28；旧名 engy=sn53）：\n"
     "   /模型              列出档案+当前；/模型 sn28 切到 SN28 SayGM\n"
     "   /模型 sn53         切回 SN53 Engy（旧写法 /模型 engy 也认）\n"
@@ -476,6 +480,7 @@ _KEYBOARD = {
         ["/digest 昨日", "/repush 最新"],
         ["/投研 29", "/档案"],
         ["/社区今日", "/社区昨日"],
+        ["/tg群今日", "/群消息"],
         ["/模型", "/watch 7"],
         ["/weekly", "/help"]
     ],
@@ -745,6 +750,21 @@ def _run_pipeline_sync(args, chat_id):
                 receipt += "\n⚠️ 含 %s 处「待人工确认」，请核对正文后再采信" % mf.group(1)
             safe_send(chat_id, receipt)
             return
+        if args and args[0] == "tg_group":
+            # TG群日报专属回执（正文已由 pipeline 推送）
+            m = re.search(r"TG群日报完成：\s*(\d{4}-\d{2}-\d{2})\s*（群消息\s*(\d+)\s*条，严格相关\s*(\d+)\s*条，(\d+)\s*个子网落档）", out)
+            if m:
+                day, total, rel, sns = m.groups()
+                receipt = ("💬 TG群消息日报已生成并推送（飞书 + TG）\n"
+                           "📅 %s　📊 群消息 %s 条 → 严格相关 %s 条 · %s 个子网落档\n"
+                           "📄 exports/tg_group/tg_group_%s.digest.txt"
+                           % (day, total, rel, sns, day))
+            elif "当日无消息" in out or "无与 Bittensor 子网相关" in out:
+                receipt = "💬 TG群日报已生成：当日无相关内容（空报告，未推送正文）"
+            else:
+                receipt = "💬 TG群日报流程已结束（详情见群内推送或 run.log）"
+            safe_send(chat_id, receipt)
+            return
         if args and args[0] == "community_confirm":
             mc = re.search(r"社区冲突人工确认完成：\s*(\S+)\s+SN(\d+)\s+(已核实|已推翻)", out)
             if mc:
@@ -788,6 +808,11 @@ def _run_pipeline_sync(args, chat_id):
             hint = ("\n💡 若是「连接 19223 / 守护离线」，取数时已尝试自动拉起 Edge 守护；"
                     "仍失败请确认 Edge 可启动、dtt 账号密码正确（config 本地配置），详见 run.log。")
             safe_send(chat_id, "❌ 社区日报生成失败\n%s%s" % (tail or "（无输出，详见 run.log）", hint))
+            return
+        if args and args[0] == "tg_group":
+            hint = ("\n💡 若是「连接 19223 / 守护离线」，取数时已尝试自动拉起 Edge 守护；"
+                    "若报「登录已失效」，请在 Edge 重新登录 dtt 或检查 config 凭据。详见 run.log。")
+            safe_send(chat_id, "❌ TG群日报生成失败\n%s%s" % (tail or "（无输出，详见 run.log）", hint))
             return
         safe_send(chat_id, "❌ 失败：%s\n%s" % (" ".join(args), tail or "（无输出，详见 run.log）"))
 
@@ -1244,6 +1269,21 @@ def handle(text, chat_id):
             preset = []
         send_async(chat_id, "🌐 收到，正在生成 Bittensor 社区消息日报（dtt版），稍等…")
         run_pipeline(["community"] + preset + parts[1:], chat_id, quiet=True)
+    elif cmd in ("tg群", "群消息", "tg_group", "tg群消息", "tgqun",
+                 "tg群今日", "tg群今天", "tg_group_today",
+                 "tg群昨日", "tg群昨天", "tg_group_yesterday"):
+        # TG 群消息日报（dtt 管理员群消息库，与关键词社区日报隔离）：命令触发。
+        # /tg群 默认昨日；/tg群今日 取今日；其余参数（日期/nopush）透传 pipeline tg_group。
+        _today_cmds = ("tg群今日", "tg群今天", "tg_group_today")
+        _yest_cmds = ("tg群昨日", "tg群昨天", "tg_group_yesterday")
+        if cmd in _today_cmds:
+            preset = ["今日"]
+        elif cmd in _yest_cmds:
+            preset = ["昨日"]
+        else:
+            preset = []
+        send_async(chat_id, "💬 收到，正在生成 TG 群消息日报（4 个活跃群，严格相关筛选），稍等…")
+        run_pipeline(["tg_group"] + preset + parts[1:], chat_id, quiet=True)
     elif cmd in ("社区确认", "community_confirm", "确认冲突", "核实"):
         # 人工确认社区日报冲突，两种写法：
         #   ① 分步（推荐）：只发 /community_confirm → bot 依次问 SN、核实结论

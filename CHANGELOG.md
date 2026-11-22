@@ -8,11 +8,22 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.23.1** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.24.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.24.0 — 2026-11-22
+
+**新增 TG 群消息日报：接入 dtt 管理员群消息库，独立日报 + 命令 `/tg群`**
+
+- 背景：用户 dtt 账号升级管理员，新开放群消息库 `/api/group-messages`（与关键词事件表 `/api/events` 完全隔离、无关键词字段、群聊全文）。实测已入库 5 个 TG 群 2074 条消息。
+- 用户三决策：①独立日报+命令（不并入社区日报）②先接 4 个活跃群（TAO-update-DC 952 / Hanlin.AI 386 / Subnet Summer 369 / Bittensor TAO Price Chat 366，跳过 1 条的空群）③严格相关筛选。
+- 新增 `tg_group_fetch.py`：管理员群消息取数，支持 `groupId`/`startDate`/`endDate`(毫秒)/游标翻页（limit 封顶 100）；复用 `community_fetch` 的 Edge headless 守护会话与 `CREATE_NO_WINDOW` 静默；落 `exports/tg_group/tg_group_YYYY-MM-DD.json`。探测确认接口路径（`/api/group-messages`、`/api/group-messages/groups`、`/api/admin/telegram/configs`）。
+- 新增 `tg_group_digest.py`：严格相关筛选（SN 编号/项目专名/`research_sn_anchors`/关键人物/中文，剔除 GN/Gm/纯链接/机器人指令/无关通知），按群分组 + 关键人物**本人**发言单列（「别人提到 const」不冒充 const 观点），复用别名映射（iuac/rrik）、词必达意、不贴链接；按 SN 落档 community_digests[]；独立提示词与双推。
+- pipeline 新增 mode `tg_group`（版本→1.24.0）；TG 命令 `/tg群`（/群消息 /tg_group，含 `/tg群今日`、日期、nopush）含专属回执与失败提示；按钮栏加 `/tg群今日`、`/群消息`；`config.example.json` 补 `tg_group_ids`/`tg_group_output_dir`。
+- 回归 `test_tg_group_v124.py`；E 盘规则文档升 v1.4 新增「1.0.2 TG 群消息日报」。
 
 ## v1.23.1 — 2026-11-22
 

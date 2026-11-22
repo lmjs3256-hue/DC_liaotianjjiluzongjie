@@ -36,8 +36,13 @@ MAX_PER_SN = 12
 MAX_SN = 18
 # 无 SN 归属但值得看的通用消息最多多少条
 MAX_GENERIC = 12
-# 创始人等关键人物：dtt 里的转推/推文/回复一律保留，不参与噪声剔除与条数截断
-DEFAULT_KEY_AUTHORS = ["const"]
+# 创始人/核心交易者等关键人物：dtt 里的转推/推文/回复一律保留，不参与噪声剔除与条数截断
+DEFAULT_KEY_AUTHORS = ["const", "5gurl", "fish", "orange1004"]
+
+# dtt 把 Discord 消息抓成「人名,备注:频道名」的形态，如 5gurl,备注:dtao / orange1004,备注:rrik。
+# 这些备注是**频道标签**不是人名，若按「备注优先」取会把多人合并成 dtao、丢失真实发言人。
+# 备注命中本集合时退回取逗号前的真实人名。const 的备注（备注:const）是真人名，不在此列。
+_CHANNEL_TAG_NOTES = {"dtao", "rrik", "price-talk", "price talk", "general", "chat"}
 
 # 相关性过滤：dtt 靠关键词命中，像 "ms" "jason" "fish" 这类通用词会误抓大量
 # 与 Bittensor 无关的推文（实测 SN24 混进黄仁勋八卦、黎曼猜想）。这里按内容
@@ -74,11 +79,17 @@ def _key_author_hit(e, cfg=None):
     names = _key_author_names(cfg)
     if not names:
         return False
-    blob = ((e.get("author") or "") + " " + (e.get("content") or "")).lower()
+    author = (e.get("author") or "").lower()
+    content = (e.get("content") or "").lower()
     for n in names:
-        # const 可匹配 const / const_reborn / consttt；不匹配 constantly 之类的误命中
-        pat = r"(?<![a-z0-9])" + re.escape(n) + r"(?:_[a-z0-9]+|tt)?(?![a-z])"
-        if re.search(pat, blob):
+        # 名字边界：const 可匹配 const / const_reborn / consttt，不匹配 constantly
+        pat = r"(?<![a-z0-9])" + re.escape(n) + r"(?:_[a-z0-9]+|tt|[0-9]{2,6})?(?![a-z])"
+        # 作者字段命中 → 一定是关键人物本人的发言，直接算
+        if re.search(pat, author):
+            return True
+        # 正文提及：仅对「专名型」关键人物（const / 5gurl / orange1004）算，
+        # 通用词 fish 不按正文匹配——否则「mango got a lil fish」「烤全鱼」都会被误当成 fish 的重要发言。
+        if n not in ("fish",) and re.search(pat, content):
             return True
     return False
 
@@ -208,6 +219,15 @@ COMMUNITY_SYSTEM_PROMPT = (
     "整理成一份**按子网分组**的中文社区日报。数据来源是 dtt 关键词监控工具，"
     "聚合了 Twitter/X、Telegram、Discord 上命中 Bittensor 关键词的公开消息。\n"
     "\n"
+    "【社区情绪优先：关键人物的观点是核心信号】\n"
+    "Bittensor 价格与预期高度依赖社区情绪，核心交易者/团队方（输入里标为关键人物，"
+    "如 5GuRL、Fish、orange 等）的判断、质疑、看多看空理由是当天最有价值的信息，"
+    "**必须逐条提炼出真正观点，严禁当普通群友过滤、合并成「dtao 群友」或一句带过**。\n"
+    "- 词必达意：把零散的中英夹杂发言串成完整意思，写清他到底看多/看空、依据是什么、指向哪个子网或机制；"
+    "关键利好（如排放导入 lium 换 TAO 回购销毁、每天买回销毁多少）必须讲清「谁把什么导向哪里、预期效果」，"
+    "不要只写「已准备接入」这种没头没尾的表述；原文是玩笑/调侃就如实写，不要拔高成严肃观点。\n"
+    "- 人名照抄输入 `<>` 里的显示名（已是规范名），不得把不同人合并、不得写频道名当人名。\n"
+    "\n"
     "【铁律：不可全信，逐条标注来源】\n"
     "- 这些是**社区公开消息**，混有传闻、喊单、转发、观点、未证实爆料。一律按「有人说」处理，"
     "不要写成既定事实。每条必须标注来源平台（Twitter/X / Telegram / Discord）与发言人。\n"
@@ -309,10 +329,28 @@ def _display_author(author, cfg=None):
     a = (author or "").strip()
     m = re.search(r"备注[:：]\s*([^,，\s]+)", a)
     if m:
-        return _simplify_name(m.group(1).strip())
+        note = m.group(1).strip()
+        # 备注是频道名（dtao/rrik…）而非人名 → 取逗号前的真实人名，避免多人被合并成 dtao
+        if note.lower() in _CHANNEL_TAG_NOTES:
+            a = re.split(r"[,，]", a, 1)[0].strip()
+        else:
+            return _simplify_name(note)
     a = a.split("@")[0].strip()          # 显示名@账号 → 取显示名
     a = re.sub(r"_\d{2,6}$", "", a).strip()  # 名字_辨识码 → 取名字
-    return _simplify_name(a)
+    name = _simplify_name(a)
+    return _display_alias(name, cfg)
+
+
+def _display_alias(name, cfg=None):
+    """账号 → 用户指定显示名（config.author_display_alias，如 5gurl/baobab→iuac、orange→rrik）。"""
+    m = (cfg or {}).get("author_display_alias") or {}
+    if not isinstance(m, dict) or not m:
+        return name
+    na = re.sub(r"_\d{2,6}$", "", (name or "").strip().lower())
+    for k, v in m.items():
+        if na == str(k).strip().lower():
+            return str(v).strip()
+    return name
 
 
 def _simplify_name(a):
@@ -466,7 +504,7 @@ def build_input(payload, cfg=None):
         if k in _seen_all:
             continue
         _seen_all.add(k)
-        all_lines.append("- <%s> %s" % (_clean(e.get("author") or "?", 40),
+        all_lines.append("- <%s> %s" % (_clean(_display_author(e.get("author"), cfg), 40),
                                          _clean(e.get("content"))))
     if all_lines:
         lines.append("\n===== 当日全部人物与消息（人名+原文，共 %d 条；日报人物节须逐个点名，"

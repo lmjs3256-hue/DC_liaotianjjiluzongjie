@@ -8,9 +8,29 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.22.4** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.22.5** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.22.5 — 2026-11-22
+
+**核心人物观点不再被过滤、提炼要词必达意（Bittensor 社区情绪优先）**
+
+- 用户反馈：「这种是社区利好消息，你总结出来第一表述不清楚；Bittensor 非常依赖社区情绪，一定要重视关键人物的表述和观点。群里的 5GURL、fish、orange 都比较重要，他们的发言不能随意过滤，也不能词不达意、总结不出真正的观点。」
+- Discord 日报（`pipeline.py`）：
+  - 新增 `config.daily_key_authors`（默认 `5GuRL`/`Fish | lium.io`/`orange`，可覆盖）；`build_text_block` 在输入开头单列「★核心人物」名单，并给这些人的每条消息打 `★核心` 标记（作者字段精确匹配，不做正文匹配以免误伤）。
+  - `SYSTEM_PROMPT`「👥 重要人物观点」节改写：核心人物每条实质发言必须逐条进本节、严禁当普通群友过滤/合并/一句带过；纯表情附和可略。**词必达意**——串出真正立场（看多/看空、依据、指向哪个子网/机制），利好讲清「谁把什么导向哪里、预期效果」，玩笑如实写不硬拔高。
+  - 新增核查规则 24a：核心人物提到回购/销毁/排放导入/接入某池时，必须按原文讲清机制与数字，不许只写「已准备接入」这种看不出利好的表述。
+- dtt 社区日报（`community_digest.py`）：
+  - `community_key_authors` 增补 5gurl/fish/orange1004（config + 默认值 + 示例配置）。
+  - 修 `5gurl,备注:dtao`/`orange1004,备注:dtao` 被「备注优先」取成频道名 `dtao`、多人合并失真的问题：新增频道名备注黑名单，命中时取逗号前真实人名（`const` 的备注是真人名，不受影响）。
+  - `_key_author_hit` 收紧：作者字段按专名匹配（含 `_数字`/`备注`/handle 形态）；正文提及只对专名型人物算，`fish` 这类通用词不按正文匹配，避免「烤全鱼/mango got a lil fish」误命中。
+  - 提示词新增「社区情绪优先」段：核心人物观点按重要信号逐条提炼、不得合并成「dtao 群友」，人名照抄显示名。
+- 用户补充人名规范：`5gurl` 与 DC 里的 `baobab` 显示为 **iuac**，`orange` 显示为 **rrik**。新增 `config.author_display_alias`（`5gurl`→iuac、`baobab`→iuac、`orange`/`orange1004`→rrik），DC 日报（`pipeline._display_alias`，名单与正文同时替换）与 dtt 日报（`community_digest._display_author` 尾部 + 「当日全部人物」段）统一应用；`const`/`fish` 不受影响。
+- 顺带修复批量改动引入的隐患：`audit_attribution` 函数无 `cfg` 参数却引用 `cfg`，改用全局 `_CFG`，避免 NameError。
+- 验证：`py_compile` 通过；三人识别/显示名/命中判定单测全对；映射全链路单测（大小写/辨识码/频道备注形态）全对；输入块实测 41 条核心消息打标；新提示词重跑今日数据——Fish 写明「Affine Gamma 排放导入 Lium 池、$5k/天回购销毁利好」、rrik 商业模式/做空/DCA 全列、iuac 的 SN7 分析/估值逻辑/卖铲子理论全保留，无过滤、无词不达意。
 
 ---
 

@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.22.4"
+__version__ = "1.22.5"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1007,7 +1007,10 @@ SYSTEM_PROMPT = (
     "每条一句说清「谁/什么 + 关键结论」，写得越短越好、意思说全即可，"
     "并把关键人物、**SN编号/子网名**、事件用 **加粗**；子网异动、上线、rug、机制变更、算力变化都写在这里，"
     "用 ⚠️ 或 ✅ 标注。**本节即子网动向的唯一出口，不要再单列子网汇总小节，避免重复**）\n"
-    "**👥 重要人物观点**（点名 **@人物/开发者**，他讲了什么、对什么有影响；与上面重复的事实不用复述，只补充观点与依据；普通群友无关发言不列；**没有值得单列的就不写这一节**）\n"
+    "**👥 重要人物观点**（Bittensor 价格高度依赖社区情绪，**核心人物的表态与判断本身就是重要信号，必须重视、不得轻视**。\n"
+    "- **输入里打了 ★核心 标记的人（当天有发言的话）——每一条实质发言都必须逐条写进本节，严禁当「普通群友」过滤、严禁用「无值得单列者」一笔带过**。一人有多条就分条列全，纯表情/纯附和/纯水聊可略，但只要表达了判断、逻辑、立场、质疑、数据就必须保留。\n"
+    "- **词必达意、提炼出真正观点**：不要只摘字面或截图式复述，要讲清他到底表达了什么立场/预期/依据——是看多还是看空、为什么、指向哪个子网或机制；把零散的中英夹杂发言串成完整意思，但**不得脑补原文没有的结论**（原文只是调侃/玩笑就如实写成调侃，不要拔高成严肃观点）。\n"
+    "- 点名 **@人物**，写他讲了什么、对什么有影响；与「必读重点」重复的事实不重复复述，本节只补观点、依据与情绪倾向。确实无人有实质观点才整节省略。\n"
     "**📎 其他细节**（补遗：前面没覆盖但有价值的细节；**没有就整节省略**，不要硬凑）\n"
     "**💡 一句话总结**（当天全局判断，一句收束）\n"
     "\n"
@@ -1118,7 +1121,11 @@ SYSTEM_PROMPT = (
     "**背景日发生的事一律不得写成总结日（当天）的新闻**；如果当天消息明确延续背景日的话题，"
     "可以写「延续前几日的话题」，但每件事实必须归属其真实发生的日期，不得把日期混写、"
     "也不得把背景日的内容单独扩成一条。总结对象永远只有【当日消息】。\n"
-    "24b. **子网档案是判断底子，不是写作素材**：输入里可能附有【本次聊到的子网 —— "
+    "24a. **社区情绪与利好要说清机制，不许词不达意**：当核心人物提到「某子网要做回购/销毁/排放导入/接入某池」这类潜在利好时，"
+    "必须把「谁、把什么、导向哪里、预期效果（如每天买回多少、销毁多少）」按原文讲清楚，"
+    "不能只写「已准备接入」「要做某某」这种没头没尾的表述，让读者看不出这是利好还是利空、利好落在谁身上。"
+    "原文给出的数字（如 $5k/天买回销毁）要保留；原文是预期/传闻的仍按第 2、5 条标注，不得写成已落地。\n"
+    "24b. **子网档案是判断底子，不是写作素材**：输入里可能附上【本次聊到的子网 —— "
     "名称对照（+ 此前判断）】，里面每个子网只有名称/业务（有的还带几条「此前判断」）。"
     "它的用处只有两个，**都不是让你往里写**："
     "① **认人**——当天消息只写了编号的，用这里的名称/业务写清楚，别写「某子网」「该子网」；"
@@ -1548,7 +1555,9 @@ def audit_attribution(digest, items, window=2):
     for _r, _t, _a, _c in items:
         if _a and _a not in _seen:
             _seen.add(_a)
-            authors.append(_a)
+            _disp = _display_alias(_a)   # 用全局 _CFG（本函数无 cfg 参数）
+            if _disp not in authors:
+                authors.append(_disp)
     authors.sort(key=len, reverse=True)   # 长名优先，避免短名把长名切碎
 
     idx_of, sn_at = {}, []
@@ -1997,14 +2006,68 @@ def call_llm(cfg, text_block, system_prompt=None, tries=3, budget=None):
 def call_deepseek(cfg, text_block, system_prompt=None, tries=3):
     return call_llm(cfg, text_block, system_prompt=system_prompt, tries=tries)
 
-def build_text_block(channel_name, day, items, extra_hint_items=None):
+# Discord 日报核心人物（用户 2026-11-22 确认）：5GuRL / Fish | lium.io / orange 是群里
+# 最有信息量的交易者/团队方发言，其观点是社区情绪与预期的重要信号。他们的发言必须
+# 逐条进「重要人物观点」节，不得当「普通群友」过滤；提炼要讲清真正观点与结论。
+DEFAULT_DAILY_KEY_AUTHORS = ["5GuRL", "Fish | lium.io", "orange", "baobab"]
+
+
+def _daily_key_authors(cfg=None):
+    """Discord 日报核心人物名单（可经 config.daily_key_authors 覆盖）。"""
+    c = cfg if cfg is not None else (_CFG or {})
+    names = c.get("daily_key_authors")
+    if names is None:
+        names = DEFAULT_DAILY_KEY_AUTHORS
+    if isinstance(names, str):
+        names = [names]
+    return [str(x).strip() for x in names if str(x).strip()]
+
+
+def _norm_author(a):
+    """作者名规范化用于核心人物匹配：去 @handle 后缀、去 _数字辨识码、压空格、小写。"""
+    a = (a or "").strip()
+    a = a.split("@")[0].strip()
+    a = re.sub(r"_\d{2,6}$", "", a).strip()
+    a = re.sub(r"\s+", " ", a).strip()
+    return a.lower()
+
+
+def _is_daily_key(author, cfg=None):
+    """是否 Discord 日报核心人物（只对作者字段做精确匹配，不做正文匹配以免伤）。"""
+    na = _norm_author(author)
+    if not na:
+        return False
+    return any(na == _norm_author(n) for n in _daily_key_authors(cfg))
+
+
+def _display_alias(author, cfg=None):
+    """账号 → 用户指定的显示名（config.author_display_alias，如 5gurl→iuac、orange→rrik）。
+
+    匹配用规范化名（小写/去 @handle/去 _辨识码），映射后的人名同时进入「发言者名单」
+    与正文标记，模型照抄名单即可，报告里统一显示用户认可的备注名。
+    """
+    c = cfg if cfg is not None else (_CFG or {})
+    m = c.get("author_display_alias") or {}
+    if not isinstance(m, dict) or not m:
+        return author
+    na = _norm_author(author)
+    for k, v in m.items():
+        if na == _norm_author(k) or (author or "").strip().lower() == str(k).strip().lower():
+            return str(v).strip()
+    return author
+
+
+def build_text_block(channel_name, day, items, extra_hint_items=None, cfg=None):
+    cfg = cfg if cfg is not None else (_CFG or {})
     # 发言者名单：给模型一份白名单，防止人名被音译、缩写或凭空编造
     # （只含**总结日**当天的发言者；背景资料里的人不能作为当日发言者出现）
     authors, _seen = [], set()
     for _r, _t, _a, _c in items:
         if _a and _a not in _seen:
             _seen.add(_a)
-            authors.append(_a)
+            _disp = _display_alias(_a, cfg)
+            if _disp not in authors:
+                authors.append(_disp)
     has_next_day = any(str(_t).startswith("次日") for _r, _t, _a, _c in items)
     lines = ["频道：%s    日期：%s    当日消息 %d 条（**按时间顺序**，含少量上下文消息；"
              "🔥n 表示该条被表情回应 n 次，热度参考）"
@@ -2012,6 +2075,16 @@ def build_text_block(channel_name, day, items, extra_hint_items=None):
              "当日发言者名单（共 %d 人；引用人名时必须原样照抄，不得音译/缩写/改写大小写，"
              "名单外的名字不得作为发言者出现）：%s"
              % (len(authors), "、".join(authors))]
+    # 核心人物单列：其发言在输入里打 ★核心 标记，提示词据此强制进「重要人物观点」节。
+    key_present = []
+    for _r, _t, _a, _c in items:
+        if _a and _is_daily_key(_a, cfg):
+            _disp = _display_alias(_a, cfg)   # 核心人物名单也用指定显示名
+            if _disp not in key_present:
+                key_present.append(_disp)
+    lines.append("★核心人物（今天有发言，其每条实质发言都必须在「重要人物观点」节逐条提炼，"
+                 "严禁当普通群友过滤；原文已打 ★核心 标记）：%s"
+                 % ("、".join(key_present) if key_present else "今日无核心人物发言"))
     _hint = subnet_hint_block(items + list(extra_hint_items or []))
     if _hint:
         lines.append(_hint)
@@ -2032,7 +2105,9 @@ def build_text_block(channel_name, day, items, extra_hint_items=None):
                 lines.append("    ~~~~ 时间跳转：上一条与本条相隔约 %d 小时 %d 分，"
                              "两者无上下文关系，不得拼接 ~~~~"
                              % (_gap // 60, _gap % 60))
-        lines.append("%d. [%s] <%s>%s %s" % (i, t, author, hot, c1))
+        key_tag = "★核心 " if _is_daily_key(author, cfg) else ""
+        disp_author = _display_alias(author, cfg)   # 正文作者名也换成指定显示名
+        lines.append("%d. [%s] <%s>%s%s %s" % (i, t, disp_author, hot, key_tag, c1))
         prev_t = t
     return "\n".join(lines)
 
@@ -2567,7 +2642,7 @@ def generate_potential(cfg, day_str, items):
         save_potential(day_str, "")
         return ""
     try:
-        text_block = build_text_block(cfg.get("channel_name", "price-talk"), day_str, items)
+        text_block = build_text_block(cfg.get("channel_name", "price-talk"), day_str, items, cfg=cfg)
         block = call_deepseek(cfg, text_block, system_prompt=POTENTIAL_PROMPT)
         save_potential(day_str, block)
         log("潜力观察已单独生成并落盘（%s，不随日报推送）" % day_str)
@@ -3151,7 +3226,7 @@ def _build_full_text_block(cfg, channel_name, day_str, items):
     分开写容易只改一处、另一处悄悄少一层上下文。
     """
     ctx_block, ctx_items = build_context_block(cfg, day_str)
-    text_block = build_text_block(channel_name, day_str, items, extra_hint_items=ctx_items)
+    text_block = build_text_block(channel_name, day_str, items, extra_hint_items=ctx_items, cfg=cfg)
     if ctx_block:
         text_block += "\n\n" + ctx_block
     sn_block = build_subnet_context_block(cfg, items, day_str=day_str)
@@ -3167,7 +3242,8 @@ def _build_full_text_block(cfg, channel_name, day_str, items):
 def _audit_names(digest, items, tag=""):
     """人名保真核对：把日报「人物观点」里出现的名字与当日真实发言者名单比对。
     不在名单里的只写日志提示（不阻断推送、不改内容），便于人工复核是否被模型改写或编造。"""
-    authors = {a for _r, _t, a, _c in items if a}
+    # 用映射后的显示名核对（config.author_display_alias），否则 iuac/rrik 会被误报不在名单
+    authors = {_display_alias(a) for _r, _t, a, _c in items if a}
     if not authors:
         return
     # 1) 只在「重要人物观点」板块里按「- **名字**：」抓取，其他板块的加粗多为小标题

@@ -56,5 +56,23 @@
   "community_minute": 30,
   "dtt_email": "",
   "dtt_password": "",
-  "dtt_login_days": 90
+  "dtt_login_days": 90,
+  "daily_key_authors": [
+    "5GuRL",
+    "Fish | lium.io",
+    "orange",
+    "baobab"
+  ],
+  "community_key_authors": [
+    "const",
+    "5gurl",
+    "fish",
+    "orange1004"
+  ],
+  "author_display_alias": {
+    "5gurl": "iuac",
+    "orange": "rrik",
+    "orange1004": "rrik",
+    "baobab": "iuac"
+  }
 }

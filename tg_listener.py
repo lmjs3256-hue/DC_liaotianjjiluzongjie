@@ -113,6 +113,14 @@ HELP = (
     "   /模型 添加 <名> <base_url> <模型名> <key> 现场加平台（key会留聊天记录，注意）\n"
     "   /模型 删除 <名>    删除档案（不能删当前在用的）；/模型 当前 看当前\n"
     "   切换写盘即生效，下次日报/投研就是新模型，无需重启\n"
+    "📊 /gamma Gamma 情报汇总（taostats 链上数据，查询哪些子网开通/收支/谁付给谁）：\n"
+    "   /gamma（裸命令）    ← 两步：①选功能（开通子网列表/收支总览/周/月）\n"
+    "                        ②统计类再选「全网」或回复 SN 编号 →生成后推送\n"
+    "   /gamma 列表        直接列出已开通 Gamma 的子网（专门入口）\n"
+    "   /gamma 收支        当前累计收支总览（铸造/花费/未花/烧alpha）\n"
+    "   /gamma 周|月       北京时间自然周/月统计\n"
+    "   /gamma SN51        单子网明细；末尾加 nopush 只生成不推送\n"
+    "   说明：Gamma 是子网的美元服务信用，1Γ≈1美元；付款方是链上地址，不推断客户身份\n"
     "━━ 子网档案 / 投研 ━━\n"
     "（建档全自动：每次导出日报时自动把提到的子网存档，已建档的增量补充、\n"
     "  未建档的自动新建，无需手动操作）\n"
@@ -484,6 +492,7 @@ _KEYBOARD = {
         ["/投研 29", "/档案"],
         ["/社区今日", "/社区昨日"],
         ["/tg群今日", "/群消息"],
+        ["/gamma 列表", "/gamma"],
         ["/模型", "/watch 7"],
         ["/weekly", "/help"]
     ],
@@ -763,6 +772,185 @@ def _tgg_flow_consume(text, chat_id):
         _tgg_run(chat_id, gid, t)
         return True
     safe_send(chat_id, "请回复「昨日」或「今日」（也可写 2026-11-20 这样的日期）；发 /取消 退出。")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Gamma 情报汇总：分段式命令（照 TG 群日报两轮状态机模式）
+#   第 1 轮：功能菜单（开通子网列表 / 收支总览 / 周统计 / 月统计）
+#   第 2 轮：统计类再选范围（全网 / 指定 SN）；列表直接出结果。
+#   callback 前缀 gama: (功能) / gaday: (范围)，与 tggrp/tgday 隔离。
+# ---------------------------------------------------------------------------
+_GA_FLOW = {}          # chat_id -> {"step": "action"|"scope", "act":..., "ts":...}
+_GA_FLOW_TTL = 300
+
+
+def _ga_flow_clear(chat_id):
+    _GA_FLOW.pop(str(chat_id), None)
+
+
+def _ga_flow_active(chat_id):
+    st = _GA_FLOW.get(str(chat_id))
+    if not st:
+        return None
+    if time.time() - st.get("ts", 0) > _GA_FLOW_TTL:
+        _ga_flow_clear(chat_id)
+        return None
+    return st
+
+
+_GA_ACTS = [
+    ("list", "📋 开通子网列表"),
+    ("snapshot", "💰 当前收支总览"),
+    ("week", "📅 周统计"),
+    ("month", "🗓 月统计"),
+]
+_GA_ACT_LABEL = dict(_GA_ACTS)
+
+
+def _ga_action_keyboard():
+    rows = [[{"text": lab, "callback_data": "gama:" + k}] for k, lab in _GA_ACTS]
+    rows.append([{"text": "❌ 取消", "callback_data": "gama:cancel"}])
+    return {"inline_keyboard": rows}
+
+
+def _ga_scope_keyboard():
+    return {"inline_keyboard": [[
+        {"text": "🌐 全网", "callback_data": "gaday:all"},
+        {"text": "🔍 指定子网", "callback_data": "gaday:sn"},
+        {"text": "❌ 取消", "callback_data": "gaday:cancel"},
+    ]]}
+
+
+def _ga_prompt(chat_id):
+    """裸命令第 1 轮：抛功能菜单。"""
+    _GA_FLOW[str(chat_id)] = {"step": "action", "act": None, "ts": time.time()}
+    lines = ["📊 第 1 步：Gamma 情报要查什么？（点按钮，5 分钟内有效）："]
+    for i, (_, lab) in enumerate(_GA_ACTS, 1):
+        lines.append("  %d️⃣ %s" % (i, lab))
+    lines.append("  也可直接回复序号 1-4 或关键词（列表/收支/周/月）。")
+    safe_send(chat_id, "\n".join(lines), markup=_ga_action_keyboard())
+
+
+def _ga_ask_scope(chat_id, act):
+    """第 2 轮：统计类选全网/指定子网；列表类直接出结果。"""
+    if act == "list":
+        _ga_run(chat_id, "list", None)
+        return
+    _GA_FLOW[str(chat_id)] = {"step": "scope", "act": act, "ts": time.time()}
+    safe_send(chat_id,
+              "📊 第 2 步：【%s】请选择范围：点「全网」或「指定子网」，"
+              "也可回复 全网 / 具体 SN 编号（如 51）。" % _GA_ACT_LABEL.get(act, act),
+              markup=_ga_scope_keyboard())
+
+
+def _ga_run(chat_id, act, sn=None):
+    """真正触发 Gamma 查询。"""
+    _ga_flow_clear(chat_id)
+    act_txt = _GA_ACT_LABEL.get(act, act)
+    scope_txt = ("SN%s" % sn) if sn is not None else "全网"
+    send_async(chat_id,
+               "📊 收到，正在查询 Gamma【%s·%s】链上数据，生成完毕后推送（飞书 + TG）…"
+               % (act_txt, scope_txt))
+    args = ["gamma", act] + ([str(sn)] if sn is not None else [])
+    run_pipeline(args, chat_id, quiet=True)
+
+
+def _ga_callback(cq, chat_id, from_id, allowed_users):
+    """处理 Gamma 分段按钮回调。返回 True 表示已消费。"""
+    data = (cq.get("data") or "").strip()
+    if not (data.startswith("gama:") or data.startswith("gaday:")):
+        return False
+    cqid = cq.get("id") or ""
+
+    def _ack(text=""):
+        try:
+            p = {"callback_query_id": cqid}
+            if text:
+                p["text"] = text
+            _cfg = P._CFG or P.load_config()
+            tg_api(_cfg["telegram_bot_token"], "answerCallbackQuery", p, timeout=10)
+        except Exception as e:
+            log("answerCallbackQuery 失败（忽略）：%s" % e)
+
+    if allowed_users and from_id not in allowed_users:
+        _ack("无权限")
+        return True
+    val = data.split(":", 1)[1].strip()
+    if val == "cancel":
+        _ga_flow_clear(chat_id)
+        _ack("已取消")
+        safe_send(chat_id, "已取消 Gamma 查询。")
+        return True
+    active = _ga_flow_active(chat_id)
+    if not active:
+        _ack("已超时，请重发命令")
+        safe_send(chat_id, "⏱ Gamma 查询已超时（5 分钟），请重新发 /gamma 再选。")
+        return True
+
+    if data.startswith("gama:"):
+        if val not in _GA_ACT_LABEL:
+            _ack("无效选项")
+            return True
+        _ack("已选 %s" % _GA_ACT_LABEL[val])
+        _ga_ask_scope(chat_id, val)
+        return True
+
+    # 第 2 轮：范围
+    if active.get("step") != "scope":
+        _ack("请先选查询类型")
+        safe_send(chat_id, "请先选查询类型（点上一轮的功能按钮）。")
+        return True
+    act = active.get("act")
+    if val == "all":
+        _ack("正在查询全网")
+        _ga_run(chat_id, act, None)
+        return True
+    if val == "sn":
+        _ack("请回复 SN 编号")
+        safe_send(chat_id, "请直接回复要查询的子网编号（如 51），5 分钟内有效；发 /取消 退出。")
+        return True
+    _ack("无效选项")
+    return True
+
+
+def _ga_flow_consume(text, chat_id):
+    """Gamma 分段状态下消费文本回复。不在流程返回 False。"""
+    st = _ga_flow_active(chat_id)
+    if not st:
+        return False
+    t = (text or "").strip()
+    low = t.lstrip("/").lower().split("@")[0]
+    if low in ("取消", "cancel", "退出", "quit", "q"):
+        _ga_flow_clear(chat_id)
+        safe_send(chat_id, "已取消 Gamma 查询。")
+        return True
+    if t.startswith("/"):
+        _ga_flow_clear(chat_id)
+        return False
+
+    if st.get("step") == "action":
+        alias = {"1": "list", "列表": "list", "开通": "list",
+                 "2": "snapshot", "收支": "snapshot", "总览": "snapshot",
+                 "3": "week", "周": "week", "周统计": "week",
+                 "4": "month", "月": "month", "月统计": "month"}
+        act = alias.get(low)
+        if not act:
+            safe_send(chat_id, "请回复 1-4 或 列表/收支/周/月；发 /取消 退出。")
+            return True
+        _ga_ask_scope(chat_id, act)
+        return True
+
+    # 第 2 轮：范围
+    act = st.get("act")
+    if low in ("全网", "all", "全部", "1"):
+        _ga_run(chat_id, act, None)
+        return True
+    m = re.fullmatch(r"(?:sn)?(\d{1,4})", low)
+    if m:
+        _ga_run(chat_id, act, int(m.group(1)))
+        return True
+    safe_send(chat_id, "请回复「全网」或 SN 编号（如 51）；发 /取消 退出。")
     return True
 
 
@@ -1418,6 +1606,9 @@ def handle(text, chat_id):
     # 绝不能落到下面的「裸编号=投研」「ss58=地址补录」逻辑。
     if _tgg_flow_consume(text, chat_id):
         return
+    # Gamma 查询分段状态：期间回复的「1」「列表」「全网」「51」按 gamma 选项消费。
+    if _ga_flow_consume(text, chat_id):
+        return
     parts = text.split()
     # 群里发指令可能带 @机器人名（/digest@Dtao_ribao_bot），剥掉后缀再匹配
     cmd = parts[0].lstrip("/").lower().split("@")[0]
@@ -1498,6 +1689,42 @@ def handle(text, chat_id):
             preset = []
         send_async(chat_id, "💬 收到，正在生成 TG 群消息日报（4 个活跃群，严格相关筛选），稍等…")
         run_pipeline(["tg_group"] + preset + parts[1:], chat_id, quiet=True)
+    elif cmd in ("gamma", "gama", "伽马", "g情报"):
+        # Gamma 情报汇总（v1.28.0，taostats 链上数据）。
+        # 裸命令 → 分段菜单（功能 → 范围/子网）；带参数直通：
+        #   /gamma 列表     开通子网列表（专门入口）
+        #   /gamma 收支     当前收支总览
+        #   /gamma 周|月    自然周/月统计
+        #   /gamma SN51     单子网明细
+        #   末尾 nopush 只生成不推。
+        push_off = any(x.lower() in ("nopush", "--no-push") for x in parts[1:])
+        rest = [x for x in parts[1:] if x.lower() not in ("nopush", "--no-push")]
+        if not rest:
+            _ga_prompt(chat_id)
+            return
+        alias = {"列表": "list", "开通": "list", "list": "list", "子网": "list",
+                 "收支": "snapshot", "总览": "snapshot", "snapshot": "snapshot",
+                 "周": "week", "week": "week", "周统计": "week",
+                 "月": "month", "month": "month", "月统计": "month"}
+        act = None
+        sn = None
+        for x in rest:
+            low = x.lower()
+            if act is None and low in alias:
+                act = alias[low]
+            else:
+                m = re.fullmatch(r"(?:sn)?(\d{1,4})", low)
+                if m:
+                    sn = int(m.group(1))
+        if act is None:
+            act = "detail" if sn is not None else "list"
+        args = ["gamma", act] + ([str(sn)] if sn is not None else [])
+        if push_off:
+            args.append("nopush")
+        send_async(chat_id, "📊 收到，正在查询 Gamma 情报（%s）%s，稍等…"
+                   % (_GA_ACT_LABEL.get(act, "子网明细" if act == "detail" else act),
+                      "（只生成不推送）" if push_off else "（生成后推送飞书 + TG）"))
+        run_pipeline(args, chat_id, quiet=True)
     elif cmd in ("社区确认", "community_confirm", "确认冲突", "核实"):
         # 人工确认社区日报冲突，两种写法：
         #   ① 分步（推荐）：只发 /community_confirm → bot 依次问 SN、核实结论
@@ -1900,6 +2127,7 @@ def main():
                     log("收到按钮回调 chat=%s data=%s" % (cq_chat, cq.get("data")))
                     try:
                         _tgg_callback(cq, cq_chat, cq_from, allowed_users)
+                        _ga_callback(cq, cq_chat, cq_from, allowed_users)
                     except Exception as e:
                         log("处理按钮回调异常（已忽略）：%s" % e)
                     continue

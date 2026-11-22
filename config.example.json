@@ -81,5 +81,7 @@
     "orange": "rrik",
     "orange1004": "rrik",
     "baobab": "iuac"
-  }
+  },
+  "taostats_api_key": "PASTE_TAOSTATS_API_KEY",
+  "gamma_api_base": "https://api.taostats.io"
 }

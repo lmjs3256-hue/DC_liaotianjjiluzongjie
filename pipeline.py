@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.27.3"
+__version__ = "1.28.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -4010,7 +4010,7 @@ if __name__ == "__main__":
     ap.add_argument("-V", "--version", action="version",
                     version="DTAO price-talk pipeline v%s" % __version__)
     ap.add_argument("mode", nargs="?", default="daily",
-                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research", "wallet", "community", "community_confirm", "community_reconfirm", "tg_group"],
+                    choices=["daily", "weekly", "repush", "resummarize", "chat", "archive", "research", "wallet", "community", "community_confirm", "community_reconfirm", "tg_group", "gamma"],
                     help="daily=导出并推送（可跟日期，省略则前一天）；weekly=周报；"
                          "repush=仅补推已生成的日报（不重导/不重算）；"
                          "resummarize=按反馈重总结（日期 反馈内容 [tg|feishu]）；"
@@ -4021,7 +4021,8 @@ if __name__ == "__main__":
                          "community=Bittensor社区消息日报（dtt版）（[昨日|今日|日期] [nopush]，默认昨日；"
                          "取所选日00:00到当前，命令触发不定时；会话失效可用本地凭据自动续期）；"
                          "community_confirm=确认社区日报冲突（日期 SN编号 结论 [confirmed|refuted]）；"
-                         "community_reconfirm=按人工确认重推确认版（[日期] [nopush]）")
+                         "community_reconfirm=按人工确认重推确认版（[日期] [nopush]）；"
+                         "gamma=Gamma 情报汇总（[list|snapshot|week|month|detail] [SN] [nopush]，默认 list）")
     ap.add_argument("extra", nargs="*",
                     help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）；"
                          "resummarize: 日期 反馈内容 [tg|feishu]；chat: [日期] [天数] [tg|feishu]；"
@@ -4163,6 +4164,31 @@ if __name__ == "__main__":
             log("TG群日报完成：%s%s（群消息 %d 条，严格相关 %d 条，%d 个子网落档）"
                 % (day, scope, res.get("total", 0), st.get("related", 0),
                    res.get("archived_sn", 0)))
+        elif args.mode == "gamma":
+            # Gamma 情报汇总（taostats 链上数据）：开通子网列表/收支总览/周月统计/单子网明细。
+            # 用法：gamma [list|snapshot|week|month|detail] [SN] [nopush]
+            import gamma_intel as GI
+            cfg = load_config()
+            rest = [x for x in args.extra if x.lower() not in ("nopush", "--no-push")]
+            push = not any(x.lower() in ("nopush", "--no-push") for x in args.extra)
+            action = rest[0].lower() if rest else "list"
+            if action not in ("list", "snapshot", "week", "month", "detail"):
+                # 第一个参数不是已知动作时，当作 SN 编号 → 单子网明细
+                action, sn = "detail", action
+            else:
+                sn = None
+            if sn is None:
+                for x in rest[1:]:
+                    m = re.fullmatch(r"(?:sn)?(\d{1,4})", x, re.IGNORECASE)
+                    if m:
+                        sn = int(m.group(1))
+                        break
+            if action == "detail" and sn is None:
+                raise RuntimeError("gamma detail 需要指定 SN 编号，例如：python pipeline.py gamma detail 51")
+            res = GI.run_gamma(cfg, action, sn=sn, log=log, push=push)
+            log("Gamma 情报完成：%s（%s）" % (action, "成功" if res.get("ok") else res.get("error")))
+            if not res.get("ok"):
+                log("Gamma 查询失败明细：%s" % res.get("error"))
         elif args.mode == "community_confirm":
             # 人工确认社区日报的某条冲突：写入对应子网档案 community_digests[].confirm
             # 用法：community_confirm 日期 SN编号 结论 [confirmed|refuted]

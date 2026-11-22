@@ -8,11 +8,23 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.27.3** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.28.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.28.0 — 2026-11-22
+
+**新增 Gamma 情报汇总：命令查询开通子网/收支/付款流水，分段式交互**
+
+- **需求**：查目前哪些子网开通 Gamma、谁付给谁、收支情况，支持实时/周/月统计，TG 命令触发，分段式命令，另有专门的「开通子网列表」入口。
+- **机制先厘清**：Gamma 两种支付——① 客户钱包烧 alpha 铸 Gamma 买服务（钱包→子网，本次实现）；② 子网用 emission 买别家 Gamma（SN120→SN51 等，runtime v490/PR#3320）。按用户决策本次只做机制 1，机制 2 字段（`gamma_emission_shares`）已实测可取、预留不混算。
+- **数据源与实测**：taostats 官方 Gamma API 3 端点（subnets/activity/deposits）。实测发现文档没写的 `gamma_emission_shares`、`source_netuid`、`service`、`usd_value` 等字段；**必带 User-Agent**（无 UA 403）、直连超时走 7890 代理；key 存 `config.taostats_api_key`（gitignore、脱敏）。单位校验：gamma/alpha/tao 为 rao÷1e9、usd_value 已美元、share÷(2^64−1)；SN120→SN51=10%、SN3/SN97→SN51=5% 与社区日报吻合。
+- **实现**：新增 `gamma_intel.py`（取数/聚合/渲染，解读只用表内数字、代码模板生成不调 LLM 不编造）；`pipeline.py` mode `gamma`（list/snapshot/week/month/detail，版本→v1.28.0）；`tg_listener.py` 分段状态机 `_GA_FLOW`（照 TG 群日报模式：功能菜单→范围/子网两轮，callback 前缀 gama:/gaday:，文本兜底，5 分钟 TTL）+ 快捷命令 + HELP + 按钮栏；`config.example.json` 补 key 占位。收支按子网维度：铸造=收入侧/花费=支出侧/未花=余额，不混算。
+- **缺陷全盘排查修复**：① 端到端实测发现 snapshot「全网汇总」显示 0.00——`tot_mint` 已是 Γ 值又传给 `fmt_g`（双重 ÷1e9），改用 `format()` 并加回归锁死；② TG 命令 `nopush` 被过滤后漏传 pipeline，补透传；③ `global _CFG` 位置导致 SyntaxError，删除（run_gamma 内部已设 P._CFG）。
+- **验证**：`test_gamma_intel_v128.py` 20/20（换算/share/地址/聚合/周月边界/防双重换算）、`test_gamma_tg_v128.py` 18/18（分段/快捷/nopush/取消/超时/callback/权限）；py_compile 全过；旧回归全绿（时间线/台账/人名来源/生命周期/DC频道/TG群）；真实 key 端到端跑通 5 类报告；命令行 `gamma list/week/detail` 全成功。
+- **文档**：E 盘规则文档先升 v1.8（新数据源先更规则再改代码），README/CHANGELOG 同步。
 
 ## v1.27.3 — 2026-11-22
 

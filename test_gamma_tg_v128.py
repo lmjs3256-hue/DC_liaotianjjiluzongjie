@@ -110,6 +110,56 @@ T.handle("/gamma", CHAT)
 T._ga_callback({"id": "x", "data": "gama:list"}, CHAT, "bad", ["good"])
 ck(T._ga_flow_active(CHAT)["step"] == "action", "无权限callback不改状态")
 
+# --- v1.29.0 跨子网支付（机制2）命令覆盖 ---
+# 14) 菜单含跨子网按钮
+reset()
+T.handle("/gamma", CHAT)
+kb = str(_sent[-1][2])
+ck("gama:cross" in kb and "gama:crossweek" in kb and "gama:crossmonth" in kb,
+   "菜单含跨子网三项按钮")
+
+# 15) 文本「跨网」→ 第2轮 scope（跨子网也走范围选择）
+reset()
+T.handle("/gamma", CHAT)
+T.handle("跨网", CHAT)
+ck(T._ga_flow_active(CHAT)["step"] == "scope" and T._ga_flow_active(CHAT)["act"] == "cross",
+   "文本跨网→cross进scope")
+ck(any("源子网编号" in s[1] for s in _sent), "跨子网第2轮提示源子网编号")
+
+# 16) 跨网第2轮全网 → gamma cross
+reset()
+T.handle("/gamma", CHAT); T.handle("跨网", CHAT); T.handle("全网", CHAT)
+ck(len(_runs) == 1 and _runs[0][0] == ["gamma", "cross"], "跨网全网→gamma cross")
+
+# 17) 跨网第2轮指定源子网 → gamma cross + SN
+reset()
+T.handle("/gamma", CHAT); T.handle("跨网", CHAT); T.handle("120", CHAT)
+ck(len(_runs) == 1 and _runs[0][0] == ["gamma", "cross", "120"], "跨网指定SN→cross+120")
+
+# 18) 快捷 /gamma 跨网 直通
+reset()
+T.handle("/gamma 跨网", CHAT)
+ck(len(_runs) == 1 and _runs[0][0] == ["gamma", "cross"], "快捷跨网直通")
+ck(not T._ga_flow_active(CHAT), "跨网快捷不进分段")
+
+# 19) 快捷 /gamma 跨网周 / 跨网月
+reset(); T.handle("/gamma 跨网周", CHAT)
+ck(len(_runs) == 1 and _runs[0][0][:2] == ["gamma", "crossweek"], "快捷跨网周直通")
+reset(); T.handle("/gamma 跨网月", CHAT)
+ck(len(_runs) == 1 and _runs[0][0][:2] == ["gamma", "crossmonth"], "快捷跨网月直通")
+
+# 20) 快捷 /gamma 跨网 SN120 + nopush
+reset(); T.handle("/gamma 跨网 SN120 nopush", CHAT)
+ck(len(_runs) == 1 and _runs[0][0][:3] == ["gamma", "cross", "120"]
+   and "nopush" in _runs[0][0], "跨网SN+nopush透传")
+
+# 21) callback 选跨子网功能
+reset()
+T.handle("/gamma", CHAT)
+T._ga_callback({"id": "x", "data": "gama:crossweek"}, CHAT, "u1", [])
+ck(T._ga_flow_active(CHAT) and T._ga_flow_active(CHAT)["act"] == "crossweek",
+   "callback选跨网周进scope")
+
 print("PASS %d / FAIL %d" % (len(PASS), len(FAIL)))
 for n in FAIL:
     print("  FAIL:", n)

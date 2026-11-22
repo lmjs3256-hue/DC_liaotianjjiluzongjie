@@ -8,9 +8,22 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.28.0** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.29.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.29.0 — 2026-11-22
+
+**新增 Gamma 机制2 跨子网支付查询（子网用 emission 买别家 Gamma），两机制分列不混算**
+
+- **需求**：把 v1.28.0 预留的「跨子网支付」继续做完——子网 owner 把本子网 emission 换成目标子网 Gamma（SN120→SN51 等，runtime v490/PR#3320），要能查配置比例、实际流水、收支与周/月统计，同样 TG 命令触发、分段式。
+- **数据源实测**：发现 `/gamma/activity?type=emission_mint` 是机制2 的真实流水端点（79 笔，11-20 起），字段 `source_netuid`(源)→`netuid`(目标)、`gamma`(铸造目标Γ)、`alpha_sold`(卖出源α)、`usd_value`、`coldkey/hotkey`、`block_number/timestamp`；配合 `/gamma/subnets` 的 `gamma_emission_shares` 配置比例（u64÷(2^64−1)）。**配置=承诺上限、流水=实际兑换额，分列展示**；机制1/机制2 绝不混算。
+- **实现**：`gamma_intel.py` 新增 `fetch_emission_mint`/`emission_share_config`/`agg_emission` + `report_cross`（总览）/`report_cross_period`（周月）/`report_cross_detail`（指定源子网）；pipeline action `cross/crossweek/crossmonth`（版本→v1.29.0）；`tg_listener.py` 分段菜单扩到 7 项 + 快捷 `/gamma 跨网|跨网周|跨网月|跨网 SN120` + HELP/键盘。
+- **口径**：按源→目标聚合 Γ/美元/卖出α/笔数/最近时间；周月用 timestamp 服务端过滤（北京时间自然周期）。实测 SN120→SN51 累计 $7,867.32、SN3→SN51 $1,670.16、SN97→SN51 $661.40，方向全指向 SN51。解读只用表内数字，不推断动机、不给投资建议。
+- **质量**：全盘修复 3 个缺陷（跨子网流水表未并入报告、指定源子网时合计仍用全网数、`cross`+SN 未转明细）；新测试 `test_gamma_cross_v129.py` 23/23、`test_gamma_tg_v128.py` 扩到 29/29，全量旧回归全绿，真实 key 端到端跑通全部跨网模式。E 盘规则文档先升 v1.9。
+- **命令清单**：见 README「Gamma 情报汇总」段或 TG 发 `/help`。
 
 ---
 

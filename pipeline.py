@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.28.0"
+__version__ = "1.29.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -4022,7 +4022,7 @@ if __name__ == "__main__":
                          "取所选日00:00到当前，命令触发不定时；会话失效可用本地凭据自动续期）；"
                          "community_confirm=确认社区日报冲突（日期 SN编号 结论 [confirmed|refuted]）；"
                          "community_reconfirm=按人工确认重推确认版（[日期] [nopush]）；"
-                         "gamma=Gamma 情报汇总（[list|snapshot|week|month|detail] [SN] [nopush]，默认 list）")
+                         "gamma=Gamma 情报汇总（[list|snapshot|week|month|detail|cross|crossweek|crossmonth] [SN] [nopush]，默认 list；cross*=机制2跨子网支付）")
     ap.add_argument("extra", nargs="*",
                     help="daily: 一个或多个日期 YYYY-MM-DD；repush: 日期 [tg|feishu]（省略则双推）；"
                          "resummarize: 日期 反馈内容 [tg|feishu]；chat: [日期] [天数] [tg|feishu]；"
@@ -4165,14 +4165,17 @@ if __name__ == "__main__":
                 % (day, scope, res.get("total", 0), st.get("related", 0),
                    res.get("archived_sn", 0)))
         elif args.mode == "gamma":
-            # Gamma 情报汇总（taostats 链上数据）：开通子网列表/收支总览/周月统计/单子网明细。
-            # 用法：gamma [list|snapshot|week|month|detail] [SN] [nopush]
+            # Gamma 情报汇总（taostats 链上数据）。
+            # 机制1：list/snapshot/week/month/detail；机制2：cross/crossweek/crossmonth。
+            # 用法：gamma [list|snapshot|week|month|detail|cross|crossweek|crossmonth] [SN] [nopush]
             import gamma_intel as GI
             cfg = load_config()
             rest = [x for x in args.extra if x.lower() not in ("nopush", "--no-push")]
             push = not any(x.lower() in ("nopush", "--no-push") for x in args.extra)
             action = rest[0].lower() if rest else "list"
-            if action not in ("list", "snapshot", "week", "month", "detail"):
+            known = ("list", "snapshot", "week", "month", "detail",
+                     "cross", "crossweek", "crossmonth", "crossdetail")
+            if action not in known:
                 # 第一个参数不是已知动作时，当作 SN 编号 → 单子网明细
                 action, sn = "detail", action
             else:
@@ -4185,6 +4188,8 @@ if __name__ == "__main__":
                         break
             if action == "detail" and sn is None:
                 raise RuntimeError("gamma detail 需要指定 SN 编号，例如：python pipeline.py gamma detail 51")
+            if action == "crossdetail" and sn is None:
+                raise RuntimeError("gamma crossdetail 需要指定源子网 SN 编号，例如：python pipeline.py gamma crossdetail 120")
             res = GI.run_gamma(cfg, action, sn=sn, log=log, push=push)
             log("Gamma 情报完成：%s（%s）" % (action, "成功" if res.get("ok") else res.get("error")))
             if not res.get("ok"):

@@ -113,14 +113,19 @@ HELP = (
     "   /模型 添加 <名> <base_url> <模型名> <key> 现场加平台（key会留聊天记录，注意）\n"
     "   /模型 删除 <名>    删除档案（不能删当前在用的）；/模型 当前 看当前\n"
     "   切换写盘即生效，下次日报/投研就是新模型，无需重启\n"
-    "📊 /gamma Gamma 情报汇总（taostats 链上数据，查询哪些子网开通/收支/谁付给谁）：\n"
-    "   /gamma（裸命令）    ← 两步：①选功能（开通子网列表/收支总览/周/月）\n"
-    "                        ②统计类再选「全网」或回复 SN 编号 →生成后推送\n"
-    "   /gamma 列表        直接列出已开通 Gamma 的子网（专门入口）\n"
-    "   /gamma 收支        当前累计收支总览（铸造/花费/未花/烧alpha）\n"
+    "📊 /gamma Gamma 情报汇总（taostats 链上数据，两条线分列、不混算）：\n"
+    "   /gamma（裸命令）    ← 分步菜单（7 项：列表/收支/周/月/跨网三类）\n"
+    "   ── 机制1：钱包 → 子网 ──\n"
+    "   /gamma 列表        已开通 Gamma 的子网（专门入口）\n"
+    "   /gamma 收支        当前累计收支（铸造/花费/未花/烧alpha）\n"
     "   /gamma 周|月       北京时间自然周/月统计\n"
-    "   /gamma SN51        单子网明细；末尾加 nopush 只生成不推送\n"
-    "   说明：Gamma 是子网的美元服务信用，1Γ≈1美元；付款方是链上地址，不推断客户身份\n"
+    "   /gamma SN51        单子网明细\n"
+    "   ── 机制2：源子网 emission → 目标子网 ──\n"
+    "   /gamma 跨网        跨子网支付总览（配置比例 + 实际流水）\n"
+    "   /gamma 跨网周|跨网月  跨子网自然周/月统计\n"
+    "   /gamma 跨网 SN120  指定源子网明细（也可 /gamma 跨网周 SN120）\n"
+    "   末尾加 nopush 只生成不推送。Gamma=子网美元服务信用，1Γ≈1美元；\n"
+    "   跨网是子网间买服务、非转账；钱包/子网均为链上标识，不推断身份\n"
     "━━ 子网档案 / 投研 ━━\n"
     "（建档全自动：每次导出日报时自动把提到的子网存档，已建档的增量补充、\n"
     "  未建档的自动新建，无需手动操作）\n"
@@ -492,7 +497,7 @@ _KEYBOARD = {
         ["/投研 29", "/档案"],
         ["/社区今日", "/社区昨日"],
         ["/tg群今日", "/群消息"],
-        ["/gamma 列表", "/gamma"],
+        ["/gamma 列表", "/gamma 跨网"],
         ["/模型", "/watch 7"],
         ["/weekly", "/help"]
     ],
@@ -804,6 +809,9 @@ _GA_ACTS = [
     ("snapshot", "💰 当前收支总览"),
     ("week", "📅 周统计"),
     ("month", "🗓 月统计"),
+    ("cross", "🔁 跨子网支付"),
+    ("crossweek", "📆 跨子网周统计"),
+    ("crossmonth", "🗓 跨子网月统计"),
 ]
 _GA_ACT_LABEL = dict(_GA_ACTS)
 
@@ -828,7 +836,7 @@ def _ga_prompt(chat_id):
     lines = ["📊 第 1 步：Gamma 情报要查什么？（点按钮，5 分钟内有效）："]
     for i, (_, lab) in enumerate(_GA_ACTS, 1):
         lines.append("  %d️⃣ %s" % (i, lab))
-    lines.append("  也可直接回复序号 1-4 或关键词（列表/收支/周/月）。")
+    lines.append("  也可直接回复序号 1-7 或关键词（列表/收支/周/月/跨网/跨网周/跨网月）。")
     safe_send(chat_id, "\n".join(lines), markup=_ga_action_keyboard())
 
 
@@ -838,9 +846,12 @@ def _ga_ask_scope(chat_id, act):
         _ga_run(chat_id, "list", None)
         return
     _GA_FLOW[str(chat_id)] = {"step": "scope", "act": act, "ts": time.time()}
+    is_cross = str(act).startswith("cross")
+    who = "源子网编号" if is_cross else "SN 编号"
     safe_send(chat_id,
               "📊 第 2 步：【%s】请选择范围：点「全网」或「指定子网」，"
-              "也可回复 全网 / 具体 SN 编号（如 51）。" % _GA_ACT_LABEL.get(act, act),
+              "也可回复 全网 / 具体 %s（如 51）。" % (
+                  _GA_ACT_LABEL.get(act, act), who),
               markup=_ga_scope_keyboard())
 
 
@@ -933,10 +944,13 @@ def _ga_flow_consume(text, chat_id):
         alias = {"1": "list", "列表": "list", "开通": "list",
                  "2": "snapshot", "收支": "snapshot", "总览": "snapshot",
                  "3": "week", "周": "week", "周统计": "week",
-                 "4": "month", "月": "month", "月统计": "month"}
+                 "4": "month", "月": "month", "月统计": "month",
+                 "5": "cross", "跨网": "cross", "跨子网": "cross", "跨子网支付": "cross",
+                 "6": "crossweek", "跨网周": "crossweek", "跨子网周": "crossweek",
+                 "7": "crossmonth", "跨网月": "crossmonth", "跨子网月": "crossmonth"}
         act = alias.get(low)
         if not act:
-            safe_send(chat_id, "请回复 1-4 或 列表/收支/周/月；发 /取消 退出。")
+            safe_send(chat_id, "请回复 1-7 或 列表/收支/周/月/跨网；发 /取消 退出。")
             return True
         _ga_ask_scope(chat_id, act)
         return True
@@ -1694,9 +1708,11 @@ def handle(text, chat_id):
         # 裸命令 → 分段菜单（功能 → 范围/子网）；带参数直通：
         #   /gamma 列表     开通子网列表（专门入口）
         #   /gamma 收支     当前收支总览
-        #   /gamma 周|月    自然周/月统计
-        #   /gamma SN51     单子网明细
-        #   末尾 nopush 只生成不推。
+        #   /gamma 周|月    北京时间自然周/月统计（机制1 钱包→子网）
+        #   /gamma SN51     单子网明细（机制1）
+        #   /gamma 跨网      跨子网支付总览（机制2 源子网 emission→目标子网）
+        #   /gamma 跨网周|跨网月  跨子网自然周/月统计
+        #   /gamma 跨网 SN120    指定源子网明细；末尾 nopush 只生成不推。
         push_off = any(x.lower() in ("nopush", "--no-push") for x in parts[1:])
         rest = [x for x in parts[1:] if x.lower() not in ("nopush", "--no-push")]
         if not rest:
@@ -1705,7 +1721,10 @@ def handle(text, chat_id):
         alias = {"列表": "list", "开通": "list", "list": "list", "子网": "list",
                  "收支": "snapshot", "总览": "snapshot", "snapshot": "snapshot",
                  "周": "week", "week": "week", "周统计": "week",
-                 "月": "month", "month": "month", "月统计": "month"}
+                 "月": "month", "month": "month", "月统计": "month",
+                 "跨网": "cross", "跨子网": "cross", "cross": "cross", "跨子网支付": "cross",
+                 "跨网周": "crossweek", "跨子网周": "crossweek", "crossweek": "crossweek",
+                 "跨网月": "crossmonth", "跨子网月": "crossmonth", "crossmonth": "crossmonth"}
         act = None
         sn = None
         for x in rest:

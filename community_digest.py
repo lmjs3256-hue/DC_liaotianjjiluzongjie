@@ -131,6 +131,25 @@ def _relevance(e, cfg=None):
     return score
 
 
+def _is_bt_related(e, cfg=None):
+    """二值判断：这条消息是否「有动态且与 Bittensor 子网相关」（人物齐全的准入条件）。
+
+    注意不能用 `_relevance() < 0` 代替——那是**排序分**，带「英文长文/RT 腔调」惩罚，
+    实测会把 141 条带 SN 归属的明确相关消息（如「@NiomeAI is expanding sn55…」）误杀。
+    这里的口径按用户 v1.22.8 定义，宽松得多，命中任一即算相关：
+      1. dtt 已标注 SN 归属（关键词监控本身就命中了子网）；
+      2. 内容含 Bittensor/子网 关键词或 SN 编号；
+      3. 发言人是关键人物（const/fish/5gurl 等，其动态一律算相关）；
+      4. 内容含中文（中文频道几乎都是 Bittensor 圈内讨论）。
+    只有以上都不满足（既无 SN 归属、又无 BT 词、纯英文垃圾/无关推文）才剔除。
+    """
+    if e.get("sn"):
+        return True
+    c = (e.get("content") or "").strip()
+    return bool(_BT_KW.search(c) or _SN_TAG.search(c) or _CN_RE.search(c)
+                or _key_author_hit(e, cfg))
+
+
 def extract_conflicts(digest):
     """把正文里散落的「待人工确认」条目抽出来，集中成独立板块。
 
@@ -164,25 +183,54 @@ def strip_name_dump(digest, log=print):
     """
     if not digest:
         return digest
-    kept, dropped = [], []
+    kept, dropped, condensed = [], [], 0
+
+    def _name_parts(text):
+        return [p.strip() for p in re.split(r"[、,，]", text) if p.strip()]
+
+    def _is_dump(parts):
+        return len(parts) >= 8 and sum(1 for p in parts if len(p) <= 20) >= len(parts) * 0.8
+
     for ln in digest.splitlines():
         s = ln.strip()
-        # 只看「- **」开头到第一个 **： 或闭合 ** 之间的名字段。
-        # 注意垃圾串常被字数上限截断、末尾没有闭合 **，故不能用 (.+?)\*\* 强匹配。
+        # 情形①：「- **A、B、C…**」 或 「- A、B、C…」——整行就是人名串，直接删。
+        # 只看开头到第一个 **： 或闭合 ** 之间的名字段；垃圾串常被字数截断、末尾无闭合 **。
         if s.startswith("- **"):
             head = s[3:]
-            # 名字段 = 到「**：」（人名:观点）或到闭合「**」或到行尾
             ends = [p for p in (head.find("**："), head.find("**")) if p >= 0]
             name_field = head[:min(ends)] if ends else head
-            parts = [p.strip() for p in re.split(r"[、,，]", name_field) if p.strip()]
-            # 名字段被切成 >=8 个短名字 → 堆砌串（正常人物行的名字段只有 1 个人名）
-            if len(parts) >= 8 and sum(1 for p in parts if len(p) <= 20) >= len(parts) * 0.8:
+            parts = _name_parts(name_field)
+            if _is_dump(parts):
                 dropped.append((len(parts), len(s)))
                 continue
+        elif s.startswith("- "):
+            parts = _name_parts(s[2:])
+            if _is_dump(parts):
+                dropped.append((len(parts), len(s)))
+                continue
+        # 情形②：「另有 **A、B、C…** 等：多为转推…」——归并说明里夹带超长人名列表。
+        # 保留说明文字，把人名列表换成「数十位」这类数量表述。
+        m = re.match(r"^(另有|其余)\s*\*\*(.+?)\*\*\s*(等.*)?$", s)
+        if m and _is_dump(_name_parts(m.group(2))):
+            n = len(_name_parts(m.group(2)))
+            tail = (m.group(3) or "").strip()
+            qty = "数十位" if n >= 40 else "十余位" if n >= 12 else "%d 位" % n
+            kept.append("%s %s%s" % (m.group(1), qty, (" " + tail) if tail else ""))
+            condensed += 1
+            continue
+        # 情形③：无加粗的「另有 A、B、C… 等：…」——同样压缩
+        m2 = re.match(r"^(另有|其余)\s+(.+?)\s*等[：:，,]", s)
+        if m2 and _is_dump(_name_parts(m2.group(2))):
+            n = len(_name_parts(m2.group(2)))
+            qty = "数十位" if n >= 40 else "十余位" if n >= 12 else "%d 位" % n
+            rest = s[m2.end():]
+            kept.append("%s %s等：%s" % (m2.group(1), qty, rest))
+            condensed += 1
+            continue
         kept.append(ln)
-    if dropped:
-        log("社区日报：清理 %d 处人名堆砌串（共 %d 个名字）"
-            % (len(dropped), sum(n for n, _ in dropped)))
+    if dropped or condensed:
+        log("社区日报：清理 %d 处人名堆砌串（共 %d 个名字），压缩 %d 处归并说明"
+            % (len(dropped), sum(n for n, _ in dropped), condensed))
         return "\n".join(kept)
     return digest
 
@@ -292,12 +340,16 @@ COMMUNITY_SYSTEM_PROMPT = (
     "- 只关注与 Bittensor 子网、代币机制、团队动态、上线/合作/催化相关的实质内容；"
     "纯水聊、无关转发、纯表情、与 Bittensor 无关的话题一般不列；"
     "**但关键人物（如创始人 const）的推文、转推、回复一律保留，不得当成无关转发删掉**。\n"
-    "- **禁止删人，但禁止「人名串」**：输入末尾「当日全部人物与消息」里的发言人，"
-    "**有实质观点/内容的逐个点名**（项目进展、看法、数据、质疑、决定等，内容太少就写「仅发言：…」）；"
-    "**纯表情、纯附和（GM/👌/收到）、项目官方账号与机器人的例行播报**可用一句归并说明带过"
-    "（如「另有 N 位发言人仅表情/附和/例行播报，观点有限」），**不需要逐个列出**。\n"
-    "- **绝对禁止把多个人名用顿号串成一行**（如「- **A、B、C、D…**」）：那不是观点、没有信息量，"
-    "还会混入项目名并被截断。宁可写一句归并说明，也不许堆人名串。\n"
+    "- **「齐全」的前提 = 当天有动态（发推/转推/评论/回复）且与 Bittensor 子网相关**。"
+    "满足这个前提的发言人，输入末尾「当日全部人物与消息」已为你筛好并逐个列出，"
+    "**必须全部点名**（有观点写观点，只有一句话就写「仅发言：…」），不许以「普通群友」为由省略。\n"
+    "- **不满足前提的不算「人」，不进人物节**：纯表情、纯附和（GM/👌/收到）、"
+    "纯转推无观点、与 Bittensor 无关的误抓内容（八卦/闲聊/ AI 泛谈）、项目官方账号与机器人的例行播报，"
+    "这些已在输入里剔除。若确实要收尾说明，**只报数量、绝不列举人名**"
+    "（正确：「另有数十位仅表情/附和/例行播报，不逐条列出」；错误：「另有 Infinite、Carbon、Almanac… 等」）。\n"
+    "- **绝对禁止在人物节堆人名串**（「- **A、B、C…**」或「另有 A、B、C… 等」都算）："
+    "无论加粗还是归并说明里，都不许把一串人名用顿号列出——那不是观点、没有信息量，"
+    "还会混入项目名并被截断。归并说明只能写数量，一个具体人名都不列。\n"
     "\n"
     "【输出结构（严格按顺序，标题一律 **加粗**；无内容的小节整节省略，不硬凑）】\n"
     "**🔥 社区热点**（当天跨平台被反复提及、或明显重要的事件，3-6 条；"
@@ -311,7 +363,8 @@ COMMUNITY_SYSTEM_PROMPT = (
     "**const 必须单列**：只写他当天与本子网相关的发言/转推/回复，"
     "每条提炼成一句「const 转推 @谁：内容要点」「const 回复 @谁：内容要点」"
     "「const 表示：内容要点」，写清对象与他说了什么，不贴原始链接、不照抄全文；"
-    "与 subnet 无关的日常发言不列。其他人一律列人名+消息要点，不做重要性筛选；确实无人发言才写「无」）\n"
+    "与 subnet 无关的日常发言不列。其他满足「有动态且跟 Bittensor 相关」的人一律列人名+消息要点，"
+    "不做重要性筛选；确实无人发言才写「无」）\n"
     "　用户名写法：输入里 `<>` 内已是规范显示名（备注名优先，如 `const`、`p383`），**直接用、不要改**；"
     "若遇到 `名字_四位数字`（如 `p383_54249`）去掉 `_数字` 后缀写成 `p383`，"
     "遇到 `名字@handle` 只取 `名字`，遇到 `备注:xxx` 只取 `xxx`；"
@@ -339,7 +392,7 @@ COMMUNITY_SYSTEM_PROMPT = (
     "- 关键主体 **加粗**：人物、**SN编号/子网名**、代币、事件、关键数字。\n"
     "- emoji 标程度：🔥 热点、✅ 落地、⚠️ 风险/待确认、📌 关注、❌ 利空。\n"
     "- 每条单独成行用 - 项目符号，小节间空行，适合手机端；不用 # 标题、不用 > 引用。\n"
-    "- **字数上限 3000 字**（含标点），优先保证有实质观点的人物与 const 消息齐全；"
+    "- **字数上限 3000 字**（含标点），优先保证「有动态且与 Bittensor 相关」的人物与 const 消息齐全；"
     "人太多写不下时用归并说明收尾，**不许为凑齐人名把名字串成一行、也不许截半个人名**。"
     "只有上限没有下限：消息少就少写，简洁+信息全=合格。\n"
     "- 禁止废话：不写「此外」「总体来看」「可以看出」「值得一提的是」这类填充词；"
@@ -560,19 +613,37 @@ def build_input(payload, cfg=None):
                      % "、".join("@" + x for x in key_names))
         lines.extend(key_lines)
 
-    # 当日全部人物 + 消息：不做重要性筛选，人名和原文都给模型，
-    # 由日报「人物与观点」节逐个点名。用户后续可针对具体人物再要求优化。
-    all_lines, _seen_all = [], set()
-    for e in sorted(events, key=lambda x: x.get("occurredAt") or 0, reverse=True):
-        k = (e.get("author"), (e.get("content") or "")[:80])
-        if k in _seen_all:
-            continue
-        _seen_all.add(k)
-        all_lines.append("- <%s> %s" % (_clean(_display_author(e.get("author"), cfg), 40),
-                                         _clean(e.get("content"))))
+    # 当日全部人物 + 消息：这里是「人物节必须齐全」的清单。用户口径（v1.22.8）：
+    #   **齐全 = 当天有动态（发推/转推/评论/回复）且内容与 Bittensor 子网相关**。
+    # 纯表情/附和、与 Bittensor 无关的误抓消息不算「动态」，不进这个清单——否则
+    # 268 个发言人塞不下，模型就把名字串成一行凑数（v1.22.7 踩过的坑）。
+    # 用 _relevance >= 0 做二次过滤（关键人物 const/fish 等豁免保留）。
+    # 「齐全」是**人**齐全，不是每条消息都列：同一发言人多条时只留最有信息量的几条，
+    # 否则 208 个作者 × 多条 = 733 条全塞进去，输入近万字、输出 5000 token 触顶被截断
+    # （11-21 实测连「一句话总结」都丢了）。关键人物可多留，普通人每人至多 2 条。
+    _related = [e for e in events if _is_bt_related(e, cfg)]
+    _skipped = len(events) - len(_related)
+    by_author = {}
+    for e in _related:
+        by_author.setdefault(_display_author(e.get("author"), cfg), []).append(e)
+    all_lines, _n_people = [], 0
+    for author, es in by_author.items():
+        _n_people += 1
+        # 每人按 _relevance 降序（信息量高优先）、同分按时间新优先，只留代表性发言。
+        # 输入要紧凑：普通人 1 条、关键人物最多 3 条，每条压到 120 字符——
+        # 208 人全出现即可（"齐全"=人齐），不必把每人所有发言堆进输入撑爆上下文。
+        es.sort(key=lambda x: (-_relevance(x, cfg), -(x.get("occurredAt") or 0)))
+        cap = 3 if any(_key_author_hit(x, cfg) for x in es) else 1
+        for e in es[:cap]:
+            all_lines.append("- <%s> %s" % (_clean(author, 30), _clean(e.get("content"), 120)))
     if all_lines:
-        lines.append("\n===== 当日全部人物与消息（人名+原文，共 %d 条；有实质内容者人物节逐个点名，"
-                     "纯表情/附和/项目号例行播报可归并说明，禁止堆人名串）=====" % len(all_lines))
+        lines.append("\n===== 当日全部人物与消息（%d 位发言人，%d 条代表发言；"
+                     "已剔除 %d 条与 Bittensor 无关的噪声）=====\n"
+                     "以下每位都是「当天有动态且与 Bittensor 子网相关」的发言人，"
+                     "每人已留其最有信息量的发言（关键人物多留），人物节须逐个点名这 %d 位；"
+                     "禁止把人名串成一行。"
+                     % (_n_people, len([l for l in all_lines if l.startswith("- <")]),
+                        _skipped, _n_people))
         lines.extend(all_lines)
 
     # 附历史档案/投研参考块（复用 v1.17.0 的交叉核对能力）
@@ -621,7 +692,12 @@ def run_community_day(cfg, day_str, log=print, push=True):
     # 2) 构建输入并生成
     text_block, sns, sn_excerpts = build_input(payload, cfg)
     log("社区日报：按 SN 分组完成（覆盖 %d 个子网），调用 AI 生成…" % len(sns))
-    digest = P.call_llm(cfg, text_block, system_prompt=COMMUNITY_SYSTEM_PROMPT)
+    # 社区日报要逐个点名所有相关发言人，输出天然比 DC 日报长；用全局默认 max_tokens
+    # （本地 5000）会被截断、连「一句话总结」都丢掉。这里只给社区日报临时提高上限，
+    # 不动全局配置（用 cfg 副本，避免污染其它任务）。
+    gen_cfg = dict(cfg)
+    gen_cfg["deepseek_max_tokens"] = max(int(cfg.get("deepseek_max_tokens", 2500) or 2500), 8000)
+    digest = P.call_llm(gen_cfg, text_block, system_prompt=COMMUNITY_SYSTEM_PROMPT)
     # 注意：这里**不调用** polish_digest / compress_digest —— 那两个函数内置 DC 日报的
     # 「必读重点/人物观点/其他细节」板块规范化，会把社区日报的「社区热点/子网动态」改写掉。
     # 社区日报用自己的提示词控结构，只做基础清洗。

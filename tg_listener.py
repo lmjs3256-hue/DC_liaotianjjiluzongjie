@@ -672,7 +672,10 @@ def _tgg_callback(cq, chat_id, from_id, allowed_users):
             p = {"callback_query_id": cqid}
             if text:
                 p["text"] = text
-            tg_api(P._CFG["telegram_bot_token"], "answerCallbackQuery", p, timeout=10)
+            # 回调可能比主流程的配置装载更早到达；P._CFG 为 None 时必须兜底读盘，
+            # 否则按钮会一直转圈并刷「'NoneType' object is not subscriptable」。
+            _cfg = P._CFG or P.load_config()
+            tg_api(_cfg["telegram_bot_token"], "answerCallbackQuery", p, timeout=10)
         except Exception as e:
             log("answerCallbackQuery 失败（忽略）：%s" % e)
 
@@ -1265,6 +1268,12 @@ def _start_research(sn_arg, days_n, chat_id, feedback=""):
     cfg = P._CFG or P.load_config()
     sn = SA.resolve_sn(sn_arg, cfg)
     if sn is None:
+        # 区分「认不出」和「已注销」：后者是知识库里的合法历史编号，只是旧档已封存
+        m = re.match(r"(?i)^(?:sn|subnet)?\s*#?\s*(\d{1,3})$", (sn_arg or "").strip())
+        if m and SA.is_retired_sn(int(m.group(1))):
+            safe_send(chat_id, "⛔ SN%d 已注销，旧档案已归档，不再用于投研；"
+                              "若同号重新注册，会自动新建档案。" % int(m.group(1)))
+            return
         safe_send(chat_id, "❌ 认不出子网：%s\n"
                       "可以直接写编号：/投研 29\n"
                       "也可以发 /档案 看全部已建档子网（含编号）。" % sn_arg)
@@ -1563,6 +1572,16 @@ def handle(text, chat_id):
                 return
             arc = SA.load_archive(arc_dir, sn)
             if not arc:
+                retired = SA.retired_archive_info(arc_dir, sn)
+                if retired:
+                    ra = retired["archive"] or {}
+                    safe_send(chat_id,
+                              "⛔ **SN%d %s** 已注销（%s），旧档案已归档：\n`%s`\n"
+                              "不再用于投研/事件报告；同号重新注册后会自动新建档案。"
+                              % (sn, ra.get("name") or "",
+                                 ra.get("deregistered_on") or "日期未记录",
+                                 retired["path"]))
+                    return
                 safe_send(chat_id, "SN%d 还没有档案。建档是自动的——跑一次 /digest 就会把它建起来；"
                               "也可以直接发 /投研 %d 出报告，报告会自动新建档案。" % (sn, sn))
                 return

@@ -753,6 +753,9 @@ def run_community_day(cfg, day_str, log=print, push=True):
             if not ex:
                 continue
             try:
+                if SA.is_retired_sn(sn):
+                    log("社区日报落档 SN%d 跳过（已注销归档）" % sn)
+                    continue
                 SA.attach_community_digest(
                     cfg, day_str, sn, ex["excerpt"],
                     platforms=ex.get("platforms"), source_file=rel_dp, log=log)

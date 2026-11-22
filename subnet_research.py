@@ -2841,6 +2841,10 @@ _RESEARCH_PROMPT_TMPL = (
     "禁止照抄整段原文、禁止只写「重要人物发过言」；与本子网无关的发言不写。\n"
     "- 本节不计入时间线事件条数；若与档案里的历史社区线索重复，以本节的当日消息为准，"
     "历史线索只在有新增信息时补一句。\n"
+    "- **若输入里另有【本子网频道近两日讨论】段**：那是按本子网关键词组从 DC 频道精确抓取的"
+    "直接讨论，作为「频道讨论补充」写进「📢 当日社区动态」节末尾的子块，每条标 `[DC频道]` + "
+    "`⚠️未验证`；与全网抓取重复的不必再抄一遍，但**新观点/数字/对象必须写**。"
+    "频道说法与链上/数据站冲突时并列写、不二选一。\n"
     "\n**📌 预期跟踪**（先逐条结清上次的，再写本次新增的；合计 4-7 条）\n"
     "**若输入里有【上次跟踪事项（逐条回答）】段，必须先逐条给结论**，一条都不许漏：\n"
     "  格式：`- ✅已兑现 / ⏳进行中 / ❌已证伪 / ⚔️条件未触发：<上次那条的简述> → <这次的事实依据>`\n"
@@ -3959,6 +3963,109 @@ def _today_community_block(cfg, sn, day_str=None, log=print):
     return block, n, ("hit" if n else "empty")
 
 
+def _sn_channel_report_section(cfg, sn, day_str, meta, log=print, max_lines=12):
+    """生成报告里的「🔎 本子网频道讨论」节（v1.27.0）。
+
+    直接从子网频道落盘结果组装中文短句，不依赖主模型（社区动态节是代码层
+    接管重建的，主模型写的会被删掉）。取数失败/无消息返回 ""（报告不写此节）。
+    """
+    try:
+        import community_fetch as CF
+        import community_digest as CD
+    except Exception:
+        return ""
+    platform = cfg.get("research_sn_channel_platform", "discord") or "discord"
+    payload = CF.read_sn_channel(sn, day_str, cfg, platform=platform)
+    if not payload:
+        return ""
+    events = payload.get("events") or []
+    if not events:
+        return ""
+    # 按人聚合：同一发言人多条合并，观点/数字/对象都在，禁止只写「有人提及」
+    by_author = {}
+    order = []
+    for e in sorted(events, key=lambda x: x.get("occurredAt") or 0, reverse=True):
+        au = CD._display_author(e.get("author") or "?", cfg)
+        key = au
+        if key not in by_author:
+            by_author[key] = []
+            order.append(key)
+        c = CD._clean(e.get("content"), 160)
+        by_author[key].append("[%s] %s" % (e.get("time") or "??:??", c))
+    if not order:
+        return ""
+    lines = []
+    for au in order[:max_lines]:
+        items = by_author[au][:3]
+        joined = "；".join(items)
+        lines.append("- <%s> %s" % (CD._clean(au, 40), joined))
+    n_people = len(order)
+    n_more = max(0, n_people - max_lines)
+    windows = "、".join(w.get("label", "?") for w in (payload.get("windows") or []))
+    more = ("（另有 %d 位发言人的频道消息从略）" % n_more) if n_more else ""
+    plabel = "DC" if platform == "discord" else platform.upper()
+    head = ("**🔎 本子网频道讨论补充（%s 频道，%s，dtt 关键词组精确抓取）**%s\n"
+            % (plabel, windows, more))
+    tail = ("\n> 以上为 %s 子网频道近两日直接讨论，⚠️未验证，仅供补充与交叉核验；"
+            "与链上/数据站结论冲突时以链上为准并保留此线索待人工确认。"
+            % plabel)
+    return head + "\n".join(lines) + tail
+
+
+def _sn_channel_block(cfg, sn, day_str, log=print, days=2):
+    """取该子网 DC 频道近两日消息，拼成「频道补充 + 交叉核验」输入段（v1.27.0）。
+
+    与 _today_community_block()（全平台关键词流）互补：本函数按该 SN 关键词组
+    精确取 DC 子网频道消息，作为全网抓取之外的**直接频道讨论补充**。
+    取数失败一律不阻断投研，返回 ("", state)。
+    state ∈ hit / empty / error。
+    """
+    try:
+        import community_fetch as CF
+    except Exception as e:
+        log("   ⚠️ 子网频道补充模块不可用（%s），跳过" % str(e)[:120])
+        return "", "error"
+    platform = cfg.get("research_sn_channel_platform", "discord") or "discord"
+    ndays = int(cfg.get("research_sn_channel_days", days) or days)
+    try:
+        # 每次重取：子网频道补充是独立落盘文件，社区日报不会生成它，缓存只会来自
+        # 上次投研（可能隔很久），复用会漏掉当日新消息。取数仅几秒，新鲜优先。
+        payload = CF.fetch_sn_channel(sn, day_str, cfg, log=log,
+                                      platform=platform, days=ndays)
+    except Exception as e:
+        log("   ⚠️ 子网频道补充取数失败（%s），本次投研继续，不带频道段" % str(e)[:160])
+        return "", "error"
+    events = payload.get("events") or []
+    if not events:
+        log("   子网频道补充：SN%d %s 频道近 %d 日无命中" % (sn, platform, ndays))
+        return "", "empty"
+    import community_digest as CD
+    lines, seen = [], set()
+    for e in sorted(events, key=lambda x: x.get("occurredAt") or 0, reverse=True):
+        key = (e.get("author") or "", (e.get("content") or "")[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        author = CD._clean(e.get("author") or "?", 44)
+        content = CD._clean(e.get("content"))[:300]
+        lines.append("- [DC频道][%s] <%s> %s" % (e.get("time") or "??:??", author, content))
+    kws = payload.get("keyword_ids") or []
+    head = ("SN%d 的 %s 子网频道近 %d 日讨论（dtt 按本子网关键词组[%s]精确抓取，"
+            "北京时间 %s；**未经证实，是线索不是证据**）：\n%s\n"
+            % (sn, platform.upper() if platform != "discord" else "DC", ndays,
+               "、".join(kws[:6]) + ("等" if len(kws) > 6 else ""),
+               "、".join(w.get("label", "?") for w in (payload.get("windows") or [])),
+               "\n".join(lines)))
+    rule = ("**使用规则（补充 + 交叉核验）**：这是该子网频道的直接讨论，用来补充并核验全网抓取"
+            "结论。每条标 `[DC频道]` 与 `⚠️未验证`；在「📢 当日社区动态」节里作为「频道讨论补充」"
+            "子块列出（可不重复全网已写过的同一条，但有新观点/数字/对象必须写）。"
+            "若频道说法与链上/数据站/官方结论冲突，并列写「频道称X，但链上/数据站显示Y，"
+            "⚠️待人工确认」，不得二选一、不得删任一方；禁止写成已确定事实。"
+            "必须写出具体内容（原话要点/数字/对象），禁止只写「有人提及」。")
+    log("   ✅ 子网频道补充：SN%d %s 频道取到 %d 条，已加入投研输入" % (sn, platform, len(lines)))
+    return head + rule, "hit"
+
+
 def _signal_block(sources):
     """硬规则信号：由代码判定、直接写进提示词，不允许模型忽略。
 
@@ -4013,7 +4120,7 @@ def _signal_block(sources):
 
 
 def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, today=None,
-                arc_dir=None, community_today=""):
+                arc_dir=None, community_today="", sn_channel=""):
     """拼装投研输入。arc 为 None 时跳过群聊段（纯全网投研）。
 
     community_today：当日 dtt 关键词监控里该子网的社区消息段（由 run_research 取数拼好），
@@ -4076,6 +4183,9 @@ def build_input(arc, sources, meta, days=14, cap_per_day=260, prev_arc=None, tod
     if community_today:
         body += ("\n\n===== 当日 dtt 社区消息（SN%d，未经证实，报告必须单独成节）=====\n"
                  % meta["sn"]) + community_today
+    if sn_channel:
+        body += ("\n\n===== 本子网频道近两日讨论（SN%d，DC 频道补充 + 交叉核验）=====\n"
+                 % meta["sn"]) + sn_channel
     if hist:
         body += "\n\n===== 此前投研结论（历史留档）=====\n" + hist
     # 上次的「预期跟踪」逐条清单：报告必须逐条打钩（兑现/证伪/未触发）
@@ -4222,10 +4332,18 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         community_today, _nct, _dtt_state = _today_community_block(cfg, sn, today, log=log)
     else:
         log("③ 当日 dtt 社区消息：配置 research_community_today=false，跳过")
+    # ③b 本子网 DC 频道近两日讨论（v1.27.0）：按该 SN 关键词组精确取，作为全网
+    #     抓取之外的直接频道补充与交叉核验。取数失败不阻断投研。
+    sn_channel, _snch_state = "", "off"
+    if cfg.get("research_sn_channel", True):
+        log("③b 本子网 DC 频道近两日讨论（关键词组精确抓取）…")
+        sn_channel, _snch_state = _sn_channel_block(cfg, sn, today, log=log)
+    else:
+        log("③b 本子网 DC 频道：配置 research_sn_channel=false，跳过")
     text_block = build_input(arc, sources, meta, days=days,
                              cap_per_day=int(cfg.get("research_max_items_per_day", 260) or 260),
                              prev_arc=prev_arc, today=today, arc_dir=arc_dir,
-                             community_today=community_today)
+                             community_today=community_today, sn_channel=sn_channel)
     if feedback:
         # 用户反馈单独成段，且明确标「权威修正」：模型很吃这一套，
         # 只把反馈混在正文里它常常当成又一条群聊传闻，改不动已经写下的判断。
@@ -4391,6 +4509,16 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
                      "当日抓到 SN%d 相关消息，但自动提炼未成功，暂不列出（不影响报告其它章节）。" % sn)
         digest = _insert_section(digest, _note, "📌 预期跟踪")
         log("📢 当日社区动态：无相关消息/提炼失败，已写如实说明（不保留主模型原节）")
+    # 🔎 本子网频道讨论补充（v1.27.0）：按 SN 关键词组精确抓取的 DC 频道直接讨论，
+    #    作为全网抓取之外的补充与交叉核验。代码层生成，不受主模型原节删除影响。
+    if _snch_state == "hit":
+        try:
+            _ch_sec = _sn_channel_report_section(cfg, sn, today, meta, log=log)
+            if _ch_sec:
+                digest = _insert_section(digest, _ch_sec, "📌 预期跟踪")
+                log("🔎 本子网频道讨论补充：已写入报告独立节")
+        except Exception as e:
+            log("🔎 本子网频道讨论节写入跳过（%s）" % str(e)[:120])
     # 时间线倒序 + 上限（v1.23.0）：放在社区动态之后，回填的「跟踪进度补充」节
     # 紧挨「📌 预期跟踪」之前。此步之后不再有重写整篇的步骤，排序结果不会被覆盖。
     try:
@@ -4439,6 +4567,13 @@ def run_research(cfg, sn_arg, targets=None, days=14, log=print, llm=None, push=T
         "empty": "📢 当日dtt社区消息：无命中，未写入报告",
         "error": "📢 当日dtt社区消息：取数失败，未写入报告（不影响投研）",
     }.get(_dtt_state, "📢 当日dtt社区消息：已关闭"))
+    _ch_in_report = "🔎 本子网频道讨论补充" in digest
+    log({
+        "hit": ("🔎 子网频道补充：DC频道消息已写入报告独立节") if _ch_in_report else
+               ("🔎 子网频道补充：有消息但报告未生成该节（请检查）"),
+        "empty": "🔎 子网频道补充：近两日 DC 频道无命中",
+        "error": "🔎 子网频道补充：取数失败（不影响投研）",
+    }.get(_snch_state, "🔎 子网频道补充：已关闭"))
     # 投研产出增量写回子网档案：报告正文 + 结论 + 时间线 + 数据源一起入库；
     # 已有档案只替换本日记录（幂等），没有档案就新建一个 —— 这是下次投研的输入来源。
     try:

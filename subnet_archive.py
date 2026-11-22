@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -148,6 +149,60 @@ def load_kb(path=None):
             return json.load(f)
     except Exception:
         return {"subnets": {}}
+
+
+# ---------------------------------------------------------------- 档案生命周期
+# 已注销子网的旧档案**物理搬离**活动目录，不留在 SNxx/ 里等下游误读。
+# 活动目录仍只认顶层 SN\d+；_retired/ 下的历史档案只作留档，不进 index.json。
+RETIRED_SUBDIR = "_retired"
+RETIRED_INDEX = "retired_index.json"
+_RETIRED_STATES = {"deregistered", "retired", "inactive"}
+
+
+def retired_dir(arc_dir):
+    return os.path.join(arc_dir, RETIRED_SUBDIR)
+
+
+def is_retired_sn(sn, kb=None):
+    """只在知识库明确记为「已注销且当前未重新注册」时返回 True。
+
+    不在知识库里的新编号**不拦**：旧导出里先出现、周更后才会进知识库，
+    此时仍允许建档；真正的注销一定会在 subnets.json 的 deregistered 里留痕。
+    """
+    kb = kb if kb is not None else load_kb()
+    key = str(int(sn))
+    return (key in (kb.get("deregistered") or {})
+            and key not in (kb.get("subnets") or {}))
+
+
+def is_retired_arc(arc):
+    return bool(arc) and ((arc.get("status") or "").lower() in _RETIRED_STATES
+                          or (arc.get("lifecycle") or "").lower() == "retired")
+
+
+def find_retired_archive(arc_dir, sn):
+    """在 _retired/ 下找该 SN 的历史档案目录（可能有多份，取最新一份）。"""
+    base = retired_dir(arc_dir)
+    if not os.path.isdir(base):
+        return ""
+    hits = []
+    for fn in os.listdir(base):
+        if re.match(r"^SN%d(?:_|$)" % int(sn), fn, re.I) and \
+                os.path.exists(os.path.join(base, fn, "archive.json")):
+            hits.append(os.path.join(base, fn))
+    return sorted(hits)[-1] if hits else ""
+
+
+def retired_archive_info(arc_dir, sn):
+    p = find_retired_archive(arc_dir, sn)
+    if not p:
+        return None
+    try:
+        with open(os.path.join(p, "archive.json"), encoding="utf-8") as f:
+            arc = json.load(f)
+    except Exception:
+        return None
+    return {"path": p, "archive": arc}
 
 
 def name_index(kb):
@@ -410,6 +465,8 @@ def merge_buyback_wallets(arc, auto_items, log=print):
 
 def add_manual_wallet(arc_dir, sn, address, note="", log=print):
     """人工补录一个回购地址（source=manual），自动归档不会覆盖它。"""
+    if is_retired_sn(sn):
+        raise RuntimeError("SN%d 已注销并归档，不能写入旧档；重新注册后会自动新建档案" % int(sn))
     arc = load_archive(arc_dir, sn)
     if not arc:
         raise RuntimeError("SN%s 还没有档案，先跑一次建档再补录地址" % sn)
@@ -550,12 +607,19 @@ def archive_path(arc_dir, sn):
     return os.path.join(sn_dir(arc_dir, sn), "archive.json")
 
 
-def load_archive(arc_dir, sn):
+def load_archive(arc_dir, sn, include_retired=False):
+    """读活动档案。已注销的旧档案默认返回 None，杜绝投研/日报误引用。
+
+    只有档案维护本身（归档搬迁、状态页）才传 include_retired=True。
+    """
     try:
         with open(archive_path(arc_dir, sn), encoding="utf-8") as f:
-            return json.load(f)
+            arc = json.load(f)
     except Exception:
         return None
+    if is_retired_arc(arc) and not include_retired:
+        return None
+    return arc
 
 
 def load_all_index(arc_dir):
@@ -639,6 +703,13 @@ def build_md(arc, max_lines_per_day=400):
     st = stats_of(arc)
     name = arc.get("name") or "（知识库未收录）"
     lines = ["# SN%d %s · 子网档案" % (sn, name), ""]
+    if is_retired_arc(arc):
+        lines += [
+            "> ⛔ **已注销归档**：%s 注销，旧档案已移至 `_retired/`，"
+            "**不再作为投研或事件报告的参考**。同号若重新注册，将另建新档。"
+            % (arc.get("deregistered_on") or arc.get("retired_at") or "日期未记录"),
+            "",
+        ]
     meta = []
     if arc.get("biz"):
         meta.append("**业务**：%s" % arc["biz"])
@@ -772,11 +843,15 @@ def build_md(arc, max_lines_per_day=400):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def save_md(arc_dir, arc):
-    d = sn_dir(arc_dir, arc["sn"])
-    os.makedirs(d, exist_ok=True)
-    with open(os.path.join(d, "archive.md"), "w", encoding="utf-8") as f:
+def save_md_to(target_dir, arc):
+    """把 archive.md 写到指定目录（活动档 / 归档档共用）。"""
+    os.makedirs(target_dir, exist_ok=True)
+    with open(os.path.join(target_dir, "archive.md"), "w", encoding="utf-8") as f:
         f.write(build_md(arc))
+
+
+def save_md(arc_dir, arc):
+    save_md_to(sn_dir(arc_dir, arc["sn"]), arc)
 
 
 # ---------------------------------------------------------------- 投研落档
@@ -794,6 +869,8 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
     为什么不放进 reports[]：报告会被后续同日重跑覆盖（date 相同就替换），
     而快照是「时间序列」，覆盖了就永远比不出变化，必须追加保存。
     """
+    if is_retired_sn(sn):
+        raise RuntimeError("SN%d 已注销并归档，不再生成/落档投研；重新注册后会自动新建档案" % int(sn))
     arc_dir = _archive_dir_of(cfg)
     os.makedirs(arc_dir, exist_ok=True)
     now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
@@ -812,6 +889,7 @@ def attach_research(cfg, sn, date_str, title, digest, sources=None, meta=None,
             "biz": meta.get("desc") or "",
             "url": meta.get("url") or "",
             "github": meta.get("github") or "",
+            "status": "active", "lifecycle": "active",
             "created_at": now,
             "days": {},
             "weak_days": {},
@@ -918,14 +996,17 @@ def attach_community_digest(cfg, day, sn, excerpt, platforms=None, source_file="
     - excerpt 只留该子网的片段（不是整篇日报），避免一个子网塞进全部内容；
     - 档案不存在时新建最小档案。
     """
+    sn = int(sn)
+    if is_retired_sn(sn):
+        raise RuntimeError("SN%d 已注销并归档，不再写入社区线索；重新注册后会自动新建档案" % sn)
     arc_dir = _archive_dir_of(cfg)
     os.makedirs(arc_dir, exist_ok=True)
     now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
-    sn = int(sn)
     arc = load_archive(arc_dir, sn)
     if not arc:
         arc = {
             "sn": sn, "name": "（知识库未收录）", "biz": "", "url": "", "github": "",
+            "status": "active", "lifecycle": "active",
             "created_at": now, "days": {}, "weak_days": {}, "reports": [],
             "buyback_wallets": [],
             "note": "本档案由社区消息日报创建（尚无群聊归档/投研报告）",
@@ -967,16 +1048,19 @@ def confirm_community_digest(cfg, day, sn, note, status="confirmed", log=print):
     若该 (date,sn) 尚无社区线索条目，则新建一条最小条目挂上确认（避免结论无处可写）。
     同一 (date,sn) 重跑覆盖（再次确认以最新为准）。
     """
+    sn = int(sn)
+    if is_retired_sn(sn):
+        raise RuntimeError("SN%d 已注销并归档，不再接受确认；旧档只作历史留档" % sn)
     arc_dir = _archive_dir_of(cfg)
     os.makedirs(arc_dir, exist_ok=True)
     now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
-    sn = int(sn)
     status = "confirmed" if str(status).lower() in ("confirmed", "confirm", "yes", "1", "true") else \
              ("refuted" if str(status).lower() in ("refuted", "refute", "no", "0", "false", "推翻", "不实") else "confirmed")
     arc = load_archive(arc_dir, sn)
     if not arc:
         arc = {
             "sn": sn, "name": "（知识库未收录）", "biz": "", "url": "", "github": "",
+            "status": "active", "lifecycle": "active",
             "created_at": now, "days": {}, "weak_days": {}, "reports": [],
             "buyback_wallets": [],
             "note": "本档案由人工确认社区线索时创建",
@@ -1051,32 +1135,165 @@ def refresh_index(arc_dir):
     return idx
 
 
+def refresh_retired_index(arc_dir):
+    """重建归档索引：只列已注销旧档，供人工回查，不参与任何报告生成。"""
+    base = retired_dir(arc_dir)
+    idx = {"updated_at": datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
+           "subnets": {}}
+    try:
+        for fn in sorted(os.listdir(base)):
+            ap = os.path.join(base, fn, "archive.json")
+            if not os.path.exists(ap):
+                continue
+            with open(ap, encoding="utf-8") as f:
+                arc = json.load(f)
+            st = stats_of(arc)
+            idx["subnets"][str(arc.get("sn", fn))] = {
+                "dir": fn,
+                "name": arc.get("name") or "（未收录）",
+                "deregistered_on": arc.get("deregistered_on") or "",
+                "retired_at": arc.get("retired_at") or "",
+                "strong": st["strong"], "reports": len(arc.get("reports") or []),
+            }
+    except Exception:
+        pass
+    with open(os.path.join(arc_dir, RETIRED_INDEX), "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False, indent=1)
+    return idx
+
+
+def retire_archive(arc_dir, sn, deregistered_on="", kb_rec=None,
+                   dry=False, log=print):
+    """把已注销子网的旧档案搬进 _retired/，并从活动索引移除。
+
+    幂等：已经搬走就只补索引，不重复搬。dry=True 只算不写盘。
+    """
+    sn = int(sn)
+    src_dir = sn_dir(arc_dir, sn)
+    src = os.path.join(src_dir, "archive.json")
+    if not os.path.exists(src):
+        if find_retired_archive(arc_dir, sn) and not dry:
+            refresh_retired_index(arc_dir)
+        return None
+    arc = load_archive(arc_dir, sn, include_retired=True)
+    if not arc or is_retired_arc(arc):
+        return None
+    rec = kb_rec or {}
+    now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+    day = (deregistered_on or rec.get("deregistered_on")
+           or datetime.datetime.now(TZ).strftime("%Y-%m-%d"))
+    clean = re.sub(r"[^\w\-]+", "_", ascii_name(rec.get("name") or arc.get("name") or "")).strip("_")
+    dest_name = "SN%d_%s%s" % (sn, day, ("_" + clean) if clean else "")
+    dest_dir = os.path.join(retired_dir(arc_dir), dest_name)
+    if os.path.exists(dest_dir):
+        dest_dir += "_" + datetime.datetime.now(TZ).strftime("%H%M%S")
+    item = {
+        "sn": sn, "name": arc.get("name") or rec.get("name") or "",
+        "deregistered_on": day, "from": src_dir, "to": dest_dir,
+    }
+    if dry:
+        return item
+    arc["status"] = "deregistered"
+    arc["lifecycle"] = "retired"
+    arc["deregistered_on"] = day
+    arc["retired_at"] = now
+    arc["retired_from"] = src_dir
+    arc["retired_reason"] = "子网知识库更新：链上身份已不存在（注销）"
+    arc["updated_at"] = now
+    os.makedirs(retired_dir(arc_dir), exist_ok=True)
+    shutil.move(src_dir, dest_dir)
+    with open(os.path.join(dest_dir, "archive.json"), "w", encoding="utf-8") as f:
+        json.dump(arc, f, ensure_ascii=False, indent=1)
+    try:
+        save_md_to(dest_dir, arc)
+    except Exception as e:
+        log("归档 markdown 生成失败（不影响 archive.json）：%s" % e)
+    refresh_retired_index(arc_dir)
+    refresh_index(arc_dir)
+    log("子网注销归档：SN%d %s → %s（旧档不再参与投研/事件报告）"
+        % (sn, item["name"] or "", os.path.basename(dest_dir)))
+    return item
+
+
+def retire_archives_from_kb(arc_dir, kb=None, dry=False, log=print):
+    """知识库更新后调用：deregistered 里的每个 SN 立刻归档其旧档案。"""
+    kb = kb if kb is not None else load_kb()
+    dereg = kb.get("deregistered") or {}
+    active = kb.get("subnets") or {}
+    out = []
+    for key in sorted(dereg, key=lambda x: int(x) if str(x).isdigit() else 0):
+        if key in active:            # 同号重新注册：不归档新档
+            continue
+        try:
+            item = retire_archive(arc_dir, int(key),
+                                  deregistered_on=(dereg[key] or {}).get("deregistered_on") or "",
+                                  kb_rec=dereg[key] or {}, dry=dry, log=log)
+        except Exception as e:
+            log("SN%s 旧档归档失败（忽略，不影响知识库）：%s" % (key, e))
+            continue
+        if item:
+            out.append(item)
+    return out
+
+
+def create_fresh_archive(arc_dir, sn, kb_rec=None, dry=False, log=print):
+    """同号重新注册后另建**全新空档**：旧档留在 _retired，绝不混进来。"""
+    sn = int(sn)
+    if os.path.exists(archive_path(arc_dir, sn)):
+        return None
+    if dry:
+        return {"sn": sn, "dry": True}
+    rec = kb_rec or {}
+    now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
+    arc = {
+        "sn": sn,
+        "name": real_name(rec) or "（知识库未收录）",
+        "biz": real_desc(rec),
+        "url": real_url(rec.get("url")),
+        "github": real_url(rec.get("github")),
+        "status": "active", "lifecycle": "active",
+        "created_at": now, "updated_at": now,
+        "days": {}, "weak_days": {}, "reports": [],
+        "buyback_wallets": [],
+        "aliases": list(rec.get("aliases") or []),
+        "note": "本档案为子网重新注册后新建；旧档已移入 _retired/",
+    }
+    save_archive(arc_dir, arc)
+    save_md(arc_dir, arc)
+    refresh_index(arc_dir)
+    log("子网重新注册：SN%d 已新建空档（旧档仍在 _retired/）" % sn)
+    return arc
+
+
 # ---------------------------------------------------------------- 主入口
 def _archive_dir_of(cfg):
     d = cfg.get("archive_dir") or "subnet_archive"
     return d if os.path.isabs(d) else os.path.join(HERE, d)
 
 
-def archive_files(cfg, json_paths, log=print, llm=None, translate=False):
+def archive_files(cfg, json_paths, log=print, llm=None, translate=False, kb=None):
     """归档**这批导出文件**里出现的子网（增量、幂等）。
 
     这是唯一的写入口，两个场景共用：
       - 导出流程里自动调用（每跑完一次 daily 就顺手归档，无需任何指令）；
       - 全量重建（archive_days 把所有历史导出文件列出来喂进来）。
     已建档的子网只补充新条目，未建档的自动建 —— 判断依据只是消息 id 是否已存在。
+    知识库已注销的子网一律跳过，历史聊天不会把它们重新建回活动目录。
     """
     arc_dir = _archive_dir_of(cfg)
     os.makedirs(arc_dir, exist_ok=True)
     json_paths = [p for p in (json_paths or []) if p and os.path.exists(p)]
     if not json_paths:
-        return {"subnets": 0, "new": 0, "index": load_all_index(arc_dir), "arc_dir": arc_dir}
+        return {"subnets": 0, "new": 0, "index": load_all_index(arc_dir),
+                "arc_dir": arc_dir, "skipped_retired": []}
 
-    kb = load_kb()
+    kb = kb if kb is not None else load_kb()
     subs = kb.get("subnets") or {}
     nidx = name_index(kb)
     bucket = scan_files(json_paths, nidx, log=log)
     if not bucket:
-        return {"subnets": 0, "new": 0, "index": load_all_index(arc_dir), "arc_dir": arc_dir}
+        return {"subnets": 0, "new": 0, "index": load_all_index(arc_dir),
+                "arc_dir": arc_dir, "skipped_retired": []}
     # 回购地址：从原始导出里扫（含被 NOISE 过滤的纯链接消息），按 SN 归并。
     # 只在这些子网里更新；查不到的子网保持空列表，不编造。
     try:
@@ -1086,8 +1303,12 @@ def archive_files(cfg, json_paths, log=print, llm=None, translate=False):
         wallet_by_sn = {}
 
     now = datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M")
-    total_new, touched = 0, []
+    total_new, touched, skipped_retired = 0, [], []
     for sn in sorted(bucket.keys()):
+        if is_retired_sn(sn, kb):
+            skipped_retired.append(sn)
+            log("   SN%d 已在知识库注销并归档，跳过本次建档/更新" % sn)
+            continue
         b = bucket[sn]
         meta = subs.get(str(sn)) or {}
         arc = load_archive(arc_dir, sn) or {
@@ -1096,6 +1317,7 @@ def archive_files(cfg, json_paths, log=print, llm=None, translate=False):
             "biz": real_desc(meta),
             "url": real_url(meta.get("url")),
             "github": real_url(meta.get("github")),
+            "status": "active", "lifecycle": "active",
             "created_at": now,
             "days": {},
             "weak_days": {},
@@ -1136,7 +1358,8 @@ def archive_files(cfg, json_paths, log=print, llm=None, translate=False):
         save_md(arc_dir, arc)
         touched.append(arc)
     idx = refresh_index(arc_dir)
-    return {"subnets": len(touched), "new": total_new, "index": idx, "arc_dir": arc_dir}
+    return {"subnets": len(touched), "new": total_new, "index": idx,
+            "arc_dir": arc_dir, "skipped_retired": skipped_retired}
 
 
 def archive_days(cfg, days, log=print, llm=None, translate=False, out_dir=None):
@@ -1167,19 +1390,24 @@ def resolve_sn(arg, cfg=None):
     s = (arg or "").strip()
     m = re.match(r"(?i)^(?:sn|subnet)?\s*#?\s*(\d{1,3})$", s)
     if m:
-        return int(m.group(1))
+        n = int(m.group(1))
+        return None if is_retired_sn(n) else n
     kb = load_kb()
     nidx = name_index(kb)
+
+    def _ok(n):
+        return None if is_retired_sn(n, kb) else n
+
     low = ascii_name(s).lower()
     if low in nidx:
-        return nidx[low]
+        return _ok(nidx[low])
     for tok in TOKEN.findall(s):
         if tok.lower() in nidx:
-            return nidx[tok.lower()]
+            return _ok(nidx[tok.lower()])
     # 模糊：名字包含关系（用户可能只记得半截）
     for k, sn in nidx.items():
         if len(low) >= 4 and (low in k or k in low):
-            return sn
+            return _ok(sn)
     return None
 
 

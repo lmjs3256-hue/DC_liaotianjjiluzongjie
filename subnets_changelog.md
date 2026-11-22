@@ -138,3 +138,23 @@
 - 改名：SN99 Unknown（旧名：Thirty Spokes）
 - 改名：SN127 Zils（旧名：Astrid）
 - 业务变更：SN127 Zils
+
+## 2026-11-22
+- 业务变更：SN24 ms.computer
+- 改名：SN26 Pocket（旧名：Perturb）
+- 业务变更：SN26 Pocket
+- 业务变更：SN31 rec4ll
+- 改名：SN39 Kokoah（旧名：deprecated）
+- 业务变更：SN39 Kokoah
+- 改名：SN42 CADmind（旧名：Unknown）
+- 业务变更：SN42 CADmind
+- 改名：SN47 Optia（旧名：GPUForge）
+- 业务变更：SN47 Optia
+- 改名：SN57 Roa（旧名：Unknown）
+- 业务变更：SN57 Roa
+- 改名：SN78 Unknown（旧名：Umi）
+- 业务变更：SN78 Unknown
+- 改名：SN99 Axonry（旧名：Unknown）
+- 业务变更：SN99 Axonry
+- 改名：SN109 Unknown（旧名：Finsight）
+- 业务变更：SN109 Unknown

@@ -281,6 +281,14 @@ def main():
         lived = time.time() - started
         log("监听过退出（code=%s，存活 %.0f 秒）" % (code, lived))
 
+        # 秒退但已有别的监听在跑 = 被 respawn / 手工入口抢先接管，属于正常交接。
+        # 老逻辑把它计进「连续秒退」，3 次后守护自己退出，于是两边全空 ——
+        # 2026-11-22 15:27 事故里监听和守护就是这样一起消失的。
+        if lived < FAST_EXIT_SEC and _running_listener_pid():
+            log("监听秒退但已有同版本实例在跑，转为存活监控，不重复拉起")
+            fast_exits = 0
+            continue
+
         # 热重载：监听检测到 pipeline.py 版本变了，会以 75 退出，要求立即重启
         if code == EXIT_RELOAD:
             log("收到热重载请求（代码已更新），%d 秒后拉起新版本" % RELOAD_DELAY)

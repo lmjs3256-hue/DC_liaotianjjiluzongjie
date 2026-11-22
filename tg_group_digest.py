@@ -199,6 +199,77 @@ def _tweet_lines(e):
     return out
 
 
+def _used_sn_names(related, tagged_sns):
+    """本次报告真正涉及的子网名对照：只取已标编号 + 正文里确实出现的名字。
+
+    不把整张 129 行知识库塞给模型，也不做全局后处理——否则 "score" 这种
+    通用词会被一律改写成 SN44。返回 {sn: 规范名}。
+    """
+    try:
+        import subnet_archive as A
+        names = CD._sn_names()
+        text = "\n".join((e.get("content") or "") for e in (related or []))
+    except Exception:
+        return {}
+    used = set(int(x) for x in (tagged_sns or set()) if str(x).isdigit())
+    for sn, nm in names.items():
+        if len(nm) < 4:
+            continue
+        if nm.lower() in A.GENERIC_NAMES and sn not in used:
+            continue
+        if re.search(r"(?<![\w])" + re.escape(nm) + r"(?![\w])", text, re.I):
+            used.add(int(sn))
+    return {sn: names[sn] for sn in sorted(used) if sn in names}
+
+
+def normalize_sn_names(text, names):
+    """兜底把模型输出的「SN Almanac / Almanac / SN41」统一成「SN41 Almanac」。
+
+    模型偶尔会漏编号（实测出现过「SN AlMANAC」），只改提示词不够。这里做确定性
+    后处理：先保护已正确的写法，再补编号/名字，最后还原，避免重复改写。
+    """
+    if not text or not names:
+        return text
+    stash = {}
+
+    def _keep(s):
+        k = "\x01%d\x02" % len(stash)
+        stash[k] = s
+        return k
+
+    items = sorted(((int(s), str(n)) for s, n in names.items()),
+                   key=lambda x: -len(x[1]))
+    # 0) 已经正确的「SN41 Almanac」（含 **加粗**）先保护
+    for sn, nm in items:
+        pat = re.compile(r"(?<![\w])SN\s*%d\s+%s(?![\w])" % (sn, re.escape(nm)), re.I)
+        text = pat.sub(lambda m: _keep(m.group(0)), text)
+
+    # 1) 「SN AlMANAC」这类漏编号
+    for sn, nm in items:
+        pat = re.compile(r"(?<![\w])SN\s+(?:\*\*)?%s(?:\*\*)?(?![\w])" % re.escape(nm), re.I)
+        text = pat.sub(lambda m: _keep("SN%d %s" % (sn, nm)), text)
+
+    # 2) 「SN41（Almanac）」这类括号补名
+    for sn, nm in items:
+        pat = re.compile(r"(?<![\w])SN\s*%d\s*[（(]\s*%s\s*[）)](?![\w])"
+                         % (sn, re.escape(nm)), re.I)
+        text = pat.sub(lambda m: _keep("SN%d %s" % (sn, nm)), text)
+
+    # 3) 只写名字（Almanac / 「Almanac 子网」）
+    for sn, nm in items:
+        pat = re.compile(r"(?<![\w])%s(?:\s*子网)?(?![\w])" % re.escape(nm), re.I)
+        text = pat.sub(lambda m: _keep("SN%d %s" % (sn, nm)), text)
+
+    # 4) 只写编号（SN41）
+    for sn, nm in items:
+        pat = re.compile(r"(?<![\w])SN\s*%d(?![\w])" % sn, re.I)
+        text = pat.sub(lambda m: _keep("SN%d %s" % (sn, nm)), text)
+
+    for k, v in stash.items():
+        text = text.replace(k, v)
+    return text
+
+
 def build_input(payload, cfg=None):
     """严格相关筛选 + 按群分组 + 关键人物单列，返回给模型的输入文本。
 
@@ -221,6 +292,11 @@ def build_input(payload, cfg=None):
                 if ms else "?")
     _range = ("%s → %s" % (_bstr(bs), _bstr(be))) if bs and be else "所选日 00:00 → 当前"
 
+    all_sns = set()
+    for e in related:
+        all_sns |= set(_sn_tags(e.get("content") or ""))
+    sn_names = _used_sn_names(related, all_sns)
+
     lines = [
         "平台：dtt 管理员群消息库（Telegram 群原始聊天，与关键词事件流隔离）",
         "日期：%s（北京时间 %s）" % (payload.get("day", ""), _range),
@@ -230,9 +306,13 @@ def build_input(payload, cfg=None):
         "【铁律】以下都是群聊原文，混有观点、传闻、喊单、玩笑。按「有人说」处理，"
         "不写成既定事实；不补原文没有的数字/人名/SN；不贴原始链接；中文短句、词必达意。",
         "",
+        "【子网名称对照（硬性写法）】",
+        "  ".join("SN%d %s" % (s, sn_names[s]) for s in sorted(sn_names)) or "（本次未识别到具体子网）",
+        "所有子网一律写成「SN编号 子网名」（例：SN41 Almanac、SN53 engy）；"
+        "严禁只写「SN Almanac」「Almanac 子网」「SN41」或大小写随意写法。",
+        "",
         "===== 按群分组的当日相关消息（每条已标时间+发言人显示名）=====",
     ]
-    all_sns = set()
     for g, es in by_group.items():
         # 官方 bot 群（TAO-update-DC）消息多，按 SN 聚合呈现；其余按时间
         es.sort(key=lambda x: x.get("occurredAt") or 0, reverse=True)
@@ -281,6 +361,7 @@ def build_input(payload, cfg=None):
         "by_group": {g: len(es) for g, es in by_group.items()},
         "key_count": len(key_es),
         "sns": sorted(all_sns),
+        "sn_names": sn_names,
     }
     return "\n".join(lines), stats
 
@@ -295,8 +376,8 @@ TG_GROUP_SYSTEM_PROMPT = (
     "每条一句说清「**话题**（关联 **SN**）：**人物** 的什么观点」，"
     "关键主体与 **SN编号** 加粗，标群名）\n"
     "**📢 子网动态**（官方 bot 转发的 ⛳sn:NN 动态，按 SN 分组：每个有实质的 SN 写一块，"
-    "格式「**SN53**（N 条）」下接 1-2 条要点；同一 SN 的多条零散播报合并成一句，"
-    "不逐条复述机器人腔。查不到子网名就只写编号，不要编名字）\n"
+    "格式「**SN53 engy**（N 条）」下接 1-2 条要点；同一 SN 的多条零散播报合并成一句，"
+    "不逐条复述机器人腔。名称严格取输入的「子网名称对照」，查不到才只写 SN编号）\n"
     "**💬 分群讨论**（按群名分组，如 Hanlin.AI / Subnet Summer - τ；"
     "每条必须凑齐三段：**①话题**（与 Bittensor 哪个子网/机制相关，标 SN）"
     "→ **②人物**（用输入里的显示名）→ **③观点**（他真正的立场：看多/看空/质疑/依据/指向）；"
@@ -318,6 +399,9 @@ TG_GROUP_SYSTEM_PROMPT = (
     "但不得补原文没有的推文细节。\n"
     "\n"
     "【人名与写法（硬性）】\n"
+    "- **子网统一写「SN编号 子网名」**：SN41 就写 `SN41 Almanac`，SN53 就写 `SN53 engy`。"
+    "名称只认输入里的「子网名称对照」；**严禁**写 `SN Almanac`、`Almanac 子网`、"
+    "`SN41（Almanac）`、只写 `Almanac` 或只写 `SN41`——不熟悉子网的人必须一眼看到编号。\n"
     "- 人名照抄输入 `<>`/方括号里的显示名（已是规范名：备注名优先、映射后 iuac/rrik），"
     "禁止写 `群名@用户名`、`名字_数字`、`备注:` 这类账号辨识码后缀。\n"
     "- **const 必须单列**：只写他当天相关发言，每条提炼成一句「const 表示/质疑/附和：要点」，"
@@ -333,7 +417,7 @@ TG_GROUP_SYSTEM_PROMPT = (
     "- 与 Bittensor 子网、代币机制、团队动态无关的话题不列。\n"
     "\n"
     "【排版与篇幅（飞书/TG 双平台通用）】\n"
-    "- 关键主体 **加粗**：人物、**SN编号/子网名**、代币、事件、关键数字。\n"
+    "- 关键主体 **加粗**：人物、**SN41 Almanac** 这种「编号+名字」整体、代币、事件、关键数字。\n"
     "- emoji 标程度：🔥 热点、✅ 落地、⚠️ 风险、📌 关注、❌ 利空。\n"
     "- 每条单独成行用 - 项目符号，小节间空行，适合手机端；不用 # 标题、不用 > 引用。\n"
     "- **字数上限 3000 字**（含标点）；消息少就少写，简洁+信息全=合格。\n"
@@ -417,6 +501,11 @@ def run_tg_group_day(cfg, day_str, log=print, push=True, group_id=None):
         digest = CD.strip_name_dump(digest, log=log)
     except Exception:
         pass
+    # 模型偶发漏编号（实测「SN AlMANAC」），落盘前做确定性统一
+    try:
+        digest = normalize_sn_names(digest, stats.get("sn_names") or {})
+    except Exception as e:
+        log("子网写法统一失败（忽略）：%s" % e)
 
     # 3) 落盘（单群用独立文件名，不覆盖全群日报）
     out_dir = _out_dir(cfg)
@@ -434,6 +523,9 @@ def run_tg_group_day(cfg, day_str, log=print, push=True, group_id=None):
         rel_dp = os.path.relpath(dp, HERE).replace("\\", "/")
         for sn in stats["sns"]:
             try:
+                if SA.is_retired_sn(sn):
+                    log("TG群日报落档 SN%d 跳过（已注销归档）" % sn)
+                    continue
                 SA.attach_community_digest(
                     cfg, day_str, sn, "TG群消息 SN%d 相关动态（详见 %s）" % (sn, rel_dp),
                     platforms=["Telegram"], source_file=rel_dp, log=log)

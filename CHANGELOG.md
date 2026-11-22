@@ -8,11 +8,39 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.25.0** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.27.0** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.27.0 — 2026-11-22
+
+**子网重要事件跟踪：新增「本子网 DC 频道近两日讨论」补充取数 + 交叉核验**
+
+- **背景**：全网抓取与 dtt 社区关键词流可能重复，正好互补核验；但社区日报的全平台关键词流里，某个子网当天常 0 命中（实测 SN117 当日/昨日 DC=0、仅 X/TG 各 3 条），导致跟踪报告缺少该子网频道的直接讨论。dtt 没有「按 DC 频道抓全天聊天」接口（`/api/sources`、`/api/discord/channels` 均 404，群消息库只有 5 个 TG 群），但关键词按 SN 组维护。
+- **新增取数**：`community_fetch.fetch_sn_channel()` —— 按该 SN 关键词组（groups[].name=snNN）的 keywordId 精确过滤，取 DC 频道**当日 + 昨日**两个自然日的命中消息，独立落盘 `exports/community/sn_channel_SN{sn}_discord_{day}.json`（不覆盖社区日报缓存）。平台/天数可用 `research_sn_channel_platform`、`research_sn_channel_days` 配置。
+- **投研注入**：`subnet_research._sn_channel_block()` 把频道消息拼成「频道补充 + 交叉核验」输入段，`build_input()` 新增 `sn_channel` 参数；prompt 要求写进「📢 当日社区动态」的子块、标 `[DC频道]` + `⚠️未验证`、新观点/数字/对象必须写、与链上冲突并列不二选一。
+- **报告落地**：社区动态节是代码层接管重建的（主模型原节会被删），故新增 `_sn_channel_report_section()` 由代码层直接生成独立节「🔎 本子网频道讨论补充（DC 频道，日期）」，按人聚合短句、带未验证标记、不贴链接；TG 回执新增固定统计行。
+- **失败不阻断**：取数/生成失败只跳过本节，投研主流程照常；无命中不写节（SN117 实测如实反映）。可用 `research_sn_channel=false` 整体关闭。
+- 验证：`test_sn_channel_v127.py` 11/11；旧回归全绿；`py_compile *.py` 通过。规则文档升 v1.7。
+
+## v1.26.1 — 2026-11-22
+
+- 修复 TG 按钮回调在 `P._CFG` 尚未装载时 `answerCallbackQuery` 报 `'NoneType' object is not subscriptable`、按钮持续转圈的问题（回调回执改为 `P._CFG or P.load_config()` 兜底）。
+- **热修复（运行版本不变，避免触发重载）：监听/守护启动竞态治理**。2026-11-22 15:27 出现「网络正常但指令没反应」：连续多次 `tgctl start` 拉起多个守护与监听，新监听互相判「同版本已在跑」而秒退，守护把这种交接误计为「连续秒退」后自行退出，最终两边全空。修复：`tgctl start` 先看真实进程列表且守护已存在时不重复拉起；`respawn` 等守护先拉起的时间由 3 秒延到 8 秒并做真实进程兜底；守护遇到「秒退但已有实例在跑」转为存活监控、不再累加秒退计数。
+- **开机自启已配置**：Windows 启动文件夹新增 `DTAO_TG_Guard_Autostart.vbs`，登录时由 Explorer 无窗口拉起 `pythonw tg_guard.py`（守护再拉监听，自带互斥单实例 + 崩溃重启 + 热重载）。旧的 `DTAO_Listener_Autostart.bat` 已禁用（只留 `exit /b 0`），避免闪黑窗与重复启动。实测确认 pythonw 路径、脚本路径、隐藏窗口参数、文件存在性检查均正确。开机场景由 Explorer 拉起、完全脱离 WorkBuddy 会话，不受会话进程回收影响。
+- 排查备忘：当前 WorkBuddy 会话会在每条命令结束时回收它派生的后台进程，计划任务（schtasks）/作业突破（CREATE_BREAKAWAY_FROM_JOB）/cscript 均被安全策略禁止；因此会话内调试时用持久任务前台托管 `python tg_guard.py` 保持可用，真正的长期运行交给开机自启 VBS。若需手动恢复，双击项目目录里的 `DTAO_TG_Listener_Guard.bat`。
+
+## v1.26.0 — 2026-11-22
+
+**子网档案生命周期治理 + 群消息子网写法统一**
+
+- **注销即归档**：知识库更新（手动 `update_subnets.py` / `/kb update` / 自动周更）一旦在链上身份里发现子网消失，立刻把该 SN 的旧档案从活动目录 `SNxx/` **物理搬到 `_retired/SNxx_日期_名称/`**，写 `status=deregistered`、注销日期与归档原因，重建活动 `index.json`，并单独生成 `retired_index.json` 供人工回查。幂等，重复周更不会重复搬。
+- **下游不再引用**：`load_archive()` 默认拒绝已归档档案；`resolve_sn()` 拒绝已注销编号；日报/投研参考块、社区日报、TG 群日报、地址补录、人工确认全部跳过已注销 SN。历史导出也不会把注销子网重新建回活动目录。`/档案 SN` 会提示「已注销归档」与旧档路径。
+- **重新注册另建新档**：同号再次出现在链上身份时，知识库从 `deregistered` 移回 `subnets`，自动新建空档（名称/业务取新快照，旧档仍在 `_retired/`），后续群聊/投研正常落档。
+- **群消息统一写法**：TG 群日报输入新增「子网名称对照」，提示词硬性要求所有子网写成 `SN41 Almanac` / `SN53 engy` 这种「编号+名称」；落盘前确定性兜底修正 `SN AlMANAC`、`Almanac 子网`、`SN41（Almanac）`、裸名称/裸编号，避免不熟悉子网的人看不懂。
+- 回归：`test_lifecycle_v126.py` 2/2；旧测试 110/110 全绿。规则文档升 v1.6。
 
 ## v1.25.0 — 2026-11-22
 

@@ -167,6 +167,16 @@ def _summarize(res):
         lines.append("档案同步 %d 份：%s" % (
             len(synced),
             "、".join("SN%s" % x[0] for x in synced[:8]) + ("" if len(synced) <= 8 else " 等")))
+    retired = res.get("archive_retired") or []
+    if retired:
+        lines.append("⛔ 注销归档 %d 份：%s（旧档已移出活动目录，不再参与投研/事件报告）" % (
+            len(retired),
+            "、".join("SN%s" % x.get("sn") for x in retired[:8]) + ("" if len(retired) <= 8 else " 等")))
+    rebuilt = res.get("archive_rebuilt") or []
+    if rebuilt:
+        lines.append("🆕 重新注册建档 %d 份：%s" % (
+            len(rebuilt),
+            "、".join("SN%s" % x.get("sn") for x in rebuilt[:8])))
     return "\n".join(lines)
 
 

@@ -1,6 +1,6 @@
 # Bittensor 子网对照表（自动生成，勿手改）
 
-> 来源：https://taostats.io/subnets 的链上子网身份（SubnetIdentitiesV2），最后更新：2026-11-09
+> 来源：https://taostats.io/subnets 的链上子网身份（SubnetIdentitiesV2），最后更新：2026-11-22
 > 只记录**当前**业务；描述缺失一律写「未知」。被注销的编号单独列在文末。
 
 | SN | 子网名 | 业务 |
@@ -29,14 +29,14 @@
 | 21 | AdTAO | 广告干预的反事实影响预测 |
 | 22 | Desearch | 去中心化搜索引擎 |
 | 23 | Trishool | AI 对齐协议 |
-| 24 | ms.computer | 未知 |
+| 24 | ms.computer | 人人运行的互联网计算机 |
 | 25 | UR | 隐私协议 |
-| 26 | Perturb | 去中心化对抗鲁棒性网络 |
+| 26 | Pocket（旧名：Perturb） | 个人AI代理及其云端电脑 |
 | 27 | Komms | 去中心化通信层 |
 | 28 | SayGM | 接入 Claude、GPT 和 Gemini |
 | 29 | hoτfloaτ | 推理优化 |
 | 30 | Endure Network | 风险情报网络 |
-| 31 | rec4ll | 去中心化检索增强生成 |
+| 31 | rec4ll | 去中心化RAG与记忆API |
 | 32 | ItsAI | 高质量 AI 文本检测 |
 | 33 | ReadyAI | 未知 |
 | 34 | Yugos | 推理决策模型 |
@@ -44,15 +44,15 @@
 | 36 | Weir（旧名：Bittensor） | 未知 |
 | 37 | Aurelius | 去中心化 AI 对齐 |
 | 38 | ChronoLLM | 时间一致性大语言模型竞争训练 |
-| 39 | deprecated | 未知 |
+| 39 | Kokoah（旧名：deprecated） | Hyperliquid交易智能与奖励 |
 | 40 | Ralph | 将大模型压缩为手机可运行的GGUF |
 | 41 | Almanac | 预测市场研究与情报 |
-| 42 | Unknown | 未知 |
+| 42 | CADmind（旧名：Unknown） | 自然语言生成CAD功能设计 |
 | 43 | Graphite | 未知 |
 | 44 | Score | 让摄像头具备智能分析能力 |
 | 45 | AlphaRidge.ai | 多市场实时行情情报与信号 |
 | 46 | Instant | 快速无审查的大模型推理 |
-| 47 | GPUForge | 可验证的H100 GPU训练 |
+| 47 | Optia（旧名：GPUForge） | 未知 |
 | 48 | Quantum Compute | 量子计算 |
 | 49 | Nepher Robotics | 仿真优先的机器人开发 |
 | 50 | Synth | 金融市场预测智能 |
@@ -62,7 +62,7 @@
 | 54 | Yanez | 生成合成身份以检验活体检测 |
 | 55 | NIOME | 合成基因组保护隐私的基因组智能 |
 | 56 | Gradients | 自动化机器学习平台 |
-| 57 | Unknown | 未知 |
+| 57 | Roa（旧名：Unknown） | AI代理的乌托邦共和国 |
 | 58 | Attune | 自适应机器人智能 |
 | 59 | Unknown | 未知 |
 | 60 | Bitsec.ai | 发现并修复代码漏洞 |
@@ -83,7 +83,7 @@
 | 75 | Hippius | 区块链云存储与虚拟机 |
 | 76 | Ormas | 按结果付费的编码任务平台 |
 | 77 | Liquidity | 为外部链上项目提供流动性 |
-| 78 | Umi | 将运动数据转化为语义理解 |
+| 78 | Unknown（旧名：Umi） | 未知 |
 | 79 | MVTRX | dTAO交易所 |
 | 80 | OpenRoboto | 众包机器人模型与第一视角数据采集竞赛 |
 | 81 | Reliquary | 强化学习层 |
@@ -104,7 +104,7 @@
 | 96 | Verathos | 可验证的 AI 推理与训练 |
 | 97 | Ingot | 小型开放模型铸造 |
 | 98 | NeverPlayAlone | AI 陪伴智能体 |
-| 99 | Unknown（旧名：Thirty Spokes） | 未知 |
+| 99 | Axonry（旧名：Thirty Spokes、Unknown） | 去中心化训练新范式 |
 | 100 | Cortex | 开放式自主研究 AI |
 | 101 | Tag101 | 去中心化社交帖子标注 |
 | 102 | ConnitoAI | 分布式训练专家模块并聚合成 AI 系统 |
@@ -114,7 +114,7 @@
 | 106 | Nodexo | 代币化 AI 算力 |
 | 107 | Minos | 基因组学基础层 |
 | 108 | ChipForge | 去中心化芯片设计竞赛 |
-| 109 | Finsight | 个人投资情报信号 |
+| 109 | Unknown（旧名：Finsight） | 未知 |
 | 110 | Green Compute | 绿色能源企业推理硬件 |
 | 111 | Claims | 科学文献结构化声明-证据图谱 |
 | 112 | THOR | 开源机器人 |

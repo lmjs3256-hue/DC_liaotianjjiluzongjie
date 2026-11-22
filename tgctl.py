@@ -221,6 +221,16 @@ def cmd_status(quiet=False):
 
 def cmd_start(wait=30):
     pid, alive, ver, _ = _listener_info()
+    # 状态文件可能是「尸体数据」：pid 文件里的进程已退出，但真监听
+    # 还由另一个入口拉起来了（守护 / respawn / 手工 bat）。重复拉守护
+    # 会让多个实例互相判重、全部退出，表现为「网络正常但日报没反应」。
+    # 所以先看真实进程列表，再决定是否启动。
+    if not alive:
+        found = _procs("tg_listener.py")
+        if found:
+            pid = sorted(found)[0]
+            alive = True
+            ver = _read_json(STATE).get("version")
     if alive:
         disk = _disk_version()
         print("✅ 监听已在运行（pid=%d，版本 v%s）" % (pid, ver or "未知"))
@@ -228,22 +238,29 @@ def cmd_start(wait=30):
             print("⚠️  磁盘已是 v%s，进程还是 v%s —— 建议执行 restart 让新代码生效。" % (disk, ver))
         return 0
 
-    print("启动守护（无窗口后台）…")
-    logf = open(os.path.join(HERE, "tgctl.log"), "a", encoding="utf-8")
-    logf.write("[%s] tgctl start\n" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    logf.flush()
-    try:
-        subprocess.Popen([_pythonw(), GUARD], cwd=HERE,
-                         stdin=subprocess.DEVNULL, stdout=logf, stderr=logf,
-                         creationflags=DETACHED | NO_WINDOW, close_fds=True)
-    except Exception as e:
-        print("❌ 拉起守护失败：%s" % e)
-        return 2
-    finally:
+    # 守护已存在时绝不重复拉起：新守护抢到互斥体后旧守护会退出，
+    # 而它刚拉起的监听又会被旧监听判为「同版本在跑」而秒退，
+    # 最终两边全空 —— 这是 2026-11-22 15:27 那次事故的直接原因。
+    gpid = _guard_pid()
+    if gpid:
+        print("守护已在运行（pid=%d），等待它拉起监听，不重复启动。" % gpid)
+    else:
+        print("启动守护（无窗口后台）…")
+        logf = open(os.path.join(HERE, "tgctl.log"), "a", encoding="utf-8")
+        logf.write("[%s] tgctl start\n" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        logf.flush()
         try:
-            logf.close()
-        except Exception:
-            pass
+            subprocess.Popen([_pythonw(), GUARD], cwd=HERE,
+                             stdin=subprocess.DEVNULL, stdout=logf, stderr=logf,
+                             creationflags=DETACHED | NO_WINDOW, close_fds=True)
+        except Exception as e:
+            print("❌ 拉起守护失败：%s" % e)
+            return 2
+        finally:
+            try:
+                logf.close()
+            except Exception:
+                pass
 
     # 等「真的活着」再报成功：只看到进程创建不算数（可能秒退）
     deadline = time.time() + max(5, wait)
@@ -362,11 +379,18 @@ def cmd_respawn(argv):
     deadline = time.time() + 15
     while old and time.time() < deadline and _alive(old):
         time.sleep(0.5)
-    time.sleep(3)                       # 让守护先得手，避免双实例
+    # 守护在跑时给它足够时间先拉起（原来只等 3 秒，常常两边同时 Popen，
+    # 新监听互相判「同版本已在跑」后双双退出）。守护不在才由本进程接管。
+    gpid = _guard_pid()
+    time.sleep(8 if gpid else 2)
     p, alive, ver, _ = _listener_info()
+    if not alive:
+        found = _procs("tg_listener.py")
+        if found:
+            p, alive = sorted(found)[0], True
     if alive:
-        _ctl_log("respawn 跳过：守护已拉起监听 pid=%d 版本 v%s"
-                 % (p, ver or _disk_version()))
+        _ctl_log("respawn 跳过：已有监听 pid=%d 版本 v%s（守护 pid=%s）"
+                 % (p, ver or _disk_version(), gpid or "无"))
         return 0
     _ctl_log("respawn 接管：守护未拉起监听，直接用磁盘 v%s 启动"
              % _disk_version())

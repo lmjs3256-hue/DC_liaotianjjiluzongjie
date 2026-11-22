@@ -494,6 +494,170 @@ def cache_covers_now(payload, cfg=None, slack_sec=120):
     return int(datetime.datetime.now(TZ).timestamp()) - int(end) <= slack_sec
 
 
+# ---------------------------------------------------------------- 子网频道补充取数（v1.27.0）
+# 背景：社区日报的 fetch_day() 抓的是全平台关键词流，某个子网当天可能一条都没命中
+# （实测 SN117 当日/昨日 DC=0、仅 X/TG 各 3 条），导致「重要事件跟踪报告」里
+# 缺少该子网频道的直接讨论。dtt 没有「按 DC 频道抓全天聊天」的接口（/api/sources、
+# /api/discord/channels 均 404，群消息库只有 5 个 TG 群），但关键词是按 SN 组维护的：
+# 用「该 SN 关键词组的 keywordId」精确过滤 + 按平台取当日/昨日事件，就能把该子网
+# 频道里被关键词命中的讨论捞出来，作为全网抓取的补充与交叉核验素材。
+_JS_SN_CHANNEL = r"""
+const r = await page.evaluate(async (args) => {
+  const sess = JSON.parse(localStorage.getItem('session') || 'null');
+  if (!sess || !sess.token || (sess.expiresAt && Date.now() > sess.expiresAt)) {
+    return { authExpired: true };
+  }
+  const H = { Authorization: 'Bearer ' + sess.token };
+  const out = { sn: args.sn };
+  // 1) 该 SN 关键词组的所有 keywordId（groups[].name = snNN）
+  let kwIds = [];
+  try {
+    const kwRes = await fetch('/api/keywords?limit=99999&offset=0', { headers: H });
+    const kwD = (await kwRes.json()).data || {};
+    kwIds = (kwD.items || [])
+      .filter(k => (k.groups || []).some(g =>
+          String(g.name || '').toLowerCase() === 'sn' + args.sn))
+      .map(k => k.id);
+  } catch (e) { return { err: 'keywords: ' + String(e) }; }
+  out.keywordIds = kwIds;
+  if (!kwIds.length) return { ok: true, events: [], keywordIds: [] };
+
+  // 2) 每个日期窗口 × 每个关键词，取事件（命中即收录；游标翻页）
+  const all = [];
+  const seen = new Set();
+  for (const win of args.windows) {
+    for (const kw of kwIds) {
+      let ts = null, id = null, pages = 0;
+      while (pages < 6) {
+        let u = '/api/events/list?limit=100&sortBy=ingested_at&sortOrder=DESC&useCursor=true' +
+                '&keywordId=' + encodeURIComponent(kw) +
+                '&startDate=' + win.start + '&endDate=' + win.end +
+                '&platformId=' + args.platformId;
+        if (ts != null) u += '&cursorTimestamp=' + ts + '&cursorId=' + encodeURIComponent(id);
+        let res;
+        try { res = await fetch(u, { headers: H }); }
+        catch (e) { out.netErr = String(e); break; }
+        if (res.status === 401) return { authExpired: true };
+        if (!res.ok) { out.apiErr = 'HTTP ' + res.status; break; }
+        const d = (await res.json()).data || {};
+        const items = d.items || [];
+        for (const e of items) {
+          if (seen.has(e.id)) continue;
+          seen.add(e.id);
+          e._kw = kw; e._win = win.label;
+          all.push(e);
+        }
+        pages++;
+        if (!d.hasMore || !d.nextCursor || !items.length) break;
+        ts = d.nextCursor.timestamp; id = d.nextCursor.id;
+      }
+    }
+  }
+  // 3) 平台名映射
+  let platName = {};
+  try {
+    const pr = await fetch('/api/platforms', { headers: H });
+    const plats = (await pr.json()).data || [];
+    plats.forEach(p => { platName[p.id] = p.code; });
+  } catch (e) {}
+  all.forEach(e => { e.platform = platName[e.platformId] || e.platformId; });
+  all.sort((a, b) => (b.occurredAt || 0) - (a.occurredAt || 0));
+  return { ok: true, events: all, keywordIds: kwIds, platformName: args.platformId,
+           platformId: args.platformId };
+}, __ARGS__);
+return r;
+"""
+
+
+def sn_channel_path(sn, day_str, cfg=None, platform="discord"):
+    """子网频道补充取数的落盘路径（独立于社区日报缓存）。"""
+    return os.path.join(_out_dir(cfg), "sn_channel_SN%s_%s_%s.json" % (sn, platform, day_str))
+
+
+def fetch_sn_channel(sn, day_str, cfg=None, log=print, platform="discord", days=2,
+                     max_items=200):
+    """按子网关键词组取该子网「当日+昨日」频道消息（v1.27.0）。
+
+    与 fetch_day() 的区别：
+      - fetch_day 抓全平台关键词流（某个子网当天可能 0 命中）；
+      - 本函数用「该 SN 关键词组的 keywordId」精确过滤，只取该子网命中的消息，
+        默认取当日 + 昨日两个自然日（days=2），平台默认 discord（DC 子网频道）。
+
+    落盘到独立文件 sn_channel_SN{sn}_{platform}_{day}.json，不覆盖社区日报缓存。
+    取数失败抛异常，由调用方（投研）决定降级——不阻断投研主流程。
+
+    返回 payload：{sn, day, platform, windows, keyword_ids, events, stats}
+    """
+    sn = int(sn)
+    # 窗口：当日 00:00→当前，昨日 00:00→24:00（与第二轮 TG 日报口径一致）
+    windows = []
+    for back in range(max(1, int(days))):
+        d = datetime.datetime.strptime(day_str, "%Y-%m-%d").date() - datetime.timedelta(days=back)
+        start, end = _day_bounds(d.strftime("%Y-%m-%d"), until_now=(back == 0))
+        windows.append({"label": d.strftime("%Y-%m-%d"), "start": start, "end": end})
+    cli = _pw_cli(cfg)
+    plat_id = {"discord": "plt_discord", "telegram": "plt_telegram",
+               "twitter": "plt_twitter"}.get(platform, platform)
+    args = {"sn": sn, "windows": windows, "platformId": plat_id}
+    code = _JS_SN_CHANNEL.replace("__ARGS__", json.dumps(args, ensure_ascii=False))
+    log("子网频道补充：取 SN%d 的 %s 频道消息（%s，关键词组精确匹配）…"
+        % (sn, platform, "、".join(w["label"] for w in windows)))
+    ensure_ready(cfg, log=log)
+    res = _run_cli(cli, code, timeout=180)
+    if res.get("authExpired"):
+        lr = auto_login(cfg, log=log)
+        if lr.get("ok"):
+            log("dtt 会话已续期，重新取子网频道消息…")
+            res = _run_cli(cli, code, timeout=180)
+    if res.get("authExpired"):
+        raise RuntimeError("dtt 登录已失效，子网频道补充取数跳过")
+    if res.get("err") or res.get("apiErr") or res.get("netErr"):
+        raise RuntimeError("子网频道取数失败：%s" %
+                           (res.get("err") or res.get("apiErr") or res.get("netErr")))
+    if not res.get("ok"):
+        raise RuntimeError("子网频道取数失败：%s" % str(res)[:200])
+    events = []
+    for e in (res.get("events") or [])[:int(max_items)]:
+        t = e.get("occurredAt")
+        events.append({
+            "id": e.get("id"), "author": e.get("author") or "", "content": e.get("content") or "",
+            "sourceUrl": e.get("sourceUrl") or "", "platform": e.get("platform") or platform,
+            "platformId": e.get("platformId") or plat_id,
+            "occurredAt": t, "kw": e.get("_kw"), "window": e.get("_win"),
+            "time": (datetime.datetime.fromtimestamp(t / 1000, TZ).strftime("%m-%d %H:%M")
+                     if t else "??:??"),
+        })
+    payload = {
+        "sn": sn, "day": day_str, "platform": platform, "platform_id": plat_id,
+        "fetched_at": datetime.datetime.now(TZ).isoformat(timespec="seconds"),
+        "windows": windows, "keyword_ids": res.get("keywordIds") or [],
+        "stats": {"total": len(events),
+                  "by_day": {w["label"]: sum(1 for e in events if e.get("window") == w["label"])
+                             for w in windows}},
+        "events": events,
+    }
+    out = sn_channel_path(sn, day_str, cfg, platform=platform)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    tmp = out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, out)
+    log("子网频道补充完成：SN%d %s 频道取到 %d 条（%s），落盘 %s"
+        % (sn, platform, len(events),
+           " ".join("%s=%d" % (k, v) for k, v in payload["stats"]["by_day"].items()), out))
+    return payload
+
+
+def read_sn_channel(sn, day_str, cfg=None, platform="discord"):
+    """读已落地的子网频道补充取数结果；不存在返回 None。"""
+    p = sn_channel_path(sn, day_str, cfg, platform=platform)
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 if __name__ == "__main__":
     import sys
     day = sys.argv[1] if len(sys.argv) > 1 else (

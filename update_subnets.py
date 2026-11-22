@@ -250,8 +250,8 @@ def log_changes(changes, today):
 # ----------------------------------------------------------------------------
 # 5) 把知识库同步进已建档案
 # ----------------------------------------------------------------------------
-def sync_archives(cfg, kb=None, dry=False, log=None):
-    """用知识库的当前「名称 / 业务 / 官网 / 仓库」校正已建子网档案。
+def sync_archives(cfg, kb=None, dry=False, log=None, changes=None, details=None):
+    """用知识库的当前「名称 / 业务 / 官网 / 仓库」校正已建子网档案，并处理注销/重新注册。
 
     为什么必须做：subnets.json 是名字与业务的事实来源，档案只是它的副本。
     2026-11-09 就吃过这个亏 —— 链上和报告都改成 Zils 了，档案里还写着 Astrid，
@@ -268,6 +268,24 @@ def sync_archives(cfg, kb=None, dry=False, log=None):
     subs = kb.get("subnets") or {}
     arc_dir = A.get_arc_dir(cfg)
     changed = []
+    detail = details if details is not None else {}
+
+    # 注销优先：旧档立刻搬进 _retired/，并从活动索引移除。
+    # 必须在下面的活动档案同步之前做，否则旧档会被当成当前档再写一次。
+    retired = A.retire_archives_from_kb(arc_dir, kb=kb, dry=dry, log=log)
+    detail["archive_retired"] = retired
+
+    # 同号重新注册：旧档留在归档区，活动目录另建全新空档。
+    rebuilt = []
+    for kind, nid, _name, _old in (changes or []):
+        if kind != "重新注册":
+            continue
+        rec = subs.get(str(nid)) or {}
+        item = A.create_fresh_archive(arc_dir, nid, kb_rec=rec, dry=dry, log=log)
+        if item:
+            rebuilt.append(item)
+    detail["archive_rebuilt"] = rebuilt
+
     for path in sorted(glob.glob(os.path.join(arc_dir, "SN*", "archive.json"))):
         try:
             with open(path, encoding="utf-8") as f:
@@ -308,13 +326,17 @@ def sync_archives(cfg, kb=None, dry=False, log=None):
         changed.append((arc.get("sn"), old_name, arc.get("name") or "", dirty))
         log("  ↳ SN%s 档案同步：%s" % (arc.get("sn"), "；".join(dirty)))
 
-    if changed and not dry:
+    if (changed or retired or rebuilt) and not dry:
         try:
             A.refresh_index(arc_dir)
         except Exception as e:
             log("档案索引刷新失败（忽略）：%s" % e)
     if changed:
         log("档案同步完成：%d 份子网档案已对齐知识库" % len(changed))
+    if retired:
+        log("注销归档完成：%d 份旧档已移出活动目录" % len(retired))
+    if rebuilt:
+        log("重新注册建档完成：%d 份新档已建立" % len(rebuilt))
     return changed
 
 
@@ -334,6 +356,7 @@ def run(cfg=None, use_llm=True, dry=False, sync_archive=True, log=None):
     cfg = cfg if cfg is not None else P.load_config()
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     out = {"ok": False, "fetched": 0, "changes": [], "archive_synced": [],
+           "archive_retired": [], "archive_rebuilt": [],
            "error": "", "dry": dry}
 
     log("拉取链上子网身份：%s" % SRC_URL)
@@ -380,7 +403,8 @@ def run(cfg=None, use_llm=True, dry=False, sync_archive=True, log=None):
         # dry-run 也把档案同步的差异试算出来（只打印不写盘），否则看不出全貌
         if sync_archive:
             try:
-                out["archive_synced"] = sync_archives(cfg, kb=new, dry=True, log=log)
+                out["archive_synced"] = sync_archives(
+                    cfg, kb=new, dry=True, log=log, changes=changes, details=out)
             except Exception as e:
                 log("档案同步预演失败（忽略）：%s" % e)
         log("--dry-run：不写文件")
@@ -395,7 +419,8 @@ def run(cfg=None, use_llm=True, dry=False, sync_archive=True, log=None):
 
     if sync_archive:
         try:
-            out["archive_synced"] = sync_archives(cfg, kb=new, log=log)
+            out["archive_synced"] = sync_archives(
+                cfg, kb=new, log=log, changes=changes, details=out)
         except Exception as e:
             log("档案同步失败（知识库已更新，不影响本次结果）：%s" % e)
     return out

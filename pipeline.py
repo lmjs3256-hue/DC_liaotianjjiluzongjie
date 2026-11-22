@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.25.0"
+__version__ = "1.27.0"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -3010,7 +3010,8 @@ def build_subnet_context_block(cfg, items, day_str=None, max_sn=10, max_chars=12
         except Exception:
             continue
         for sn, (kind, _via) in hits.items():
-            if kind == "strong":
+            # 已注销子网的旧档不再参与日报/事件报告的任何背景注入
+            if kind == "strong" and not SA.is_retired_sn(sn):
                 cnt[sn] = cnt.get(sn, 0) + 1
     if not cnt:
         return ""
@@ -3149,7 +3150,8 @@ def build_research_ref_block(cfg, items, day_str=None, max_sn=8, max_chars=1800)
         except Exception:
             continue
         for sn, (kind, _via) in hits.items():
-            if kind == "strong":
+            # 已注销子网：连外部投研库的历史报告也不再引用
+            if kind == "strong" and not SA.is_retired_sn(sn):
                 cnt[sn] = cnt.get(sn, 0) + 1
     if not cnt:
         return ""

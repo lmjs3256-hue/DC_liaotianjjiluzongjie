@@ -1,0 +1,24 @@
+digest - 导出前一天并双推（可跟日期/多日）
+today - 导出并总结今天的聊天记录（00:00到现在）
+weekly - 生成本周周报
+community_today - 今日社区日报（dtt版，今日00:00→当前）
+community_yesterday - 昨日社区日报（dtt版，昨日00:00→当前）
+community - 社区日报（默认昨日，可跟日期/nopush）
+community_confirm - 确认社区日报冲突（分步引导：SN 结论）
+community_reconfirm - 按人工确认重推社区日报确认版
+tg_group - TG群消息日报（分步选群/日期；也可 /tg群今日）
+tg_group_today - 今日TG群消息日报（4活跃群）
+tg_group_yesterday - 昨日TG群消息日报
+model - 大模型平台切换（/model sn53|sn28，大小写随意）
+gamma - Gamma情报汇总（分步7项：开通列表/收支/周/月/跨网/跨网周/跨网月；也可 /gamma 列表、/gamma 跨网）
+water - 水聊侧记（只挑闲聊，可跟日期/天数）
+research - 子网投研报告（/research 29，也可直接发 29）
+archive - 全量重建子网档案（换机器/补历史才用；日常导出自动建档）
+archive_list - 列出已建档子网（/archive_list 29 看单个）
+watch - 查看潜力观察/跨日热点(可跟天数, 如 /watch 7)
+repush - 补推已生成的日报(可跟日期与 tg/feishu)
+retry - 按反馈重总结，或重做刚出过的子网投研
+kb - 子网知识库周更状态（/kb update 立即校对）
+keyboard - 重新显示底部按钮栏
+hidekeyboard - 收起底部按钮栏
+help - 显示帮助

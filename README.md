@@ -278,29 +278,36 @@ python pipeline.py
 3. 把机器人拉进你要收推送的群；在群里发任意一条消息
 4. 打开 @RawDataBot 或 @GetIDsBot，转发/查看那条消息，拿到群的 **chat_id**（负数，如 `-5111149587`）填到 `telegram_chat_id`
 5. 默认**任何人**都能触发（开放模式）；想只让指定人触发：填 `allowed_user_ids`（TG 数字 ID，@GetIDsBot 可查）
-6. （可选）在 @BotFather 发 `/setcommands`，选你的机器人，粘贴下面这段，让输入 `/` 时弹出指令菜单：
+6. （可选）在 @BotFather 发 `/setcommands`，选你的机器人，把下面代码块里的内容
+   **整段复制粘贴**（每行顶格、无缩进；BotFather 的 setcommands 是**覆盖式**的，
+   必须一次性提交全部命令，不能只加一条）：
    ```
-   digest - 导出前一天并双推（可跟日期/多日）
-   today - 导出并总结今天的聊天记录（00:00到现在）
-   weekly - 生成本周周报
-   community_today - 今日社区日报（dtt版，今日00:00→当前）
-   community_yesterday - 昨日社区日报（dtt版，昨日00:00→当前）
-   community - 社区日报（默认昨日，可跟日期/nopush）
-   community_confirm - 确认社区日报冲突（分步引导：SN 结论）
-   community_reconfirm - 按人工确认重推社区日报确认版
-   model - 大模型平台切换（/model sn53|sn28，大小写随意）
-   gamma - Gamma情报汇总（分步7项：开通列表/收支/周/月/跨网/跨网周/跨网月；也可 /gamma 列表、/gamma 跨网）
-   water - 水聊侧记（只挑闲聊，可跟日期/天数）
-   research - 子网投研报告（/research 29，也可直接发 29）
-   archive_list - 列出已建档子网（/archive_list 29 看单个）
-   watch - 查看潜力观察/跨日热点(可跟天数, 如 /watch 7)
-   repush - 补推已生成的日报(可跟日期与 tg/feishu)
-   retry - 按反馈重总结，或重做刚出过的子网投研
-   kb - 子网知识库周更状态（/kb update 立即校对）
-   keyboard - 重新显示底部按钮栏
-   hidekeyboard - 收起底部按钮栏
-   help - 显示帮助
+digest - 导出前一天并双推（可跟日期/多日）
+today - 导出并总结今天的聊天记录（00:00到现在）
+weekly - 生成本周周报
+community_today - 今日社区日报（dtt版，今日00:00→当前）
+community_yesterday - 昨日社区日报（dtt版，昨日00:00→当前）
+community - 社区日报（默认昨日，可跟日期/nopush）
+community_confirm - 确认社区日报冲突（分步引导：SN 结论）
+community_reconfirm - 按人工确认重推社区日报确认版
+tg_group - TG群消息日报（分步选群/日期；也可 /tg群今日）
+tg_group_today - 今日TG群消息日报（4活跃群）
+tg_group_yesterday - 昨日TG群消息日报
+model - 大模型平台切换（/model sn53|sn28，大小写随意）
+gamma - Gamma情报汇总（分步7项：开通列表/收支/周/月/跨网/跨网周/跨网月；也可 /gamma 列表、/gamma 跨网）
+water - 水聊侧记（只挑闲聊，可跟日期/天数）
+research - 子网投研报告（/research 29，也可直接发 29）
+archive - 全量重建子网档案（换机器/补历史才用；日常导出自动建档）
+archive_list - 列出已建档子网（/archive_list 29 看单个）
+watch - 查看潜力观察/跨日热点(可跟天数, 如 /watch 7)
+repush - 补推已生成的日报(可跟日期与 tg/feishu)
+retry - 按反馈重总结，或重做刚出过的子网投研
+kb - 子网知识库周更状态（/kb update 立即校对）
+keyboard - 重新显示底部按钮栏
+hidekeyboard - 收起底部按钮栏
+help - 显示帮助
    ```
+   > 上面这段也单独存成了 `botfather_commands.txt`，打开全选复制即可，不会带缩进。
    中文别名同样有效：`/社区今日`=community_today、`/社区昨日`=community_yesterday
    （`/社区` 不带参数也=昨日）、`/水聊`=water、`/投研`=research、
    `/档案`=archive_list、`/模型`=model、`/重总结`=retry、`/收起`=hidekeyboard 等。

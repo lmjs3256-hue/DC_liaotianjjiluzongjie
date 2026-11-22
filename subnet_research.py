@@ -2374,11 +2374,12 @@ def tidy_news_in_timeline(digest, log=print):
 
 
 # ------------------------------------------------------------------ 时间线：倒序 + 上限 + 超限跟踪回填
-# v1.23.0 用户新要求：
+# v1.23.0 / v1.23.1 用户要求：
 #   1) 时间线按真实日期倒序——最新事件排最前面（原来模型常按旧→新写，首条最旧）；
 #   2) 每份报告时间线最多保留 TIMELINE_MAX_EVENTS 条，超出的条目不在时间线里显示；
-#   3) 被截掉的事件里，凡是能对上「📌 预期跟踪」某项（含判定状态的进展），
-#      必须回填进预期跟踪段，不能因为截断把跟踪进度弄丢。
+#   3) 「📌 预期跟踪」里建一份**进展台账**：**所有有进展的事件都要体现**（不只是被截掉的），
+#      每条写清「什么时间 + 什么事情 + 现在进展如何」；其中被时间线超限截断、仍有进展的事件，
+#      额外标注「主线未显示」，保证截断不丢进度、且进度现状可读。
 # 放在 tidy_news_in_timeline 之后调用：那一步会重建时间线段、去重、加图例。
 TIMELINE_MAX_EVENTS = 10
 _TL_ITEM_RE = re.compile(r"^\s*[-*•]\s*")
@@ -2402,23 +2403,72 @@ def _tl_event_date(line, base_year):
     return (yr, mo, dy)
 
 
-def _tl_is_tracking_progress(line, track_keywords):
-    """被截掉的事件是否属于「预期跟踪进度」。
+_TL_PROGRESS_CUE_RE = re.compile(
+    r"已兑现|已证伪|进行中|条件未触发|兑现|证伪|解仓|解锁|unwind|上线|开.*注册|"
+    r"注册.*(关|开)|回购|销毁|支付|到账|跌破|突破|达标|未达标|恢复|重启|"
+    r"达成|落地|通过|批准|关闭|开启|交割|更名|改名|结果|确认|首次|"
+    r"发射|发布|推出|升级|完成|启动|签署|合作",
+    re.I)
+# 进展状态短语：把裸动词翻成一句可读的「现在进展」，弱词/泛词给更明确的措辞
+_TL_STATE_PHRASE = {
+    "发布": "新内容发布", "推出": "新内容推出", "上线": "已上线", "升级": "已升级",
+    "完成": "已完成", "启动": "已启动", "开启": "已开启", "签署": "已签署",
+    "合作": "达成合作", "落地": "已落地", "达成": "已达成", "通过": "已通过",
+    "批准": "已批准", "确认": "已确认", "首次": "首次发生", "结果": "结果已出",
+    "恢复": "已恢复", "重启": "已重启", "突破": "已突破", "达标": "已达标",
+}
 
-    信号：事件里带判定/进展词（兑现/证伪/解仓/上线/注册…），或命中预期跟踪段里
-    提取的专名关键词。纯群聊闲聊、无判定信号的不回填。
+
+def _tl_progress_state(line, track_keywords):
+    """判断一条事件是否「有进展」，并返回进展状态短语。
+
+    返回 (has_progress, state)。state 形如「已落地 / 进行中 / 已兑现 / 数据更新」——
+    供台账「现在进展如何」用。信号：进展动词/判定词，或命中预期跟踪段专名关键词。
     """
     s = _RED_STRIP_RE.sub(r"\1", line or "")
     s = re.sub(r"^\s*[-*•]\s*", "", s).strip()
-    progress_cue = re.search(
-        r"已兑现|已证伪|进行中|条件未触发|兑现|证伪|解仓|解锁|unwind|上线|开.*注册|"
-        r"注册.*(关|开)|回购|销毁|支付|到账|跌破|突破|达标|未达标|恢复|重启|"
-        r"达成|落地|通过|批准|关闭|开启|到期|交割|更名|改名|结果|确认|首次",
-        s, re.I)
-    if progress_cue:
-        return True
+    cues = [x.group(0) for x in _TL_PROGRESS_CUE_RE.finditer(s)]
     low = s.lower()
-    return any(k and len(k) >= 3 and k in low for k in track_keywords)
+    kw_hit = any(k and len(k) >= 3 and k in low for k in track_keywords)
+    if not cues and not kw_hit:
+        return False, ""
+    # 多个信号词时按「判定强度」取最高的那个，别被「首次」这类弱词抢先
+    allcues = " ".join(cues)
+    if any(w in allcues for w in ("已兑现", "证伪", "未达标", "跌破")):
+        state = "已兑现/已证伪"
+    elif any(w in allcues for w in ("解仓", "解锁", "回购", "销毁", "支付", "到账", "交割")):
+        state = "已发生（链上/资金动作）"
+    elif any(w in allcues for w in ("进行中", "未触发", "恢复", "重启")):
+        state = "进行中/推进中"
+    elif cues:
+        # 取措辞最明确的一个信号词（跳过「首次」这类弱词）
+        picked = next((c for c in cues if c in _TL_STATE_PHRASE), cues[0])
+        state = _TL_STATE_PHRASE.get(picked, "新进展：%s" % picked)
+    else:
+        state = "相关进展（命中跟踪项）"
+    return True, state
+
+
+def _tl_ledger_line(line, state, base_year, truncated):
+    """把一条时间线事件改写成台账条目：`时间 · 事情 · 现在进展`。
+
+    truncated=True 时加「主线未显示」标注，告诉读者该事件因时间线限 10 条被截掉。
+    """
+    s = _RED_STRIP_RE.sub(r"\1", line or "")
+    s = re.sub(r"^\s*[-*•]\s*", "", s).strip()
+    d = _tl_event_date(line, base_year)
+    if d:
+        yr, mo, dy = d
+        date_s = ("%04d-%02d-%02d" if yr != base_year else "%02d-%02d") % (
+            (yr, mo, dy) if yr != base_year else (mo, dy))
+    else:
+        date_s = "日期未标注"
+    # 去掉开头残留日期、markdown 加粗、**📰** 前缀；保留验证状态与来源标记 [X]/[群聊]
+    body = re.sub(r"^(?:\d{4}-)?\d{1,2}-\d{2}\s*[·•]\s*", "", s).strip()
+    body = body.replace("**", "").strip()
+    body = re.sub(r"^📰\s*", "", body).strip()
+    flag = " · ⚠️主线未显示（时间线超限移入）" if truncated else ""
+    return "- %s · %s · 现在进展：%s%s" % (date_s, body, state, flag)
 
 
 def _tl_track_keywords(digest):
@@ -2506,35 +2556,27 @@ def sort_cap_timeline(digest, log=print, max_events=TIMELINE_MAX_EVENTS):
     lines[ts + 1:te] = new_seg
     out = "\n".join(lines)
 
-    # 超限的跟踪进度回填到「📌 预期跟踪」，避免截断导致进度丢失
-    if dropped:
-        kws = _tl_track_keywords(out)
-        progress = [ln for ln in dropped if _tl_is_tracking_progress(ln, kws)]
-        if progress:
-            uniq, seen = [], set()
-            for ln in progress:
-                key = _RED_STRIP_RE.sub(r"\1", ln)
-                key = re.sub(r"\s+", "", key)[:80]
-                if key in seen:
-                    continue
-                seen.add(key)
-                uniq.append(ln)
-            note_lines = []
-            for ln in uniq[:6]:
-                body = re.sub(r"^\s*[-*•]\s*", "", _RED_STRIP_RE.sub(r"\1", ln)).strip()
-                body = re.sub(r"\s*·\s*((?:✅已验证|⚠️未验证)[^·]*)$", "", body)
-                note_lines.append("- ⏳（时间线超限移入）" + body)
-            note = ("**⏳ 跟踪进度补充**（时间线仅显示最新 %d 条，以下为被截掉、但与预期跟踪直接相关的进展）：\n%s"
-                    % (max_events, "\n".join(note_lines)))
-            out = _insert_section(out, note, "📌 预期跟踪")
-            stats["backfilled"] = len(note_lines)
-            log("时间线倒序/限条：保留最新 %d 条，截掉 %d 条；其中 %d 条跟踪进度已回填预期跟踪"
-                % (len(kept), len(dropped), len(note_lines)))
-        else:
-            log("时间线倒序/限条：保留最新 %d 条，截掉 %d 条（无跟踪进度需回填）"
-                % (len(kept), len(dropped)))
+    # 进展台账（v1.23.1）：「📌 预期跟踪」里体现**所有有进展的事件**（含时间线保留的与
+    # 被截断的），每条写清「时间 + 事情 + 现在进展如何」；被截断的标注「主线未显示」。
+    kws = _tl_track_keywords(out)
+    dropped_set = set(dropped)
+    ledger = []
+    for _d, ln in ordered:  # ordered = 全部事件已按日期倒序（最新在前），与主线一致
+        has, state = _tl_progress_state(ln, kws)
+        if has:
+            ledger.append(_tl_ledger_line(ln, state, base_year, ln in dropped_set))
+    if ledger:
+        note = ("**⏳ 进展台账**（所有有进展事件的现状；时间线仅显示最新 %d 条，"
+                "标注「主线未显示」者因超限被截掉、但在此保留其进度）：\n%s"
+                % (max_events, "\n".join(ledger)))
+        out = _insert_section(out, note, "📌 预期跟踪")
+        stats["backfilled"] = sum(1 for ln in dropped if _tl_progress_state(ln, kws)[0])
+        log("时间线倒序/限条：保留最新 %d 条，截掉 %d 条；进展台账收录全部 %d 条有进展事件"
+            "（其中被截断 %d 条已标注主线未显示）"
+            % (len(kept), len(dropped), len(ledger), stats["backfilled"]))
     else:
-        log("时间线倒序/限条：共 %d 条，未超 %d 条上限" % (len(items), max_events))
+        log("时间线倒序/限条：保留最新 %d 条，截掉 %d 条（无有进展事件）"
+            % (len(kept), len(dropped)))
     return out, stats
 
 

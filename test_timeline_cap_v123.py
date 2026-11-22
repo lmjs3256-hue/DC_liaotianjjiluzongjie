@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v1.23.0 回归：时间线倒序（最新在前）+ 最多10条 + 超限跟踪进度回填预期跟踪。"""
+"""v1.23.1 回归：时间线倒序（最新在前）+ 最多10条 + 全部有进展事件进台账（时间/事情/现状）。"""
 import sys
 import subnet_research as S
 
@@ -52,23 +52,33 @@ check("最旧11-01~11-03被截", all(("11-%02d" % d) not in l for l in seg2 for 
 check("统计 dropped=3", st2["dropped"] == 3 and st2["kept"] == 10)
 check("图例未被计数/保留", "为最新资讯" in r2)
 
-print("== 3) 被截条目含跟踪进度 → 回填预期跟踪 ==")
+print("== 3) 进展台账：全部有进展事件都体现，被截断的标注主线未显示 ==")
 lines = ["**🗓 重要事件时间线**"]
-# 11-01 是最旧的，会被截掉；它是「owner 解仓」的跟踪进展
-lines.append("- 2026-11-01 · owner 首次解仓，unwind_pct 上升，解仓兑现 · ✅已验证")
+# 11-01 最旧、会被截掉，是有进展的「owner 解仓」；11-02 是普通群聊（无线索）
+lines.append("- 2026-11-01 · owner 首次解仓，unwind_pct 上升 · ✅已验证")
 lines.append("- 2026-11-02 · 群内闲聊某话题 · ⚠️未验证")
-for day in range(3, 14):
+# 11-13 是最新、时间线会保留，也是有进展事件（新合作发布）
+lines.append("- 2026-11-13 · 官方宣布新合作上线 · ✅已验证")
+for day in range(3, 13):
     lines.append("- 2026-11-%02d · 普通事件%02d · ✅已验证" % (day, day))
 lines += ["注：<font color=\"red\">**红色加粗**</font>为最新资讯", "", "**📊 当前数据**", "当前价格：0.002 τ", "",
           "**📌 预期跟踪**", "- ⏳进行中：owner 解仓 → 解仓比例再升即兑现"]
 d3 = "\n".join(lines)
 r3, st3 = S.sort_cap_timeline(d3, log=LOG, max_events=10)
-check("跟踪进度回填节出现", "跟踪进度补充" in r3, r3[-600:])
-check("解仓事件被回填", "owner 首次解仓" in r3 and "tracking进度" not in r3)
-check("闲聊未被回填", "群内闲聊" not in r3.split("跟踪进度补充")[-1], r3[-400:])
-check("回填节紧挨预期跟踪前", r3.index("跟踪进度补充") < r3.index("📌 预期跟踪"))
+ledger3 = r3.split("**⏳ 进展台账**")[1].split("**📌 预期跟踪**")[0] if "**⏳ 进展台账**" in r3 else ""
+check("进展台账节出现", "进展台账" in r3, r3[-700:])
+check("台账紧挨预期跟踪前", r3.index("进展台账") < r3.index("📌 预期跟踪"))
+check("被截断的解仓事件进台账", "owner 首次解仓" in ledger3)
+check("被截断的标注主线未显示", "主线未显示" in ledger3 and "owner 首次解仓" in ledger3)
+check("保留在时间线的进展事件也进台账", "新合作上线" in ledger3)
+check("每条含'现在进展'字段", ledger3.count("现在进展") >= 2, ledger3)
+check("无进展的群聊不进台账", "群内闲聊" not in ledger3, ledger3)
+check("台账无重复日期前缀", "· 2026-11-01 · owner" not in ledger3, ledger3)
+check("台账无 markdown 加粗/📰标记", "**" not in ledger3 and "📰" not in ledger3, ledger3)
+check("台账按日期倒序(11-13在11-01前)", ledger3.index("11-13") < ledger3.index("11-01"), ledger3)
+check("进展状态是明确短语", "现在进展：" in ledger3 and "新进展：首次" not in ledger3, ledger3)
 check("统计 backfilled>=1", st3["backfilled"] >= 1)
-check("被截条目不在时间线里", "owner 首次解仓" not in r3.split("**🗓 重要事件时间线**")[1].split("**📊")[0])
+check("被截解仓事件不在时间线", "owner 首次解仓" not in r3.split("**🗓 重要事件时间线**")[1].split("**📊")[0])
 
 print("== 4) 跨年：12月旧 / 1月新，倒序仍正确 ==")
 d4 = """**🗓 重要事件时间线**

@@ -1108,6 +1108,42 @@ def get_community_confirms(cfg, day):
     return out
 
 
+def get_all_confirms(cfg, sn=None):
+    """取所有（或指定 SN）已人工裁决的社区线索确认，跨日期。
+
+    返回 {sn(int): [{date, status, note, at}, ...]}，按日期倒序。
+    v1.30.2：供社区日报/投研在生成前注入「已确认冲突」，避免模型
+    对同一条冲突每次重跑都重新标「待人工确认」（SN55 反复提示）。
+    与 get_community_confirms(cfg, day) 的区别：那个按某一天查、供专区渲染；
+    这个跨全部日期查、供生成输入。
+    """
+    arc_dir = _archive_dir_of(cfg)
+    out = {}
+    if not os.path.isdir(arc_dir):
+        return out
+    if sn is not None:
+        dirs = [(int(sn), os.path.join(arc_dir, "SN%d" % int(sn)))]
+    else:
+        dirs = []
+        for entry in os.listdir(arc_dir):
+            mdir = re.match(r"^(?:SN)?(\d{1,4})$", entry, re.I)
+            if mdir and os.path.isdir(os.path.join(arc_dir, entry)):
+                dirs.append((int(mdir.group(1)), os.path.join(arc_dir, entry)))
+    for sn_i, _d in dirs:
+        arc = load_archive(arc_dir, sn_i)
+        recs = []
+        for c in (arc.get("community_digests") or []):
+            cf = c.get("confirm") or {}
+            if not cf.get("status"):
+                continue
+            recs.append({"date": c.get("date") or "", "status": cf["status"],
+                         "note": cf.get("note") or "", "at": cf.get("at") or ""})
+        if recs:
+            recs.sort(key=lambda r: r.get("date") or "", reverse=True)
+            out[sn_i] = recs
+    return out
+
+
 def refresh_index(arc_dir):
     idx = {"updated_at": datetime.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), "subnets": {}}
     try:

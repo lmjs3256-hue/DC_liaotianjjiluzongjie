@@ -393,6 +393,10 @@ COMMUNITY_SYSTEM_PROMPT = (
     "冲突：社区引用的收入数字可信度与档案记录不一致，需核实是否有链上/审计支撑\n"
     "- **SN 编号和子网名必须写**（从输入对照取，查不到就只写编号）；社区/档案/冲突三项内容都要具体，"
     "禁止只写「存在冲突」这种空话。把冲突并列写出，不要二选一、不要静默采信任何一边。\n"
+    "- **已人工裁决的冲突不再重复挂起（v1.30.2）**：输入里若附了「已人工裁决的历史冲突」段，"
+    "里面列的 SN 都是人工已下结论的——今日即便又出现相同说法，**禁止**再给它们标"
+    "「⚠️待人工确认」冲突标记（同一冲突不重复挂起）。确需提及就按人工批注口径带一句"
+    "「（该说法已于<日期>经人工核实/推翻）」。只有段里没列过的新冲突才按上面的格式标。\n"
     "- 没有矛盾就不要硬标；正常的、无历史对照的消息不加此标记。\n"
     "\n"
     "【排版与篇幅（飞书/TG 双平台通用）】\n"
@@ -664,6 +668,32 @@ def build_input(payload, cfg=None):
         if ref:
             lines.append("\n===== 历史档案/投研参考（历史快照，可能过时；与今日矛盾要标⚠️待人工确认）=====\n" + ref)
     except Exception as e:
+        pass
+
+    # v1.30.2：注入「已人工裁决的冲突」。此前模型只看历史快照，不知道哪个冲突
+    # 已经被人工核实/推翻，于是每次重跑都把同一个冲突重新标成⚠️待人工确认
+    # （SN55 收入数字反复提示）。这里把结论喂进去，让模型从源头不再重复挂起。
+    try:
+        import subnet_archive as SA
+        cf_all = SA.get_all_confirms(cfg or {})
+        if cf_all:
+            snames = _sn_names()
+            cflines = []
+            for sn in sorted(cf_all):
+                for cf in cf_all[sn]:
+                    tag = "✅ 人工已核实" if cf.get("status") == "confirmed" else "❌ 人工已推翻"
+                    nm = snames.get(sn, "")
+                    cflines.append("- SN%d%s · %s · %s：%s" % (
+                        sn, (" " + nm) if nm else "", tag, cf.get("at") or "—",
+                        (cf.get("note") or "（无批注）")[:160]))
+            if cflines:
+                lines.append("\n===== 已人工裁决的历史冲突（禁止再标⚠️待人工确认）=====\n"
+                             + "\n".join(cflines)
+                             + "\n**规则**：以上冲突均已有人工结论。今日社区消息即便再次出现相同说法，"
+                             "也**禁止**再写成「⚠️待人工确认」或「需核实」的冲突标记——"
+                             "同一冲突不重复挂起。若确需提及，按人工批注口径带一句"
+                             "「（该说法已于<日期>经人工核实/推翻）」即可。")
+    except Exception:
         pass
 
     return "\n".join(lines), ordered, sn_excerpts

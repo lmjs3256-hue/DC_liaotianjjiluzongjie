@@ -539,14 +539,16 @@ def run_tg_group_day(cfg, day_str, log=print, push=True, group_id=None):
     # 5) 双推
     scope = ("【%s】" % group_name) if group_name else ""
     title = "💬 Bittensor TG 群消息日报%s · %s（%s）" % (scope, day_str, day_label)
+    # TG群日报缓存 bounds 是毫秒（unit=ms），用自身取数边界而非 DC 日报的 range。
+    rng = P.bounds_range_text(payload.get("bounds"))
     if push:
-        log("TG群日报推送：飞书 + TG")
+        log("TG群日报推送：飞书 + TG（覆盖 %s）" % (rng or "未记录"))
         try:
-            P.push_feishu(cfg, title, digest)
+            P.push_feishu(cfg, title, digest, range_text=rng)
         except Exception as e:
             log("TG群日报飞书推送失败（不影响 TG）：%s" % e)
         try:
-            P.push_telegram(cfg, title, digest)
+            P.push_telegram(cfg, title, digest, range_text=rng)
         except Exception as e:
             log("TG群日报 TG 推送失败：%s" % e)
 

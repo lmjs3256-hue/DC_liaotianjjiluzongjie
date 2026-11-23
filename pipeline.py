@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.30.0"
+__version__ = "1.30.1"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -2393,7 +2393,12 @@ def generate_digest(cfg_i, text_block, system_prompt, items, tag=""):
     return digest
 
 
-def push_feishu(cfg, title, digest):
+def push_feishu(cfg, title, digest, range_text=None):
+    """推送飞书。range_text：显式指定头部覆盖范围（社区/TG群日报传自身取数边界）。
+
+    v1.30.1：只有 DC 日报标题才允许从 _digest_state.json 读范围；其它带日期的
+    「日报」标题（社区/TG群/Gamma）此前会误读 DC 日报的 10:44 边界。
+    """
     url = cfg.get("feishu_webhook_url")
     if not url:
         log("未配置 feishu_webhook_url，跳过飞书推送")
@@ -2415,7 +2420,10 @@ def push_feishu(cfg, title, digest):
     label = model_label(cfg)
     if kind == "日报":
         # 日报顶部显示真实覆盖范围（到分钟，省空间），如「11-05 00:00 → 11-06 07:10」
-        rng = _day_range_text(cfg, title)
+        # 显式 range_text 优先；否则仅 DC 日报（标题含 DTAO price-talk 日报）才去查
+        # _digest_state.json，避免社区/TG群/Gamma 等复用推送层时串到 DC 的边界。
+        rng = range_text if range_text is not None else (
+            _day_range_text(cfg, title) if _is_dc_daily_title(title) else None)
         date_line = "📅 %s · 🤖 %s 生成" % (rng or day, label)
     else:
         # 周报/专题：标题本身已是范围或多日汇总，维持日期显示
@@ -2494,7 +2502,8 @@ def _tg_md(s):
     s = s.replace("\\", "\\\\").replace("`", "\\`").replace("_", "\\_")
     return s
 
-def push_telegram(cfg, title, digest):
+def push_telegram(cfg, title, digest, range_text=None):
+    """推送 TG。range_text 语义同 push_feishu（v1.30.1）。"""
     token = cfg.get("telegram_bot_token")
     chat_id = cfg.get("telegram_chat_id")
     if not token or not chat_id:
@@ -2509,7 +2518,8 @@ def push_telegram(cfg, title, digest):
             else ("水聊" if "水聊" in title else "日报")))
     hdr = "*%s*" % t
     if kind == "日报":
-        rng = _day_range_text(cfg, title)
+        rng = range_text if range_text is not None else (
+            _day_range_text(cfg, title) if _is_dc_daily_title(title) else None)
         if rng:
             hdr += "\n📅 " + rng
     full = "%s\n%s\n\n%s\n\n%s\n🤖 由 %s 生成 · DTAO price-talk %s" % (
@@ -2737,6 +2747,35 @@ def _record_export(cfg, day_str, json_path, count):
 
 def _day_exports(cfg, day_str):
     return _load_digest_state(cfg).get(day_str, {}).get("exports", [])
+
+
+def _is_dc_daily_title(title):
+    """标题是否为 DC（Discord）日报——只有它才允许读 _digest_state.json 的 range。
+
+    v1.30.1：社区/TG群/Gamma 日报标题同样含日期，若不做白名单会被推送层当成
+    DC 日报，显示成 DC 当天的导出边界（如 10:44），与实际取数时刻不符。
+    """
+    return "DTAO price-talk 日报" in (title or "")
+
+
+def bounds_range_text(bounds, unit=None):
+    """把任意取数 payload 的 bounds 转成推送头部的范围文本。
+
+    bounds: {"start": ts, "end": ts}；unit 为 "ms" 时按毫秒解析（TG群日报缓存），
+    否则按秒（社区日报缓存）。返回 None 表示边界缺失，调用方回退到日期。
+    """
+    b = bounds or {}
+    s, e = b.get("start"), b.get("end")
+    if not s or not e:
+        return None
+    div = 1000.0 if (unit or b.get("unit")) == "ms" else 1.0
+    tz = datetime.timezone(datetime.timedelta(hours=8))
+    try:
+        a = datetime.datetime.fromtimestamp(float(s) / div, tz)
+        z = datetime.datetime.fromtimestamp(float(e) / div, tz)
+        return _fmt_range(a, z)
+    except Exception:
+        return None
 
 
 def _fmt_range(after_dt, before_dt):

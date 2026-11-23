@@ -778,16 +778,19 @@ def run_community_day(cfg, day_str, log=print, push=True):
     all_confirmed = conflicts_all_confirmed(flags, confirms)
     if flags:
         title += " ✅人工已确认" if all_confirmed else " ⚠️待人工核对"
+    # 头部范围用本次 dtt 取数的真实边界（所选日 00:00 → 当前触发时刻），
+    # 不能让推送层按标题日期去查 DC 日报的边界（v1.30.1 修复）。
+    rng = P.bounds_range_text(payload.get("bounds"))
     if push:
-        log("社区日报推送：飞书 + TG%s"
+        log("社区日报推送：飞书 + TG%s（覆盖 %s）"
             % ("（标题已打待核对标记）" if flags and not all_confirmed
-               else "（标题标注人工已确认）" if all_confirmed else ""))
+               else "（标题标注人工已确认）" if all_confirmed else "", rng or "未记录"))
         try:
-            P.push_feishu(cfg, title, digest)
+            P.push_feishu(cfg, title, digest, range_text=rng)
         except Exception as e:
             log("社区日报飞书推送失败（不影响 TG）：%s" % e)
         try:
-            P.push_telegram(cfg, title, digest)
+            P.push_telegram(cfg, title, digest, range_text=rng)
         except Exception as e:
             log("社区日报 TG 推送失败：%s" % e)
 
@@ -855,16 +858,20 @@ def push_confirmed_version(cfg, day_str, log=print, push=True):
     day_label = ("昨日" if day_str == (datetime.datetime.now(TZ) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
                  else ("今日" if day_str == datetime.datetime.now(TZ).strftime("%Y-%m-%d") else day_str))
     title = "🌐 Bittensor 社区消息日报（dtt版）· %s（%s · ✅人工确认版）" % (day_str, day_label)
+    # 确认版不重新取数，但仍要显示社区日报自身的取数边界（从当日缓存读），
+    # 不能回落到 DC 日报的 range（v1.30.1）。
+    cached = CF.read_day(day_str, cfg)
+    rng = P.bounds_range_text((cached or {}).get("bounds"))
     if push:
         try:
-            P.push_feishu(cfg, title, new_digest)
+            P.push_feishu(cfg, title, new_digest, range_text=rng)
         except Exception as e:
             log("确认版飞书推送失败（不影响 TG）：%s" % e)
         try:
-            P.push_telegram(cfg, title, new_digest)
+            P.push_telegram(cfg, title, new_digest, range_text=rng)
         except Exception as e:
             log("确认版 TG 推送失败：%s" % e)
-        log("社区日报确认版已推送：飞书 + TG")
+        log("社区日报确认版已推送：飞书 + TG（覆盖 %s）" % (rng or "未记录"))
     return {"ok": True, "day": day_str, "confirmed_count": confirmed_count,
             "conflicts": len(conflicts), "path": dp, "digest": new_digest}
 

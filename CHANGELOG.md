@@ -8,9 +8,19 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.30.0** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.30.1** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
+
+---
+
+## v1.30.1 — 2026-11-23
+
+**修社区/TG群日报头部覆盖范围串成 DC 日报的 10:44**
+
+- **问题**：11-23 17:55 生成的「2026-11-22 社区消息日报」头部显示 `📅 11-22 00:00 → 11-23 10:44`，但本次实际取数边界是 17:58（run.log 明确记录）。根因：`push_feishu/push_telegram` 原先只要标题含日期且判为「日报」，就无差别调用 `_day_range_text()` 读 `exports/_digest_state.json` 里 DC 日报的 `range`——那正是今早 10:44 DC 导出的边界。社区日报、TG群日报、Gamma 日报都复用推送层、标题都带日期，于是全被串成 DC 的范围。模型输入 `build_input()` 里显示的范围本来是对的，只有推送头部错。
+- **修复**：① 推送层新增 `range_text` 显式参数（优先级最高）；② 新增 `_is_dc_daily_title()` 白名单，只有标题含「DTAO price-talk 日报」才允许回退查 `_digest_state.json`，其它标题不查；③ 新增 `bounds_range_text(bounds, unit=None)`，从各任务自身取数边界生成范围（秒级社区缓存 / 毫秒级 TG群缓存自动适配）；④ `community_digest` 正常推送与确认版重推、`tg_group_digest` 推送均传入自身 bounds 算出的范围。DC 日报不传该参数时行为**完全不变**（向后兼容）。
+- **验证**：`test_range_text_v1301.py` 18/18（秒/毫秒边界、同日范围、标题白名单、显式参数优先、不串 DC 范围、DC 默认仍读 state）；全量 12 个测试文件全绿。
 
 ---
 

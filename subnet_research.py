@@ -2120,26 +2120,61 @@ def tidy_github_line(digest, gh_sum=None, log=print):
     return "\n".join(out), fix_n
 
 
+def _heading_like(ln):
+    """判断一行是否为报告板块标题。
+
+    兼容主模型两种输出：代码层插入的加粗标题 `**📢 当日社区动态**`，
+    以及主模型偶尔写成的纯文本标题 `📢 当日社区动态`（v1.30.3 修复：
+    旧逻辑只认加粗行，纯文本标题识别不到会导致原节删不掉、代码层提炼节
+    被追加到文末，出现两个「当日社区动态」板块、第一个照抄英文原文）。
+    """
+    s = (ln or "").strip()
+    if not s:
+        return False
+    if re.match(r"^\*\*.+\*\*$", s):
+        return True
+    # 纯文本板块标题：行首是板块 emoji、整行短、不是列表/引用/表格行。
+    # 排除 ✅/❌/⚠️ 等「标注类」图标开头——它们是正文标注，不是板块标题。
+    if re.match(r"^[✅❌⚠⭕🔴🟢🟡✓✗★☆]", s):
+        return False
+    if (re.match(r"^[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\u23F0-\u23FF]", s)
+            and len(s) <= 45 and not s.startswith(("-", "*", "•", ">", "|"))):
+        return True
+    return False
+
+
 def _take_section(digest, marker):
-    """从报告里抠出一整节（标题行到下一个 **标题** 行前）。返回 (去掉该节的正文, 节文本)。"""
+    """从报告里抠出所有匹配 marker 的整节（标题行到下一个标题行前）。
+
+    返回 (去掉这些节的正文, 节文本)。标题识别兼容加粗与纯文本两种形式；
+    同名节出现多份时一起删掉，避免历史遗留的重复板块（v1.30.3）。
+    """
     lines = (digest or "").splitlines()
-    head = re.compile(r"^\s*\*\*.+\*\*\s*$")
-    start = next((i for i, ln in enumerate(lines)
-                  if marker in ln and head.match(ln)), None)
-    if start is None:
+    out, sections = [], []
+    i = 0
+    while i < len(lines):
+        if marker in lines[i] and _heading_like(lines[i]):
+            j = i + 1
+            while j < len(lines) and not _heading_like(lines[j]):
+                j += 1
+            sections.append("\n".join(lines[i:j]).strip())
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    if not sections:
         return digest, ""
-    end = next((j for j in range(start + 1, len(lines)) if head.match(lines[j])),
-               len(lines))
-    section = "\n".join(lines[start:end]).strip()
-    rest = "\n".join(lines[:start] + lines[end:]).strip()
-    return rest, section
+    return "\n".join(out).strip(), "\n\n".join(sections)
 
 
 def _insert_section(digest, section, before):
-    """把保存的整节插回报告的指定标题之前（压缩/整理误删后的代码兜底）。"""
+    """把保存的整节插回报告的指定标题之前（压缩/整理误删后的代码兜底）。
+
+    标题识别兼容加粗与纯文本两种形式（v1.30.3）。
+    """
     lines = (digest or "").splitlines()
     pos = next((i for i, ln in enumerate(lines)
-                if before in ln and ln.lstrip().startswith("**")), None)
+                if before in ln and _heading_like(ln)), None)
     if pos is None:
         return (digest.rstrip() + "\n\n" + section).strip()
     return "\n".join(lines[:pos] + ["", section, ""] + lines[pos:]).strip()

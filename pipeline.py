@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.30.3"
+__version__ = "1.30.4"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1987,8 +1987,16 @@ def call_llm(cfg, text_block, system_prompt=None, tries=3, budget=None):
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:500]
             last = "%s HTTP 错误 %s: %s" % (model, e.code, detail)
-            # 4xx（key 错误/参数错误）重试无意义，直接抛出
-            if 400 <= e.code < 500 and e.code != 429:
+            # 4xx 通常是 key/参数错误，重试无意义，直接抛出。
+            # 但中转网关（如 engy.ai）会把上游瞬时故障包装成 400，body 里带
+            # upstream_400 / server_error / invalid request 字样——这类是抖动，
+            # 重试可恢复（2026-11-24 SN53 频道节实测：同样请求隔几秒就成功）。
+            # 只有明确是上游错误才纳入重试，避免掩盖真正的 key/参数错误。
+            _low = detail.lower()
+            _upstream_glitch = ("upstream_400" in _low or "upstream_500" in _low
+                                or "server_error" in _low
+                                or ("invalid request" in _low and e.code == 400))
+            if 400 <= e.code < 500 and e.code != 429 and not _upstream_glitch:
                 raise RuntimeError(last)
         except Exception as e:
             last = "%s 调用失败：%s" % (model, e)

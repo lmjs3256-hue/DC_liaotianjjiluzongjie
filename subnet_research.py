@@ -4197,20 +4197,49 @@ def _sn_channel_report_section(cfg, sn, day_str, meta, log=print, max_lines=12, 
         return ""
 
     def _fallback():
-        """提炼失败回退：规范化原文逐条列，不堆一坨、不带尖括号和技术黑话。"""
-        fb = []
+        """提炼彻底失败的中文兜底（v1.30.4）。
+
+        禁止把外文原文塞进「人名(dc) 表示：」伪装成中文提炼——这正是 SN53 反例
+        （全是英文、没总结）。即使降级也要：如实标注未逐句翻译、给中文小结、
+        原文仅作「未翻译原文」附列，绝不静默变成英文堆砌。
+        """
+        pl = "dc" if platform == "discord" else platform.lower()
+        lines = []
+        # 1) 中文概括：从原文抽高频专名作主题线索（不臆测、只列词）
+        topics = []
+        try:
+            import collections
+            cnt = collections.Counter()
+            for au in order[:max_lines]:
+                for c in by_author[au][:2]:
+                    for w in re.findall(r"\b[A-Z][A-Za-z0-9]{2,}\b|\b\d+[A-Z]\d*\b", c or ""):
+                        cnt[w] += 1
+            _stop = {"How", "What", "Why", "The", "And", "You", "Are", "For", "With",
+                     "This", "That", "Can", "Has", "Had", "Was", "Were", " pls", "Pls"}
+            topics = [w for w, _ in cnt.most_common(8) if w not in _stop][:4]
+        except Exception:
+            pass
+        lead = ("自动中文提炼暂未成功（上游服务临时故障），以下为频道原文要点，"
+                "**未逐句翻译**，仅供交叉核验。")
+        lines.append("> ⚠️ " + lead)
+        # 2) 原文明确标为「未翻译原文」，不再用「表示：」冒充提炼
         for au in order[:max_lines]:
             for c in by_author[au][:2]:
                 if c:
-                    fb.append("- %s(%s) 表示：%s ⚠️未验证" %
-                              (au, "dc" if platform == "discord" else platform.lower(), c))
-        return head + "\n".join(fb) + tail if fb else ""
+                    lines.append("- %s(%s) 未翻译原文：%s ⚠️未验证" % (au, pl, c))
+        # 3) 节末必须有中文小结
+        n_people = len(order[:max_lines])
+        topic_txt = ("，高频词涉及 %s" % "、".join(topics)) if topics else ""
+        lines.append("小结：近两日该子网 DC 频道约 %d 位成员发言%s；因自动提炼失败，"
+                     "以上仅列原文供参考，中文要点待下次生成补齐。⚠️未验证"
+                     % (n_people, topic_txt))
+        return head + "\n".join(lines) + tail if len(lines) > 2 else ""
 
     sn_name = (meta or {}).get("name") or "未收录"
     body = ("【本子网：SN%d %s】\n" % (sn, sn_name)
             + "【DC 频道近两日讨论线索（`<>` 内为显示名，直接用）】\n"
             + "\n".join(clues) + "\n")
-    # 无 llm 时尝试用项目默认小模型，彻底失败才回退规范化原文
+    # 无 llm 时尝试用项目默认小模型，彻底失败才回退
     _call = llm
     if _call is None:
         try:
@@ -4221,11 +4250,17 @@ def _sn_channel_report_section(cfg, sn, day_str, meta, log=print, max_lines=12, 
             _call = None
     if _call is None:
         return _fallback()
-    try:
-        out = (_call(body, _SN_CHANNEL_SUMMARY_PROMPT) or "").strip()
-    except Exception as e:
-        log("   ⚠️ 频道讨论中文提炼失败（%s），回退规范化原文" % str(e)[:120])
-        return _fallback()
+    # 提炼：最多两轮。上游瞬时 400 由 call_llm 内部重试兜一轮；这里再给一次
+    # 整体重试机会，两轮都失败才走中文兜底（避免偶发抖动导致整节降级）。
+    out = ""
+    for attempt in range(2):
+        try:
+            out = (_call(body, _SN_CHANNEL_SUMMARY_PROMPT) or "").strip()
+            break
+        except Exception as e:
+            log("   ⚠️ 频道讨论中文提炼第 %d 轮失败（%s）%s"
+                % (attempt + 1, str(e)[:100], "，再重试一次" if attempt == 0 else "，回退中文兜底"))
+            out = ""
     if not out or out.strip() in ("无", "无。"):
         return _fallback()
 
@@ -4250,6 +4285,16 @@ def _sn_channel_report_section(cfg, sn, day_str, meta, log=print, max_lines=12, 
             ln = "%s(dc) %s%s" % (nm, m.group(2), m.group(3).strip())
         kept.append(ln)
     if not kept and not summary:
+        return _fallback()
+    # 中文校验（v1.30.4）：小模型偶尔无视「必须翻译成中文」直接回英文原文。
+    # 若要点里几乎没中文字符，视为提炼失败走兜底，绝不让英文堆砌进报告。
+    # 先剔除「表示/转推/回复/小结/未验证」等模板词，只数真正的中文要点内容，
+    # 否则照抄英文的行也会因模板词「表示」被误判成含中文而漏过。
+    _strip_tpl = lambda s: re.sub(r"表示|转推|回复|小结|未验证|表示：", "", s)
+    _cn = lambda s: len(re.findall(r"[\u4e00-\u9fff]", _strip_tpl(s)))
+    _body_ascii = len(re.findall(r"[A-Za-z]", "".join(kept)))
+    if kept and _cn("".join(kept[:3])) == 0 and _body_ascii > 20:
+        log("   ⚠️ 频道提炼输出几乎无中文（疑似照抄原文），回退中文兜底")
         return _fallback()
     out_lines = ["- " + x + " ⚠️未验证" for x in kept[:max_lines]]
     if summary:

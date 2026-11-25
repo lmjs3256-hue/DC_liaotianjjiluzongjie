@@ -226,12 +226,71 @@ async function snChannel(argsJson) {
   out(result);
 }
 
+async function groupMessages(argsJson) {
+  const { page } = await connectPage();
+  if (!page.url().includes('dtt.bigcatking.cc')) {
+    out({ ok: false, error: '当前页面非 dtt，请在真人 Edge 打开 dtt 并保持登录' });
+    return;
+  }
+  let inject = null;
+  try {
+    const f = path.join(process.env.USERPROFILE || '', '.pw-browser', 'dtt_session_localStorage.json');
+    if (fs.existsSync(f)) inject = JSON.parse(fs.readFileSync(f, 'utf8'));
+  } catch (_) {}
+  const args = JSON.parse(argsJson);
+  args.inject = inject;
+  const result = await page.evaluate(async (args) => {
+    if (args.inject) {
+      localStorage.setItem('session', args.inject.session);
+      if (args.inject.user) localStorage.setItem('user', args.inject.user);
+    }
+    const sess = JSON.parse(localStorage.getItem('session') || 'null');
+    if (!sess || !sess.token || (sess.expiresAt && Date.now() > sess.expiresAt)) {
+      return { authExpired: true };
+    }
+    const H = { Authorization: 'Bearer ' + sess.token };
+    const all = [];
+    let apiError = null;
+    for (const gid of args.groupIds) {
+      let ts = null, id = null, pages = 0;
+      const cap = Math.min(Number(args.maxPages) || 60, 60);
+      while (pages < cap) {
+        let u = '/api/group-messages?limit=' + args.limit +
+                '&groupId=' + encodeURIComponent(gid) +
+                '&startDate=' + args.start + '&endDate=' + args.end +
+                '&sortBy=occurredAt&sortOrder=DESC&useCursor=true';
+        if (ts != null) {
+          u += '&cursorTimestamp=' + ts + '&cursorId=' + encodeURIComponent(id);
+        }
+        let res;
+        try { res = await fetch(u, { headers: H }); }
+        catch (e) { apiError = 'network gid=' + gid + ': ' + String(e); break; }
+        if (res.status === 401) return { authExpired: true };
+        const ct = res.headers.get('content-type') || '';
+        if (!res.ok || !ct.includes('json')) {
+          apiError = 'HTTP ' + res.status + ' (' + ct + ') gid=' + gid; break;
+        }
+        const d = (await res.json()).data || {};
+        const items = d.items || [];
+        all.push(...items);
+        pages++;
+        if (!d.hasMore || !d.nextCursor || !items.length) break;
+        ts = d.nextCursor.timestamp;
+        id = d.nextCursor.id;
+      }
+    }
+    return { ok: true, events: all, pages: args.groupIds.length, apiError };
+  }, args);
+  out(result);
+}
+
 (async () => {
   const cmd = process.argv[2] || 'probe';
   try {
     if (cmd === 'probe') await probe();
     else if (cmd === 'fetch') await fetchRange(process.argv[3], process.argv[4]);
     else if (cmd === 'snchannel') await snChannel(process.argv[3]);
+    else if (cmd === 'groupmessages') await groupMessages(process.argv[3]);
     else out({ ok: false, error: 'unknown cmd: ' + cmd });
   } catch (e) {
     out({ ok: false, error: String(e && e.message || e) });

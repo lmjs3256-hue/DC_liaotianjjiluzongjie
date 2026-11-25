@@ -8,11 +8,20 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.30.6** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.30.7** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.30.7 — 2026-11-25
+
+**修「日报没推送却回执说推送了」+ TG群取数 0 条**
+
+- **起因（用户实测）**：12:06 用 `/tg群昨日` 生成日报，群里没收到正文，回执却说「已生成并推送（飞书 + TG）」；日志显示该次取数 0 条、没有推送记录。
+- **回执误报根因**：`tg_listener._run_pipeline_sync()` 只用正则匹配「TG群日报完成：…（群消息 0 条…）」就断言已推送，**空报告根本不走推送分支**。改为提取 `_daily_receipt()` / `_daily_push_flags()`：按真实日志中的 `飞书推送完成` / `Telegram 推送分片` 标记与条数分三态回执——空报告写「未推送正文」、有数据无推送标记写「未见推送成功记录（请查 run.log）」、有标记才写「已生成并推送（飞书+TG）」；社区日报同修，冲突标志保留。
+- **取数 0 条根因**：`tg_group_fetch.fetch_day()` 还在用 `pw-browser` 自动化通道取 `/api/group-messages`，`webdriver=true` 被 dtt 判为自动化后返回空列表（同一时间窗真人 Edge 实测 859 条）。按 v1.30.6 的 CDP 口径补齐：`dtt_cdp.js` 新增 `groupmessages` 命令（按 gid 游标翻页、注入 session、复用真人页面），`community_fetch.cdp_group_messages()` 封装，`tg_group_fetch.fetch_day()` 优先 CDP、失败才回退旧守护。
+- **验证**：真机 CDP 重取 11-24 群消息 859 条 / 3.9s；用新代码重跑 Hanlin.AI 单群日报（35 条 → 严格相关 8 条），日志确认 `飞书推送完成`、`Telegram 推送分片 1 完成`；`test_groupmsg_receipt_v1307.py` 15/15，全量 18 个测试文件全绿；规则文档 v1.17。
 
 ## v1.30.6 — 2026-11-25
 

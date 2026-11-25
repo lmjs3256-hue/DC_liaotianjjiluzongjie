@@ -1069,6 +1069,76 @@ def _clean_tail(out, limit=1200):
     return tail[-limit:] if len(tail) > limit else tail
 
 
+def _daily_push_flags(out):
+    """从流水线真实输出判断日报正文有没有推送成功。
+
+    空报告（0 条）会走「只落档、不推送」分支，日志里没有这两行成功标记。
+    回执必须据此说话，不能只凭「XX日报完成」就声称已推送。
+    """
+    return ("飞书推送完成" in out, "Telegram 推送分片" in out)
+
+
+def _daily_receipt(out, args):
+    """社区日报 / TG群日报回执：如实区分「已推送」「空报告未推送」「推送异常」。"""
+    out = out or ""
+    args = list(args or [])
+    feishu_ok, tg_ok = _daily_push_flags(out)
+    push_txt = ("（飞书 + TG）" if feishu_ok and tg_ok else
+                "（飞书）" if feishu_ok else
+                "（TG）" if tg_ok else "")
+    kind = args[0] if args else ""
+
+    if kind == "community":
+        m = re.search(r"社区日报完成：\s*(\d{4}-\d{2}-\d{2})\s*（(\d+)\s*条消息，(\d+)\s*个子网落档）", out)
+        if m:
+            day, total, sns = m.group(1), m.group(2), m.group(3)
+            if int(total or 0) == 0:
+                receipt = ("🌐 社区日报已生成：当日无命中消息（空报告，未推送正文）\n"
+                           "📅 %s　📊 %s 条消息 · %s 个子网落档\n"
+                           "📄 exports/community/community_%s.digest.txt"
+                           % (day, total, sns, day))
+            elif not push_txt:
+                receipt = ("🌐 社区日报已生成，但未见推送成功记录（请查 run.log）\n"
+                           "📅 %s　📊 %s 条消息 · %s 个子网落档\n"
+                           "📄 exports/community/community_%s.digest.txt"
+                           % (day, total, sns, day))
+            else:
+                receipt = ("🌐 社区日报已生成并推送%s\n"
+                           "📅 %s　📊 %s 条消息 · %s 个子网落档\n"
+                           "📄 exports/community/community_%s.digest.txt"
+                           % (push_txt, day, total, sns, day))
+        elif "社区关键词监控当日无命中" in out:
+            receipt = "🌐 社区日报已生成：当日无命中消息（空报告，未推送正文）"
+        else:
+            receipt = "🌐 社区日报流程已结束（详情见群内推送或 run.log）"
+        mf = re.search(r"社区日报交叉核对：\s*(\d+)\s*处「待人工确认」", out)
+        if mf:
+            receipt += "\n⚠️ 含 %s 处「待人工确认」，请核对正文后再采信" % mf.group(1)
+        return receipt
+
+    if kind == "tg_group":
+        m = re.search(r"TG群日报完成：\s*(\d{4}-\d{2}-\d{2})\s*(?:【([^】]+)】)?\s*（群消息\s*(\d+)\s*条，严格相关\s*(\d+)\s*条，(\d+)\s*个子网落档）", out)
+        if m:
+            day, gname, total, rel, sns = m.groups()
+            gid = next((x for x in args[1:] if re.fullmatch(r"\d{6,15}", str(x))), None)
+            scope = ("【%s】" % gname) if gname else ""
+            fname = "tg_group_%s%s.digest.txt" % (day, ("_" + gid) if gid else "")
+            stat = ("📅 %s　📊 群消息 %s 条 → 严格相关 %s 条 · %s 个子网落档\n"
+                    "📄 exports/tg_group/%s" % (day, total, rel, sns, fname))
+            if int(total or 0) == 0 or int(rel or 0) == 0:
+                return ("💬 TG群消息日报%s已生成：当日无相关内容（空报告，未推送正文）\n%s"
+                        % (scope, stat))
+            if not push_txt:
+                return ("💬 TG群消息日报%s已生成，但未见推送成功记录（请查 run.log）\n%s"
+                        % (scope, stat))
+            return ("💬 TG群消息日报%s已生成并推送%s\n%s" % (scope, push_txt, stat))
+        if "当日无消息" in out or "无与 Bittensor 子网相关" in out:
+            return "💬 TG群日报已生成：当日无相关内容（空报告，未推送正文）"
+        return "💬 TG群日报流程已结束（详情见群内推送或 run.log）"
+
+    return "✅ 已完成：%s" % " ".join(args)
+
+
 def _run_pipeline_sync(args, chat_id):
     """真正执行流水线（同步逻辑，供后台线程调用）。"""
     cmd = [sys.executable, os.path.join(HERE, "pipeline.py")] + args
@@ -1124,41 +1194,9 @@ def _run_pipeline_sync(args, chat_id):
                           "已归档到 %s（下次同子网可直接复用档案）。"
                           % (detail, dtt_line, _arc_label()))
             return
-        if args and args[0] == "community":
-            # 社区日报专属回执：日报正文已由 pipeline 自行推送，这里回一条明确的
-            # 「成功/条数/子网数/冲突标志」，免得用户分不清到底成没成。
-            m = re.search(r"社区日报完成：\s*(\d{4}-\d{2}-\d{2})\s*（(\d+)\s*条消息，(\d+)\s*个子网落档）", out)
-            if m:
-                day, total, sns = m.group(1), m.group(2), m.group(3)
-                receipt = ("🌐 社区日报已生成并推送（飞书 + TG）\n"
-                           "📅 %s　📊 %s 条消息 · %s 个子网落档\n"
-                           "📄 exports/community/community_%s.digest.txt" % (day, total, sns, day))
-            elif "社区关键词监控当日无命中" in out:
-                receipt = "🌐 社区日报已生成：当日无命中消息（空报告，未推送正文）"
-            else:
-                receipt = "🌐 社区日报流程已结束（详情见群内推送或 run.log）"
-            mf = re.search(r"社区日报交叉核对：\s*(\d+)\s*处「待人工确认」", out)
-            if mf:
-                receipt += "\n⚠️ 含 %s 处「待人工确认」，请核对正文后再采信" % mf.group(1)
-            safe_send(chat_id, receipt)
-            return
-        if args and args[0] == "tg_group":
-            # TG群日报专属回执（正文已由 pipeline 推送）；日志可能带【群名】前缀
-            m = re.search(r"TG群日报完成：\s*(\d{4}-\d{2}-\d{2})\s*(?:【([^】]+)】)?\s*（群消息\s*(\d+)\s*条，严格相关\s*(\d+)\s*条，(\d+)\s*个子网落档）", out)
-            if m:
-                day, gname, total, rel, sns = m.groups()
-                gid = next((x for x in args[1:] if re.fullmatch(r"\d{6,15}", str(x))), None)
-                scope = ("【%s】" % gname) if gname else ""
-                fname = "tg_group_%s%s.digest.txt" % (day, ("_" + gid) if gid else "")
-                receipt = ("💬 TG群消息日报%s已生成并推送（飞书 + TG）\n"
-                           "📅 %s　📊 群消息 %s 条 → 严格相关 %s 条 · %s 个子网落档\n"
-                           "📄 exports/tg_group/%s"
-                           % (scope, day, total, rel, sns, fname))
-            elif "当日无消息" in out or "无与 Bittensor 子网相关" in out:
-                receipt = "💬 TG群日报已生成：当日无相关内容（空报告，未推送正文）"
-            else:
-                receipt = "💬 TG群日报流程已结束（详情见群内推送或 run.log）"
-            safe_send(chat_id, receipt)
+        if args and args[0] in ("community", "tg_group"):
+            # v1.30.7：回执按真实推送日志说话——空报告没推送就绝不能说「已推送」。
+            safe_send(chat_id, _daily_receipt(out, args))
             return
         if args and args[0] == "community_confirm":
             mc = re.search(r"社区冲突人工确认完成：\s*(\S+)\s+SN(\d+)\s+(已核实|已推翻)", out)

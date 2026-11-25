@@ -174,13 +174,23 @@ def fetch_day(day_str, cfg=None, log=print, until_now=True):
     log("TG群取数：%s（北京时间 %s 00:00 → %s，群 %d 个，正在从 dtt 拉取…）"
         % (day_str, day_str, _end_label, len(gids)))
 
-    CF.ensure_ready(cfg, log=log)
-    res = _run_js(cli, code, timeout=300)
-    if res.get("authExpired"):
-        lr = CF.auto_login(cfg, log=log)
-        if lr.get("ok"):
-            log("dtt 会话已续期，重新取数…")
-            res = _run_js(cli, code, timeout=300)
+    # v1.30.7：group-messages 接口在 webdriver=true 的自动化浏览器上会返回空列表，
+    # 与关键词 events 接口同样必须优先走真人 Edge CDP；CDP 不可用才回退旧守护。
+    res = None
+    if CF.cdp_available(cfg):
+        try:
+            log("CDP 真人浏览器取数（端口 %d）…" % CF._cdp_port(cfg))
+            res = CF.cdp_group_messages(args, cfg=cfg, log=log)
+        except Exception as e:
+            log("CDP 群消息取数失败（%s），回退自动化守护…" % str(e)[:120])
+    if res is None:
+        CF.ensure_ready(cfg, log=log)
+        res = _run_js(cli, code, timeout=300)
+        if res.get("authExpired"):
+            lr = CF.auto_login(cfg, log=log)
+            if lr.get("ok"):
+                log("dtt 会话已续期，重新取数…")
+                res = _run_js(cli, code, timeout=300)
     if res.get("authExpired"):
         raise RuntimeError("dtt 登录已失效，请在 Edge 重新登录或检查本地凭据")
     if not res.get("ok"):

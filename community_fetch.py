@@ -286,6 +286,23 @@ def cdp_sn_channel(args, cfg=None, log=print):
     return res
 
 
+def cdp_group_messages(args, cfg=None, log=print):
+    """用真人 Edge 取 dtt 管理员群消息库（args: start/end/groupIds/limit/maxPages）。
+
+    TG群日报的 group-messages 接口和关键词 events 接口是两套数据；旧 pw-browser
+    自动化通道会被服务端判为 webdriver=true 并返回空列表，必须同样走 CDP。
+    """
+    res = _run_cdp("groupmessages", json.dumps(args, ensure_ascii=False),
+                   timeout=300, cfg=cfg)
+    if res.get("authExpired"):
+        raise RuntimeError("dtt 登录已失效，请在真人 Edge 重新登录 dtt")
+    if res.get("apiError"):
+        raise RuntimeError("CDP 群消息取数失败：%s" % res["apiError"])
+    if not res.get("ok"):
+        raise RuntimeError("CDP 群消息取数失败：%s" % str(res)[:200])
+    return res
+
+
 # 会话凭证落盘目录：必须在 ~/.pw-browser/ 内（CLI 的 export/import 路径限制）。
 # 文件 0600（CLI 写），只存本机、已 gitignore，绝不一入库/不进对话。
 _SESSION_DIR = os.path.join(os.path.expanduser("~"), ".pw-browser")

@@ -8,11 +8,20 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.30.5** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.30.6** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.30.6 — 2026-11-25
+
+- **修社区消息日报取数失败（Cloudflare Turnstile 根治）**：v1.30.5 的「有窗口登录+会话凭证恢复」仍不解决根本问题——自动化浏览器（`pw-browser` 守护，`navigator.webdriver=true`）取 dtt API 一律 403，真人浏览器放行。改为 **CDP 真人 Edge 取数**：`dtt_cdp_guard.py` 持久托管一个带 `--remote-debugging-port=9444` 的 Edge（专用 profile `~/dtt_edge_profile`，保留登录态，`webdriver=false`），`dtt_cdp.js` 用 `connectOverCDP` attach 上去，在真人页面上下文 fetch。
+  - `community_fetch.fetch_day()` / `fetch_sn_channel()` 优先走 CDP（5.9s 取到当日 1319 条），CDP 不可用时回退旧 `pw-browser` 守护。
+  - `dtt_cdp.js` 每次取数从 `~/.pw-browser/dtt_session_localStorage.json` 注入 session（不导航/不刷新，避免触发校验跳 `/login`）；输出后 `process.exit(0)` 防 WebSocket 挂住进程；输出走文件重定向避免大 JSON 管道死锁。
+  - 自启：`dtt_cdp_autostart.vbs` 放入启动文件夹（pythonw 无窗口），守护带命名互斥体单例。
+  - **维护**：专用 profile 的 token 约 7 天过期（当前到 12-02）；过期后在真人 Edge 重新登录，重新 robocopy profile 到 `~/dtt_edge_profile` 即可。
+  - 回归 `test_cdp_fetch_v1306.py` 13/13，全量 17 文件全绿；规则文档 v1.16。
 
 ## v1.30.5 — 2026-11-25
 

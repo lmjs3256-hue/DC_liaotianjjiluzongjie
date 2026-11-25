@@ -196,6 +196,96 @@ def _run_cli_cmd(cli, args, timeout=60):
         raise RuntimeError("浏览器命令返回非 JSON：%s" % raw[:200])
 
 
+# ---------------------------------------------------------------- CDP 取数后端（v1.30.6）
+# 背景：dtt 站点加了 Cloudflare Turnstile，自动化浏览器（pw-browser 守护，webdriver=true）
+# 取 API 一律 403；真人 Edge（webdriver=false）放行。改为连「真人 Edge 的远程调试端口」，
+# 在其页面上下文 fetch。CDP 连接是 attach，不改 webdriver 指纹。
+# dtt_cdp_guard.py 持久托管一个带 --remote-debugging-port 的 Edge（专用 profile，保留登录态）。
+_CDP_SCRIPT = os.path.join(HERE, "dtt_cdp.js")
+_CDP_PORT_DEFAULT = 9444
+
+
+def _cdp_port(cfg=None):
+    return int((cfg or {}).get("dtt_cdp_port") or os.environ.get("DTT_CDP_PORT") or _CDP_PORT_DEFAULT)
+
+
+def cdp_available(cfg=None, timeout=3):
+    """真人 Edge 的 CDP 调试端口是否在线。"""
+    import urllib.request
+    port = _cdp_port(cfg)
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _run_cdp(cmd, *args, timeout=240, cfg=None):
+    """调 dtt_cdp.js，返回解析后的 result dict。"""
+    if not os.path.exists(_CDP_SCRIPT):
+        raise RuntimeError("缺少 CDP 取数脚本：%s" % _CDP_SCRIPT)
+    base, env = _node_cmd(_pw_cli(cfg))
+    # _node_cmd 给的是 pw-browser.js 路径，替换为 dtt_cdp.js，保留 node 可执行与环境
+    cmd_list = [base[0], _CDP_SCRIPT, cmd] + [str(a) for a in args]
+    env = dict(env)
+    env["DTT_CDP_PORT"] = str(_cdp_port(cfg))
+    # 输出可能数百 KB，用文件重定向避免管道缓冲死锁（Windows subprocess 已知问题）
+    import tempfile
+    fd, out_path = tempfile.mkstemp(prefix="dtt_cdp_", suffix=".json")
+    err_path = out_path + ".err"
+    os.close(fd)
+    try:
+        with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
+            proc = subprocess.Popen(cmd_list, stdout=fo, stderr=fe, env=env,
+                                    creationflags=NO_WINDOW)
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise RuntimeError("CDP 取数超时（%ds）" % timeout)
+        raw = open(out_path, encoding="utf-8", errors="replace").read().strip()
+        if not raw:
+            err = open(err_path, encoding="utf-8", errors="replace").read()[:300]
+            raise RuntimeError("CDP 脚本无输出（stderr: %s）" % err)
+        # 只取第一个 JSON 对象起的位置
+        idx = raw.find("{")
+        if idx > 0:
+            raw = raw[idx:]
+        try:
+            return json.loads(raw)
+        except Exception:
+            raise RuntimeError("CDP 结果非 JSON：%s" % raw[:200])
+    finally:
+        for p in (out_path, err_path):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
+def cdp_fetch_events(start, end, cfg=None, log=print):
+    """用真人 Edge 取指定时间戳范围（秒）的 events/keywords/platforms。"""
+    res = _run_cdp("fetch", start, end, timeout=240, cfg=cfg)
+    if res.get("authExpired"):
+        raise RuntimeError("dtt 登录已失效，请在真人 Edge 重新登录 dtt")
+    if not res.get("ok"):
+        raise RuntimeError("CDP 取数失败：%s" % (res.get("error") or res.get("apiError") or res))
+    return res
+
+
+def cdp_sn_channel(args, cfg=None, log=print):
+    """用真人 Edge 按 SN 关键词组取子网频道消息（args: sn/windows/platformId）。"""
+    res = _run_cdp("snchannel", json.dumps(args, ensure_ascii=False), timeout=180, cfg=cfg)
+    if res.get("authExpired"):
+        raise RuntimeError("dtt 登录已失效，请在真人 Edge 重新登录 dtt")
+    if res.get("err") or res.get("apiErr") or res.get("netErr"):
+        raise RuntimeError("CDP 子网频道取数失败：%s" %
+                           (res.get("err") or res.get("apiErr") or res.get("netErr")))
+    if not res.get("ok"):
+        raise RuntimeError("CDP 子网频道取数失败：%s" % str(res)[:200])
+    return res
+
+
 # 会话凭证落盘目录：必须在 ~/.pw-browser/ 内（CLI 的 export/import 路径限制）。
 # 文件 0600（CLI 写），只存本机、已 gitignore，绝不一入库/不进对话。
 _SESSION_DIR = os.path.join(os.path.expanduser("~"), ".pw-browser")
@@ -530,20 +620,31 @@ def fetch_day(day_str, cfg=None, log=print, until_now=True):
                   + "（当前）") if until_now else "次日00:00"
     log("社区取数：%s（北京时间 %s 00:00 → %s，正在从 dtt 拉取…）"
         % (day_str, day_str, _end_label))
-    # 守护空闲退出后会话会丢，取数前先确保：守护在线 + 浏览器在 dtt 站点 + 会话有效。
-    ensure_ready(cfg, log=log)
-    res = _run_cli(cli, code, timeout=240)
+    # v1.30.6：优先走 CDP 真人 Edge（webdriver=false，过 Cloudflare）；
+    # CDP 守护不在线时回退旧 pw-browser 自动化守护（可能 403，仅兜底）。
+    res = None
+    cdp_on = cdp_available(cfg)
+    if cdp_on:
+        try:
+            log("CDP 真人浏览器取数（端口 %d）…" % _cdp_port(cfg))
+            res = cdp_fetch_events(start, end, cfg=cfg, log=log)
+        except Exception as e:
+            log("CDP 取数失败（%s），回退自动化守护…" % str(e)[:120])
+    if res is None:
+        # 守护空闲退出后会话会丢，取数前先确保：守护在线 + 浏览器在 dtt 站点 + 会话有效。
+        ensure_ready(cfg, log=log)
+        res = _run_cli(cli, code, timeout=240)
+        if res.get("authExpired"):
+            # 会话失效：先恢复本地凭证，成功后重跑取数
+            lr = _renew_session(cfg, log=log)
+            if lr.get("ok"):
+                log("dtt 会话已恢复，重新取数…")
+                res = _run_cli(cli, code, timeout=240)
     if res.get("authExpired"):
-        # 会话失效：先恢复本地凭证，成功后重跑取数
-        lr = _renew_session(cfg, log=log)
-        if lr.get("ok"):
-            log("dtt 会话已恢复，重新取数…")
-            res = _run_cli(cli, code, timeout=240)
-    if res.get("authExpired"):
-        raise RuntimeError("dtt 登录已失效。请运行 python community_fetch.py login "
-                           "在有窗口模式人工登录一次（过 Cloudflare 验证并保存会话）。")
+        raise RuntimeError("dtt 登录已失效。请在真人 Edge 重新登录 dtt，"
+                           "或运行 python community_fetch.py login。")
     if not res.get("ok"):
-        raise RuntimeError("取数失败：%s" % (res.get("apiError") or res))
+        raise RuntimeError("取数失败：%s" % (res.get("apiError") or res.get("error") or res))
 
     events = res.get("events") or []
     kmap = res.get("keywordSN") or {}
@@ -725,15 +826,23 @@ def fetch_sn_channel(sn, day_str, cfg=None, log=print, platform="discord", days=
     code = _JS_SN_CHANNEL.replace("__ARGS__", json.dumps(args, ensure_ascii=False))
     log("子网频道补充：取 SN%d 的 %s 频道消息（%s，关键词组精确匹配）…"
         % (sn, platform, "、".join(w["label"] for w in windows)))
-    ensure_ready(cfg, log=log)
-    res = _run_cli(cli, code, timeout=180)
+    # v1.30.6：优先 CDP 真人 Edge，失败回退 pw-browser 自动化守护
+    res = None
+    if cdp_available(cfg):
+        try:
+            res = cdp_sn_channel(args, cfg=cfg, log=log)
+        except Exception as e:
+            log("CDP 子网频道取数失败（%s），回退自动化守护…" % str(e)[:120])
+    if res is None:
+        ensure_ready(cfg, log=log)
+        res = _run_cli(cli, code, timeout=180)
+        if res.get("authExpired"):
+            lr = _renew_session(cfg, log=log)
+            if lr.get("ok"):
+                log("dtt 会话已恢复，重新取子网频道消息…")
+                res = _run_cli(cli, code, timeout=180)
     if res.get("authExpired"):
-        lr = _renew_session(cfg, log=log)
-        if lr.get("ok"):
-            log("dtt 会话已恢复，重新取子网频道消息…")
-            res = _run_cli(cli, code, timeout=180)
-    if res.get("authExpired"):
-        raise RuntimeError("dtt 登录已失效，子网频道补充取数跳过。请运行 python community_fetch.py login 人工登录")
+        raise RuntimeError("dtt 登录已失效，子网频道补充取数跳过。请在真人 Edge 重新登录 dtt")
     if res.get("err") or res.get("apiErr") or res.get("netErr"):
         raise RuntimeError("子网频道取数失败：%s" %
                            (res.get("err") or res.get("apiErr") or res.get("netErr")))

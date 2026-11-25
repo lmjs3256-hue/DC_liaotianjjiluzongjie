@@ -58,6 +58,7 @@
   "dtt_password": "",
   "dtt_login_days": 90,
   "dtt_headless": 1,
+  "dtt_cdp_port": 9444,
   "tg_group_ids": [
     "8116469191",
     "1003968896337",

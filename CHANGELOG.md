@@ -8,11 +8,25 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.30.4** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.30.5** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.30.5 — 2026-11-25
+
+**修「社区日报取数失败：找不到登录输入框」**
+
+- **起因（用户实测 11-25）**：社区日报取数中断，日志 `❌ 流水线失败：找不到登录输入框（页面结构可能变了）`。
+- **根因**：dtt 登录页新增 **Cloudflare Turnstile 人机验证**——headless 浏览器 + 临时 profile 过不了（实测等待 12 秒仍停在验证页、无输入框），守护空闲退出后 session 又必丢。原「凭据自动登录 / 过期提示重登」链路彻底失效。这不是页面结构微调，是站点反爬升级。
+- **修复（有窗口人工登录一次 + 会话凭证持久化 + 自动恢复）**：
+  1. 新增 `python community_fetch.py login`：以有窗口模式启动守护、打开登录页，人工过一次 Cloudflare 验证并登录，成功后自动导出会话凭证落盘。
+  2. `community_fetch` 新增 `save_session()` / `restore_session()` / `_renew_session()`：cookies + localStorage 导出到 `~/.pw-browser/dtt_session_*`（CLI 强制 confined 在该目录、0600、已 gitignore、**不入库/不进对话**）。
+  3. 会话失效/守护重启时，`auth_status` / `ensure_ready` / 取数 `authExpired` 兜底统一先 `restore_session()` 恢复，再退回自动登录；恢复后校验 token 有效性。
+  4. `config.dtt_headless`（默认 1）控制日常 headless 取数，仅 `login` 命令临时有窗口过验证。
+- **重要操作**：首次需运行一次 `python community_fetch.py login`，在有窗口 Edge 里**本人手动**过验证并登录（脚本自动填表会被 Cloudflare 403 拒绝）；之后自动恢复，token 过期再重跑该命令。
+- **验证**：`test_session_restore_v1305.py` 16/16；全量 16 个测试文件全绿。规则文档升 v1.15；CHANGELOG/README 同步。
 
 ## v1.30.4 — 2026-11-24
 

@@ -175,6 +175,38 @@ def _run_cli(cli, code, timeout=180):
     return result
 
 
+def _run_cli_cmd(cli, args, timeout=60):
+    """调用 pw-browser 的子命令（cookies/storage/open 等），返回解析后的 JSON。"""
+    base, env = _node_cmd(cli)
+    cmd = base + list(args)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout, env=env,
+                           creationflags=NO_WINDOW)
+    except FileNotFoundError:
+        raise RuntimeError("找不到浏览器 CLI：%s" % cli)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("浏览器命令超时（%ds）：%s" % (timeout, args))
+    raw = (p.stdout or "").strip()
+    if not raw:
+        raise RuntimeError("浏览器命令无输出（%s）: %s" % (args, (p.stderr or "")[:200]))
+    try:
+        return json.loads(raw)
+    except Exception:
+        raise RuntimeError("浏览器命令返回非 JSON：%s" % raw[:200])
+
+
+# 会话凭证落盘目录：必须在 ~/.pw-browser/ 内（CLI 的 export/import 路径限制）。
+# 文件 0600（CLI 写），只存本机、已 gitignore，绝不一入库/不进对话。
+_SESSION_DIR = os.path.join(os.path.expanduser("~"), ".pw-browser")
+_COOKIES_FILE = os.path.join(_SESSION_DIR, "dtt_session_cookies.json")
+_STORAGE_FILE = os.path.join(_SESSION_DIR, "dtt_session_localStorage.json")
+
+
+def _session_files_exist():
+    return os.path.exists(_COOKIES_FILE) and os.path.exists(_STORAGE_FILE)
+
+
 _USERNAME_SELECTORS = (
     "input[type=email]", "input[name=email]", "input[placeholder*='邮箱']",
     "input[autocomplete='email']", "input[type=text]")
@@ -271,6 +303,94 @@ def auto_login(cfg=None, log=print):
     return {"ok": False, "reason": res.get("err") or "自动登录未成功"}
 
 
+def save_session(cfg=None, log=print):
+    """把当前浏览器登录态（cookies + localStorage）导出落盘，供守护重启后恢复。
+
+    必须先在有窗口模式人工登录 dtt（过 Cloudflare Turnstile）后调用。
+    凭证文件落在 ~/.pw-browser/ 内（CLI 路径限制），0600，不入库。
+    返回 {ok, reason, cookies, keys}。
+    """
+    cli = _pw_cli(cfg)
+    try:
+        ck = _run_cli_cmd(cli, ["cookies", "export", "--path", _COOKIES_FILE], timeout=60)
+        st = _run_cli_cmd(cli, ["storage", "export", "--path", _STORAGE_FILE], timeout=60)
+    except Exception as e:
+        return {"ok": False, "reason": "导出会话失败：%s" % e}
+    if not ck.get("ok") or not st.get("ok"):
+        return {"ok": False, "reason": "导出会话失败：cookies=%s storage=%s"
+                % (ck.get("error"), st.get("error"))}
+    log("dtt 会话已保存：cookies %d 条 + localStorage %d 项 → ~/.pw-browser/"
+        % (ck.get("count", 0), st.get("count", 0)))
+    return {"ok": True, "cookies": ck.get("count", 0), "keys": st.get("count", 0)}
+
+
+def restore_session(cfg=None, log=print):
+    """从落盘凭证恢复登录态到当前浏览器 context。返回 {ok, reason}。
+
+    守护重启后是全新临时 profile（无 session），必须先打开 dtt 站点再 import
+    （localStorage 绑定 origin，about:blank 下写入无效）。
+    """
+    if not _session_files_exist():
+        return {"ok": False, "reason": "无已保存的 dtt 会话凭证"}
+    cli = _pw_cli(cfg)
+    ensure_site = r"""
+const h = await page.evaluate(() => location.hostname);
+if (h !== 'dtt.bigcatking.cc') {
+  await page.goto(%s, {waitUntil:'domcontentloaded', timeout:60000});
+  await page.waitForTimeout(800);
+}
+return {ok:true};
+""" % json.dumps(SITE_ORIGIN)
+    try:
+        _run_cli(cli, ensure_site, timeout=90)
+        ck = _run_cli_cmd(cli, ["cookies", "import", _COOKIES_FILE], timeout=60)
+        st = _run_cli_cmd(cli, ["storage", "import", _STORAGE_FILE], timeout=60)
+        # import 后需刷新页面让前端从 localStorage 读到 token
+        _run_cli(cli, "await page.reload({waitUntil:'domcontentloaded',timeout:60000}); "
+                      "await page.waitForTimeout(600); return {ok:true};", timeout=90)
+    except Exception as e:
+        return {"ok": False, "reason": "恢复会话失败：%s" % e}
+    if not ck.get("ok") or not st.get("ok"):
+        return {"ok": False, "reason": "恢复会话失败：cookies=%s storage=%s"
+                % (ck.get("error"), st.get("error"))}
+    # 恢复后用 auth_status 校验 token 是否仍有效（可能服务端已过期）
+    stt = auth_status_raw(cfg)
+    if not stt.get("ok"):
+        return {"ok": False, "reason": "已恢复凭证但 token 服务端已失效，需人工重新登录"}
+    log("dtt 会话已从本地凭证恢复")
+    return {"ok": True, "email": stt.get("email", "")}
+
+
+def _renew_session(cfg=None, log=print):
+    """会话恢复统一入口：先从本地凭证恢复，失败再试凭据自动登录。
+
+    v1.30.5：Cloudflare Turnstile 后 headless 自动登录基本不可用，恢复凭证
+    是主要手段；auto_login 仅保留给尚未加 Turnstile 的站点。
+    """
+    rr = restore_session(cfg, log=log)
+    if rr.get("ok"):
+        return rr
+    return auto_login(cfg, log=log)
+
+
+def auth_status_raw(cfg=None):
+    """只检查 localStorage session 是否有效，不做自动登录/恢复（避免递归）。"""
+    cli = _pw_cli(cfg)
+    code = r"""
+const r = await page.evaluate(() => {
+  const s = JSON.parse(localStorage.getItem('session') || 'null');
+  const expired = !s || !s.token || (s.expiresAt && Date.now() > s.expiresAt);
+  return { ok: !expired, host: location.hostname,
+           email: (JSON.parse(localStorage.getItem('user') || '{}') || {}).email || '' };
+});
+return r;
+"""
+    try:
+        return _run_cli(cli, code, timeout=30) or {"ok": False}
+    except Exception:
+        return {"ok": False}
+
+
 def ping_daemon(cfg=None, timeout=10):
     """轻量 ping 浏览器 daemon（GET /health），保持其空闲计时器归零。
 
@@ -304,9 +424,10 @@ def start_daemon(cfg=None, log=print, timeout=45):
         log("浏览器守护离线，且 CLI 不存在：%s" % cli)
         return False
     base, env = _node_cmd(cli)
-    # 后台无窗口：dtt 取数不需要人工看页面，让 Edge 以 headless 启动，避免弹窗干扰办公。
-    # 浏览器技能用 PW_BROWSER_HEADLESS 控制（默认 0=有窗口，仅这里设为 1）。
-    env["PW_BROWSER_HEADLESS"] = "1"
+    # 日常取数 headless 避免弹窗；人工登录（config.dtt_headless=0）时用有窗口过验证。
+    # v1.30.5：dtt 登录页有 Cloudflare Turnstile，headless 过不了；会话靠 save/restore 持久化。
+    _headless = (cfg or {}).get("dtt_headless", 1)
+    env["PW_BROWSER_HEADLESS"] = "0" if str(_headless) in ("0", "false", "False") else "1"
     # Windows 下用 CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS 让守护脱离当前进程，
     # 避免 TG 监听线程结束/守护重启时把它一起带走；stdout/stderr 丢弃防止管道阻塞。
     flags = 0
@@ -383,12 +504,15 @@ return r;
     if res.get("ok") and "dtt.bigcatking.cc" not in str(res.get("host", "")):
         return {"ok": False, "reason": "浏览器当前不在 dtt.bigcatking.cc 站点，请先打开并登录"}
     if not res.get("ok"):
-        # 会话失效：配置了本地凭据就自动续期，免得用户每隔几天手动登录
-        lr = auto_login(cfg, log=lambda *_: None)
+        # 会话失效（v1.30.5）：恢复本地凭证为主，自动登录兜底
+        lr = _renew_session(cfg, log=lambda *_: None)
         if lr.get("ok"):
-            return {"ok": True, "email": (cfg or {}).get("dtt_email", ""), "renewed": True}
-        return {"ok": False, "reason": lr.get("reason") or
-                "dtt 会话已失效，请在 Edge 重新登录或配置本地凭据自动续期"}
+            return {"ok": True, "email": lr.get("email", "") or (cfg or {}).get("dtt_email", ""),
+                    "restored": bool(lr.get("email"))}
+        return {"ok": False, "reason":
+                "dtt 会话失效且自动恢复失败。请在有窗口模式人工登录一次："
+                "python community_fetch.py login（会过 Cloudflare 验证并保存会话）。"
+                "详情：%s" % (lr.get("reason", "")[:120])}
     return {"ok": True, "email": res.get("email", "")}
 
 
@@ -410,15 +534,14 @@ def fetch_day(day_str, cfg=None, log=print, until_now=True):
     ensure_ready(cfg, log=log)
     res = _run_cli(cli, code, timeout=240)
     if res.get("authExpired"):
-        # 会话失效：先尝试用本地凭据自动续期，成功后重跑取数
-        lr = auto_login(cfg, log=log)
+        # 会话失效：先恢复本地凭证，成功后重跑取数
+        lr = _renew_session(cfg, log=log)
         if lr.get("ok"):
-            log("dtt 会话已续期，重新取数…")
+            log("dtt 会话已恢复，重新取数…")
             res = _run_cli(cli, code, timeout=240)
     if res.get("authExpired"):
-        raise RuntimeError("dtt 登录已失效。%s" %
-                           (auto_login(cfg, log=lambda *_: None).get("reason") or
-                            "请在 Edge 重新登录或配置本地凭据自动续期。"))
+        raise RuntimeError("dtt 登录已失效。请运行 python community_fetch.py login "
+                           "在有窗口模式人工登录一次（过 Cloudflare 验证并保存会话）。")
     if not res.get("ok"):
         raise RuntimeError("取数失败：%s" % (res.get("apiError") or res))
 
@@ -605,12 +728,12 @@ def fetch_sn_channel(sn, day_str, cfg=None, log=print, platform="discord", days=
     ensure_ready(cfg, log=log)
     res = _run_cli(cli, code, timeout=180)
     if res.get("authExpired"):
-        lr = auto_login(cfg, log=log)
+        lr = _renew_session(cfg, log=log)
         if lr.get("ok"):
-            log("dtt 会话已续期，重新取子网频道消息…")
+            log("dtt 会话已恢复，重新取子网频道消息…")
             res = _run_cli(cli, code, timeout=180)
     if res.get("authExpired"):
-        raise RuntimeError("dtt 登录已失效，子网频道补充取数跳过")
+        raise RuntimeError("dtt 登录已失效，子网频道补充取数跳过。请运行 python community_fetch.py login 人工登录")
     if res.get("err") or res.get("apiErr") or res.get("netErr"):
         raise RuntimeError("子网频道取数失败：%s" %
                            (res.get("err") or res.get("apiErr") or res.get("netErr")))
@@ -658,16 +781,62 @@ def read_sn_channel(sn, day_str, cfg=None, platform="discord"):
         return None
 
 
+def login_interactive(cfg=None, log=print, wait_seconds=300):
+    """有窗口人工登录 dtt（过 Cloudflare Turnstile）并保存会话。
+
+    流程：关闭旧 headless 守护 → 以有窗口模式重启 → 打开登录页 →
+    等待人工完成验证+登录（轮询 localStorage.session）→ save_session 落盘 →
+    关闭有窗口守护（下次取数会 headless 重启并从凭证恢复）。
+    """
+    cli = _pw_cli(cfg)
+    log("① 关闭旧守护（如有）…")
+    try:
+        _run_cli_cmd(cli, ["shutdown"], timeout=20)
+    except Exception:
+        pass
+    time.sleep(2)
+    log("② 以有窗口模式启动浏览器守护…")
+    _login_cfg = dict(cfg or {})
+    _login_cfg["dtt_headless"] = 0
+    if not start_daemon(_login_cfg, log=log, timeout=60):
+        return {"ok": False, "reason": "有窗口守护启动失败"}
+    log("③ 打开 dtt 登录页，请在弹出的 Edge 窗口里完成 Cloudflare 验证并登录…")
+    _run_cli(cli, "await page.goto(%s,{waitUntil:'domcontentloaded',timeout:60000}); "
+                  "return {ok:true};" % json.dumps(SITE_ORIGIN + "/login"), timeout=90)
+    deadline = time.time() + wait_seconds
+    logged = False
+    while time.time() < deadline:
+        stt = auth_status_raw(cfg)
+        if stt.get("ok"):
+            logged = True
+            break
+        time.sleep(3)
+    if not logged:
+        return {"ok": False, "reason": "等待 %ds 未见登录成功，请重试 login" % wait_seconds}
+    log("④ 检测到登录成功，正在保存会话凭证…")
+    saved = save_session(cfg, log=log)
+    if not saved.get("ok"):
+        return {"ok": False, "reason": "登录成功但保存会话失败：%s" % saved.get("reason")}
+    log("✅ 完成。以后社区日报取数会自动恢复该会话；token 过期后重跑本命令即可。")
+    return {"ok": True, **saved}
+
+
 if __name__ == "__main__":
     import sys
-    day = sys.argv[1] if len(sys.argv) > 1 else (
-        datetime.datetime.now(TZ) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    args = sys.argv[1:]
     cfg = None
     try:
         with open(os.path.join(HERE, "config.json"), encoding="utf-8") as f:
             cfg = json.load(f)
     except Exception:
         pass
+    if args and args[0].lower() == "login":
+        # 人工登录一次（有窗口过 Cloudflare 验证）+ 保存会话
+        r = login_interactive(cfg)
+        print("登录结果：", json.dumps(r, ensure_ascii=False))
+        sys.exit(0 if r.get("ok") else 1)
+    day = args[0] if args else (
+        datetime.datetime.now(TZ) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
     st = auth_status(cfg)
     print("会话状态：", st)
     if st.get("ok"):

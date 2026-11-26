@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.30.7"
+__version__ = "1.30.8"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1300,7 +1300,9 @@ VERIFY_PROMPT = (
 _SECTION_WORDS = ("必读重点", "重点子网动向", "重要人物观点", "潜力观察",
                   "可布局", "其他细节", "一句话总结", "本周核心趋势", "风险汇总",
                   # 水聊侧记的小节
-                  "今日氛围", "谁在聊什么", "全场最佳梗", "跑题现场", "其他碎屑", "一句话吐槽")
+                  "今日氛围", "谁在聊什么", "全场最佳梗", "跑题现场", "其他碎屑", "一句话吐槽",
+                  # TG 群消息日报的小节（v1.30.8：补进来，否则群日报标题粘连拆不开）
+                  "群内热点", "子网动态", "分群讨论", "推文核实", "关键人物观点")
 # 日报 / 周报里禁止出现的板块
 _FORBIDDEN_SECTIONS = ("重点子网动向", "潜力观察", "可布局")
 
@@ -1748,7 +1750,45 @@ def dedupe_bullets(text, threshold=0.45):
     return "\n".join(out)
 
 
-_SEC_EMOJI = "🔥👥📎💡📰🗓📊📌⚠️✅"
+_SEC_EMOJI = "🔥👥📎💡📰🗓📊📌⚠️✅🧩📢💬🔗👀"
+
+
+def _unstick_inline_headings(text):
+    """拆开「行首加粗块里 节名+正文 粘成一坨」的标题（v1.30.8）。
+
+    实测两类：
+      - `**📢 子网动态SN44 SN44 Score**（3 条）：...`
+        → 拆出 `**📢 子网动态**` + `**SN44 SN44 Score**（3 条）：...`
+      - `**💡 一句话总结TAO**价格跌破**$200**...`
+        → 拆出 `**💡 一句话总结**` + `正文`（TAO 去掉误加粗、回到正文开头）
+    只处理「整行以 **<emoji> <节名><紧接若干字>** 开头」且节名后还有内容的行，
+    正常的 `**📢 子网动态**（N 条）` 这种子块标题不动。
+    """
+    if not text:
+        return text
+    words = "|".join(re.escape(w) for w in _SECTION_WORDS)
+    pat = re.compile(r"^(\*{0,2}[%s])\s+(%s)([^*\n]{1,30})\*\*" % (_SEC_EMOJI, words))
+    out = []
+    for ln in text.split("\n"):
+        m = pat.match(ln)
+        if not m:
+            out.append(ln)
+            continue
+        head, word, stuck = m.group(1), m.group(2), m.group(3)
+        rest = ln[m.end():]
+        # 节名后紧跟的必须是粘连的正文/子标题，不能是「**（N 条）**」这类正常留白
+        if not stuck.strip() or stuck.lstrip().startswith("（"):
+            out.append(ln)
+            continue
+        # 去掉标题开头可能的加粗星号，统一成 **emoji 节名** 独占一行
+        clean_head = head.lstrip("*")
+        title_line = "**%s %s**" % (clean_head, word)
+        # 粘连内容回到正文：SN44 SN44 这类重复编号先去重，再去掉误加粗的星号
+        body = re.sub(r"\b(SN\s*\d+)\s+\1\b", r"\1", stuck.strip())
+        body = re.sub(r"\*+", "", body)
+        body_line = body + rest
+        out.extend([title_line, body_line])
+    return "\n".join(out)
 
 
 def _unstick_sections(text):
@@ -1784,7 +1824,8 @@ def _unstick_sections(text):
         out.append(prefix.rstrip())
         out.append("")
         out.append("%s %s**%s" % (head, m.group(2), rest))
-    return "\n".join(out)
+    # 再拆「行首加粗块里节名+正文粘连」（群日报实测）
+    return _unstick_inline_headings("\n".join(out))
 
 
 def _tidy_layout(text):

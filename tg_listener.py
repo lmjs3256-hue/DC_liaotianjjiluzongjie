@@ -667,11 +667,12 @@ def _tgg_run(chat_id, gid=None, day="昨日"):
     _tgg_flow_clear(chat_id)
     label = TGF.group_label(gid) if gid else "全部 4 群"
     day_txt = {"yesterday": "昨日", "today": "今日"}.get(day, day)
-    send_async(chat_id,
-               "💬 收到，正在总结【%s】%s的群消息，生成完毕后推送（飞书 + TG）…"
-               % (label, ("「%s」" % day_txt)))
     args = ["tg_group", day_txt] + ([gid] if gid else [])
-    run_pipeline(args, chat_id, quiet=True)
+    start_msg = ("💬 收到，正在总结【%s】%s的群消息，生成完毕后推送（飞书 + TG）…"
+                 % (label, ("「%s」" % day_txt)))
+    # 不在入队瞬间发「正在总结」——排队时那条会和「已排队」自相矛盾。
+    # 交给 run_pipeline：立即执行 or 从队列拉起时才发。
+    run_pipeline(args, chat_id, quiet=True, start_msg=start_msg)
 
 
 def _tgg_callback(cq, chat_id, from_id, allowed_users):
@@ -1046,6 +1047,11 @@ PIPELINE_TIMEOUT = 900          # 单次流水线最长等待（秒）
 _SLOW_CMDS = {"archive": 1800, "research": 2400}
 _BUSY = False
 _BUSY_LOCK = threading.Lock()
+# 忙时不丢请求：FIFO 队列 [(args, chat_id, quiet, start_msg)]。
+# 2026-11-26 实测：daily 正文推送完后还在跑档案翻译/落档（执行锁仍占用），
+# 此时点群日报被旧逻辑直接丢弃，用户只看到「上一个任务仍在执行中」，
+# 以为机器人坏了。现在排队，前序结束自动执行，无需重复发命令。
+_PIPELINE_QUEUE = []
 
 
 def _kill_proc_tree(proc):
@@ -1251,8 +1257,10 @@ def _run_pipeline_sync(args, chat_id):
 
 
 def _pipeline_worker(args, chat_id):
-    """后台线程主体：任何异常都在这里消化，绝不向外抛到主循环。"""
-    global _BUSY
+    """后台线程主体：任何异常都在这里消化，绝不向外抛到主循环。
+
+    结束时调用 _pump_queue()：先释放执行锁，再自动拉起队列里的下一个任务。
+    """
     try:
         _run_pipeline_sync(args, chat_id)
     except Exception as e:
@@ -1261,35 +1269,91 @@ def _pipeline_worker(args, chat_id):
         log("流水线线程异常：%s" % e)
         safe_send(chat_id, "❌ 触发异常：%s" % e)
     finally:
-        with _BUSY_LOCK:
-            _BUSY = False
         log("流水线线程结束（已释放执行锁）：%s" % " ".join(args))
+        _pump_queue()
 
 
-def run_pipeline(args, chat_id, quiet=False):
-    """触发流水线：后台线程执行，监听主循环立刻继续收指令。
+def _pump_queue():
+    """释放执行锁；若队列有待执行任务，原子地占用锁并拉起下一个。
 
-    quiet=True 表示调用方已经自己发过回执了，这里不再重复发一条
-    「⏳ 开始执行」—— 每条 send 都是一次网络往返，Telegram 抖动时
-    一次能卡 4-10 秒，两条回执就是白等十几秒（2026-11-10 实测）。
+    放在 worker 的 finally 里调用，保证「释放锁」和「占下一个」之间
+    不会被新来的命令插队，也不会出现队列有任务却没人跑的死等。
     """
     global _BUSY
     with _BUSY_LOCK:
+        _BUSY = False
+        nxt = _PIPELINE_QUEUE.pop(0) if _PIPELINE_QUEUE else None
+        if nxt:
+            _BUSY = True
+    if nxt:
+        nargs, nchat, nquiet, start_msg = nxt
+        try:
+            if start_msg:
+                safe_send(nchat, start_msg)
+            elif not nquiet:
+                safe_send(nchat, "⏳ 排队任务开始执行：%s" % " ".join(nargs))
+        except Exception:
+            pass
+        threading.Thread(target=_pipeline_worker, args=(nargs, nchat), daemon=True).start()
+        log("已从队列拉起流水线：%s（剩余 %d 个）" % (" ".join(nargs), len(_PIPELINE_QUEUE)))
+
+
+def _queue_has(args, chat_id):
+    """同一会话的同款任务是否已在队列（防按钮连点排满重复导出）。"""
+    return any(a == list(args) and str(c) == str(chat_id)
+               for a, c, _q, _m in _PIPELINE_QUEUE)
+
+
+def run_pipeline(args, chat_id, quiet=False, start_msg=None):
+    """触发流水线：后台线程执行，监听主循环立刻继续收指令。
+
+    busy 时不再丢弃请求，而是入队；前一个任务结束由 _pump_queue 自动拉起。
+    quiet=True 表示调用方已经自己发过回执了，这里不再重复发一条
+    「⏳ 开始执行」—— 每条 send 都是一次网络往返，Telegram 抖动时
+    一次能卡 4-10 秒，两条回执就是白等十几秒（2026-11-10 实测）。
+    start_msg：排队场景下「真正开始执行时」才发的自定义回执（如群日报选群提示），
+               入队瞬间不发，避免「正在总结 + 仍在排队」自相矛盾。
+    """
+    global _BUSY
+    args = list(args)
+    with _BUSY_LOCK:
         if _BUSY:
-            try:
-                safe_send(chat_id, "⏳ 上一个任务仍在执行中，请稍候再试（避免并发导出浪费 token）")
-            except Exception:
-                pass
-            return
-        _BUSY = True
-    if not quiet:
+            if _queue_has(args, chat_id):
+                log("流水线忙且同类任务已排队，忽略重复提交：%s" % " ".join(args))
+                return "duplicate"
+            _PIPELINE_QUEUE.append((args, chat_id, quiet, start_msg))
+            started_now = False
+        else:
+            _BUSY = True
+            started_now = True
+    return _run_or_report(args, chat_id, quiet, start_msg, started_now)
+
+
+def _run_or_report(args, chat_id, quiet, start_msg, started_now):
+    """根据是否立即启动，发对应回执并启动线程。"""
+    if not started_now:
+        pos = len(_PIPELINE_QUEUE)
+        try:
+            safe_send(chat_id,
+                      "📥 已排队：%s\n前面还有 %d 个任务，上一个完成后会自动执行，"
+                      "不用重复发命令。" % (" ".join(args), pos))
+        except Exception:
+            pass
+        log("流水线忙，任务已入队（第 %d 位）：%s" % (pos, " ".join(args)))
+        return "queued"
+    if start_msg:
+        try:
+            safe_send(chat_id, start_msg)
+        except Exception as e:
+            log("发送开始提示失败（忽略）：%s" % e)
+    elif not quiet:
         try:
             safe_send(chat_id, "⏳ 开始执行：%s" % " ".join(args))
         except Exception as e:
             log("发送开始提示失败（忽略）：%s" % e)
-    t = threading.Thread(target=_pipeline_worker, args=(args, chat_id), daemon=True)
-    t.start()
+    threading.Thread(target=_pipeline_worker, args=(args, chat_id), daemon=True).start()
     log("已在后台线程启动流水线：%s" % " ".join(args))
+    return "started"
 
 
 def _pipeline_busy():
@@ -1312,9 +1376,8 @@ def _kb_worker(chat_id):
         except Exception:
             pass
     finally:
-        global _BUSY
-        with _BUSY_LOCK:
-            _BUSY = False
+        # 与流水线共用执行锁：结束时同样要拉起排队任务，否则队列会死等。
+        _pump_queue()
 
 
 def run_kb_update(chat_id):

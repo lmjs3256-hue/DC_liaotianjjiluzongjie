@@ -126,7 +126,7 @@ print("== 6) 选群状态机 ==")
 sent, runs = [], []
 L.safe_send = lambda chat, text, markup=None: sent.append((chat, text, markup))
 L.send_async = lambda chat, text, markup=None: sent.append((chat, text, markup))
-L.run_pipeline = lambda args, chat, quiet=True: runs.append((args, chat))
+L.run_pipeline = lambda args, chat, quiet=True, start_msg=None: runs.append((args, chat))
 L.tg_api = lambda *a, **kw: {"ok": True}
 
 # 第 1 轮：裸命令回执 4 群按钮

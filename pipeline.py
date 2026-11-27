@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.30.9"
+__version__ = "1.30.10"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1262,11 +1262,17 @@ FEEDBACK_HINT = (
     "请在严守【事实核查与验证规则】【溯源与禁止臆造】全部条款的前提下，据此修正并重新输出完整日报：\n"
     "——用户反馈开始——\n%s\n——用户反馈结束——\n"
     "执行要求：\n"
-    "1. 与反馈直接冲突的旧结论必须删除或改写，不得原样保留；\n"
+    "1. 与反馈直接冲突的旧结论必须修正，不得原样保留。**优先改写保留，而不是删除**："
+    "反馈指出的是「表述/归属/措辞错误」时，这条信息本身是真实发生的，必须保留该信息点，"
+    "按反馈给出的正确主体、正确措辞**改写**，绝不能因为句子写错就把整条信息删除——"
+    "用户要的是「改对」不是「删掉」，把信息删了等于丢失事实。只有经核实该事件在原文根本不存在、"
+    "纯属编造时，才整条删除；\n"
     "2. 反馈中提供的事实如果在聊天记录里没有直接对应原文，必须写成「据用户补充」，"
     "不得表述为群内共识或既定事实；\n"
     "3. 反馈只用于纠错与补充，不得借机新增无依据的推测内容；\n"
     "4. 未涉及的部分保持原有结构与依据不变；输出完整日报（不是修改说明）。"
+    "**输出前自检**：逐条比对上一版被反馈点名的信息点是否仍以正确表述出现在新版里；"
+    "若消失了，说明你误删了，必须改回去。"
 )
 
 # 第二遍：对照原文校错（数字/归属/定性/残留英文），只纠错不改结构
@@ -3867,6 +3873,107 @@ def run_chat_summary(cfg, day_str, days_back=1, targets=None):
     return digest
 
 
+# ---- 反馈点名信息点的保真校验 ----------------------------------------
+# 事故 2026-11-27：用户 /retry 要求「保留并改写」5GuRL 关于内幕的本人自述，
+# 但模型在生成/压缩时两次把这条信息整条挤掉。提示词约束不够稳，这里加代码兜底：
+# 反馈明确带「保留/别删/漏掉/写回」信号时，抽取其中的关键锚点词，重总结后核对，
+# 缺失则单独生成一条如实改写的要点补回「必读重点」，确保用户点名的信息不丢。
+_KEEP_SIGNALS = ("保留", "别删", "不要删", "别漏", "不要漏", "漏掉", "写回", "补回", "加回", "补上")
+
+
+def _feedback_keep_anchors(feedback):
+    """从「要求保留」的反馈里抽取必须出现的锚点词（英文专名/SN 编号/引号内事件词）。"""
+    if not any(s in feedback for s in _KEEP_SIGNALS):
+        return []
+    anchors = []
+    # 只取反馈明确点名的专名与中文事件词，避免把引用的英文原文里
+    # didn/buy/can 这类通用词当成锚点造成误判（2026-11-27 实测）。
+    # 专名：大小写混合或含数字的代号（5GuRL、iuaC、orange 等），纯小写通用词忽略。
+    for w in re.findall(r"[A-Za-z][A-Za-z0-9_.]{2,}", feedback):
+        if re.search(r"[A-Z]", w) or w.lower() in ("iuac", "orange"):
+            anchors.append(w)
+    # 钱包地址片段 5GuRLE…iuaC 这类含数字前缀的代号
+    for w in re.findall(r"\b\d+[A-Za-z]{3,}\b", feedback):
+        anchors.append(w)
+    for n in re.findall(r"(?i)\bSN\s*#?\s*(\d{1,3})\b", feedback):
+        anchors.append("SN" + n)
+    # 中文事件关键词（内幕/传言/自述等 2-4 字实词），只取反馈里明确的几个
+    for w in ("内幕", "传言", "自述", "提前获知"):
+        if w in feedback:
+            anchors.append(w)
+    # 去重保序；短词若是某长词的子串（GuRL ⊂ 5GuRL）则丢弃，避免重复锚点
+    anchors.sort(key=len, reverse=True)
+    out = []
+    for a in anchors:
+        if a.lower() in [b.lower() for b in out]:      # 完全相同
+            continue
+        if not any(a.lower() != b.lower() and a.lower() in b.lower() for b in out):
+            out.append(a)
+    return out
+
+
+def _ensure_feedback_kept(cfg, text_block, digest, feedback):
+    """校验反馈点名的信息点是否还在日报里；丢了就生成一条补回。返回 (digest, 是否补过)。"""
+    anchors = _feedback_keep_anchors(feedback)
+    if not anchors:
+        return digest, False
+    # 命中判定：锚点在日报里出现（SN 编号兼容 SN50 / SN 50 / 50）
+    def present(a):
+        if a.upper().startswith("SN") and a[2:].isdigit():
+            return bool(re.search(r"SN\s*#?\s*%s\b" % a[2:], digest, re.I))
+        return a.lower() in digest.lower()
+    missing = [a for a in anchors if not present(a)]
+    if not missing:
+        return digest, False
+    # 语义覆盖检测：反馈里的核心专名 + 任一事件词已在日报共现 → 模型已按提示词改对，
+    # 不再机械补写，避免同一信息重复出现两条（2026-11-27 实测重复问题）。
+    cn_event = [a for a in anchors if a in ("内幕", "传言", "自述", "提前获知")]
+    proper = [a for a in anchors
+              if a not in cn_event and not (a.upper().startswith("SN") and a[2:].isdigit())]
+    if cn_event and proper and any(present(p) for p in proper) and any(present(e) for e in cn_event):
+        log("反馈保真校验：核心专名+事件词已共现，视为已覆盖，跳过补写")
+        return digest, False
+    log("反馈保真校验：日报缺失锚点 %s，单独生成一条补回必读重点" % missing)
+    patch_prompt = (
+        "你在修订一份当天聊天日报。用户明确指出上一版漏掉了一条重要信息，要求保留并改写正确。\n"
+        "这条信息的原文与用户的纠正说明如下：\n——用户反馈——\n%s\n——反馈结束——\n"
+        "请只输出**一条**简洁的「必读重点」条目（一行，以 - ⚠️ 或 - 📌 开头），"
+        "严格按用户纠正后的正确归属与措辞陈述这条信息：同一人就写本人自述，不得写成第三人称推断；"
+        "不要输出标题、不要输出其他条目、不要解释。"
+    ) % feedback
+    try:
+        patch = call_llm(cfg, text_block, system_prompt=patch_prompt, tries=2).strip()
+        patch = patch.strip("\n").split("\n")[0].strip()
+        if patch and not present_marker(patch, missing):
+            # 模型补写仍漏关键锚点则放弃机械补，避免写入错误内容
+            log("反馈保真补写未覆盖缺失锚点，放弃机械补回（保留原日报）")
+            return digest, False
+        # 插到「必读重点」小节标题下第一行
+        lines = digest.split("\n")
+        idx = next((i for i, l in enumerate(lines) if "必读重点" in l), None)
+        if idx is None:
+            log("反馈保真补写：未找到必读重点小节，放弃")
+            return digest, False
+        lines.insert(idx + 1, patch)
+        log("反馈保真补写完成：%s" % patch[:60])
+        return "\n".join(lines), True
+    except Exception as e:
+        log("反馈保真补写异常（保留原日报）：%s" % e)
+        return digest, False
+
+
+def present_marker(text, anchors):
+    """补写条目是否至少覆盖一个此前缺失的锚点（避免写入无关内容）。"""
+    t = text.lower()
+    for a in anchors:
+        if a.lower().startswith("sn") and a[2:].isdigit():
+            if re.search(r"SN\s*#?\s*%s\b" % a[2:], t, re.I):
+                return True
+        elif a.lower() in t:
+            return True
+    return False
+
+
 def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
     """按用户反馈重新总结某天日报（复用已有导出，不重新导出、不消耗 Discord 配额）。
     反馈里带「专题」二字时，改走专题总结流程（按专题还原原文人物观点并推送）。
@@ -3896,6 +4003,8 @@ def resummarize_with_feedback(cfg, day_str, feedback, targets=None):
     digest = compress_digest(cfg, digest, 0, 1200,
                              sanitize_fn=lambda s: strip_length_tags(s))
     digest, _ = scrub_unsupported_links(digest, items)
+    # 反馈点名「保留/别删」的信息点若被模型挤掉，机械补回，避免用户点名的事实丢失
+    digest, _patched = _ensure_feedback_kept(cfg, text_block, digest, feedback)
 
     max_per_day, _ = _throttle_cfg(cfg)
     used = len(_day_exports(cfg, day_str))

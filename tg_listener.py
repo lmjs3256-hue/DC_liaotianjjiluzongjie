@@ -1510,7 +1510,21 @@ def _research_sn_of_feedback(feedback, day=None, within_hours=72):
     if re.search(r"日报|水聊|周报|今天的总结|当日总结", feedback):
         return None
     # 明确指向投研的措辞，可提高后续判定权重（用在最后一步的兜底）
-    _want_research = bool(re.search(r"投研|跟踪报告|重要事件|研究报告", feedback))
+    _want_research = bool(re.search(r"投研|跟踪报告|重要事件|研究报告|事件跟踪", feedback))
+
+    # 0.5) 反馈在**引用日报里的原句 + 批评其表述/逻辑** → 走日报重总结，不是投研纠正。
+    #      事故 2026-11-27：用户 /retry 引用日报第9行「iuac 因 orange 未买入 SN50，
+    #      推断 5GuRL 提前获知...」并说「这句话表述有问题，5GURL就是iuac」——旧逻辑只看
+    #      到「SN50 + 有新投研报告」就误判成投研重做，白跑一次投研并推送。
+    #      /retry 的默认语义本来就是「重总结日报」，只有明确是投研报告的事实纠正才该走投研。
+    #      判据：引号包裹的较长引用 + 措辞/逻辑批评词，且未明确指向投研。
+    _quoted = bool(re.search(r"[\"“「『][^\"”」』]{8,}[\"”」』]", feedback))
+    _wording_critic = bool(re.search(
+        r"这句话|这句|表述|说法|不通|矛盾|逻辑|怎么会|读不懂|看不懂|歧义|"
+        r"误解|重复|张冠李戴|搞反|弄反|主体|指代|语义|无中生有", feedback))
+    if _quoted and _wording_critic and not _want_research:
+        log("反馈引用日报原句并批评表述（非投研纠正），走日报重总结")
+        return None
 
     # 1) 从反馈里找编号：优先 SNxx / #xx，其次裸数字（1-255）
     sn = None

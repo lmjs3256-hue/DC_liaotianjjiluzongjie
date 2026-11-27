@@ -8,11 +8,15 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.30.12** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.30.13** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.30.13 — 2026-11-27
+
+- **DC 日报人名装饰简化**：`pipeline._display_name()`（别名映射优先 + 去 emoji/希腊字母/`|`装饰 + 去 `_数字` 辨识码），`build_text_block` 发言者名单/核心人物名单/正文作者名、`scrub_unsupported_links`、`_audit_names` 统一走它，与社区日报 `community_digest._display_author()` 口径一致。起因：用户指出 11-26 DC 日报 `cicada | τ` 显示不规范（应为 `cicada`），而 `ha`/`lunaa1244` 是真人名、非截断。核心人物判定仍走原始名 `_norm_author`，不受影响。重出 11-26 DC 日报：装饰残留 0、cicada 归属 SN129 正确，并手工补回上一轮用户要求保留的「SN50 内幕传言（群内说法，未经证实）」条（重出走正常生成流程时模型漏选），飞书+TG 推送完成。E 盘规则文档升 v1.23。
 
 ## v1.30.12 — 2026-11-27
 

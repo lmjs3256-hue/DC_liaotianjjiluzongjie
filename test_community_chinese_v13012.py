@@ -24,7 +24,7 @@ check("提示词要求两个以上英文词改写", "出现两个以上英文单
 check("提示词要求输出前自检英文", "输出前逐条自检" in sp)
 
 # 2) 版本号
-check("version 1.30.12", P.__version__ == "1.30.12")
+check("version >= 1.30.12", tuple(int(x) for x in P.__version__.split(".")) >= (1, 30, 12))
 
 # 3) 英文检测函数
 cases = [

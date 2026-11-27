@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.30.12"
+__version__ = "1.30.13"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -1572,7 +1572,7 @@ def audit_attribution(digest, items, window=2):
     for _r, _t, _a, _c in items:
         if _a and _a not in _seen:
             _seen.add(_a)
-            _disp = _display_alias(_a)   # 用全局 _CFG（本函数无 cfg 参数）
+            _disp = _display_name(_a)   # 用全局 _CFG（本函数无 cfg 参数）
             if _disp not in authors:
                 authors.append(_disp)
     authors.sort(key=len, reverse=True)   # 长名优先，避免短名把长名切碎
@@ -2104,6 +2104,32 @@ def _is_daily_key(author, cfg=None):
     return any(na == _norm_author(n) for n in _daily_key_authors(cfg))
 
 
+# 装饰字符：希腊字母(ταοεκ…)、emoji、方向/杂项符号(✠🌊→…)、变体选择符
+# 与 community_digest._DECOR_RE 保持一致，避免 DC 日报与社区日报人名口径打架
+_DECOR_RE = re.compile(r"[\u0370-\u03ff\u2190-\u2bff\U0001f000-\U0001faff\ufe0f\u200d]")
+
+
+def _simplify_author_name(a):
+    """去装饰：emoji/希腊字母/`|`后缀/多余空格，取最像名字的第一个实质词。
+
+    与 community_digest._simplify_name 同规则，例：
+      cicada | τ  → cicada      ✠ PUNISHER ττ ✠ → PUNISHER
+      Aphτ 🌊α    → Aph         Chairman τao    → Chairman
+    """
+    a = (a or "").strip()
+    if not a:
+        return a
+    clean = _DECOR_RE.sub(" ", a)
+    clean = re.sub(r"[|｜]", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        clean = a
+    toks = [t for t in clean.split() if t]
+    if len(toks) > 1:
+        return toks[0]
+    return clean
+
+
 def _display_alias(author, cfg=None):
     """账号 → 用户指定的显示名（config.author_display_alias，如 5gurl→iuac、orange→rrik）。
 
@@ -2121,6 +2147,19 @@ def _display_alias(author, cfg=None):
     return author
 
 
+def _display_name(author, cfg=None):
+    """DC 日报人名显示：先别名映射（iuac/rrik 等用户指定名优先），再清装饰。
+
+    无别名映射时把 `cicada | τ` 这类带装饰的原始昵称简化成 `cicada`，
+    与社区日报口径一致。注意：改名只影响「显示」，不影响 _is_daily_key 的核心人物判定
+    （那里走 _norm_author 匹配原始名）。
+    """
+    a = _display_alias(author, cfg)
+    a = _simplify_author_name(a)
+    # 名字_辨识码 → 取名字（与社区日报 _display_author 一致，仅无别名命中时生效）
+    return re.sub(r"_\d{2,6}$", "", a).strip()
+
+
 def build_text_block(channel_name, day, items, extra_hint_items=None, cfg=None):
     cfg = cfg if cfg is not None else (_CFG or {})
     # 发言者名单：给模型一份白名单，防止人名被音译、缩写或凭空编造
@@ -2129,7 +2168,7 @@ def build_text_block(channel_name, day, items, extra_hint_items=None, cfg=None):
     for _r, _t, _a, _c in items:
         if _a and _a not in _seen:
             _seen.add(_a)
-            _disp = _display_alias(_a, cfg)
+            _disp = _display_name(_a, cfg)
             if _disp not in authors:
                 authors.append(_disp)
     has_next_day = any(str(_t).startswith("次日") for _r, _t, _a, _c in items)
@@ -2143,7 +2182,7 @@ def build_text_block(channel_name, day, items, extra_hint_items=None, cfg=None):
     key_present = []
     for _r, _t, _a, _c in items:
         if _a and _is_daily_key(_a, cfg):
-            _disp = _display_alias(_a, cfg)   # 核心人物名单也用指定显示名
+            _disp = _display_name(_a, cfg)   # 核心人物名单也用显示名（别名+装饰清理）
             if _disp not in key_present:
                 key_present.append(_disp)
     lines.append("★核心人物（今天有发言，其每条实质发言都必须在「重要人物观点」节逐条提炼，"
@@ -2170,7 +2209,7 @@ def build_text_block(channel_name, day, items, extra_hint_items=None, cfg=None):
                              "两者无上下文关系，不得拼接 ~~~~"
                              % (_gap // 60, _gap % 60))
         key_tag = "★核心 " if _is_daily_key(author, cfg) else ""
-        disp_author = _display_alias(author, cfg)   # 正文作者名也换成指定显示名
+        disp_author = _display_name(author, cfg)   # 正文作者名：别名映射 + 去装饰
         lines.append("%d. [%s] <%s>%s%s %s" % (i, t, disp_author, hot, key_tag, c1))
         prev_t = t
     return "\n".join(lines)
@@ -3348,7 +3387,7 @@ def _audit_names(digest, items, tag=""):
     """人名保真核对：把日报「人物观点」里出现的名字与当日真实发言者名单比对。
     不在名单里的只写日志提示（不阻断推送、不改内容），便于人工复核是否被模型改写或编造。"""
     # 用映射后的显示名核对（config.author_display_alias），否则 iuac/rrik 会被误报不在名单
-    authors = {_display_alias(a) for _r, _t, a, _c in items if a}
+    authors = {_display_name(a) for _r, _t, a, _c in items if a}
     if not authors:
         return
     # 1) 只在「重要人物观点」板块里按「- **名字**：」抓取，其他板块的加粗多为小标题

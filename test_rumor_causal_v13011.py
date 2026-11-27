@@ -23,8 +23,9 @@ check("prompt 8c 要求标注未经证实",
 check("prompt 8b 同一人不得拆两主体仍在",
       "禁止把同一个人拆成两个主体" in P.SYSTEM_PROMPT)
 
-# 2) 版本号已升
-check("version 1.30.11", P.__version__ == "1.30.11")
+# 2) 版本号已升（后续版本也满足，不绑死具体补丁号）
+_v = tuple(int(x) for x in P.__version__.split("."))
+check("version >= 1.30.11", _v >= (1, 30, 11))
 
 # 3) 11-26 日报第 2 行按如实口径：保留信息点、标注未经证实、不再写「印证提前获知」成立因果
 p = "exports/dtao_2026-11-26.digest.txt"

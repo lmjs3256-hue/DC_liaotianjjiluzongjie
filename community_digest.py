@@ -399,6 +399,19 @@ COMMUNITY_SYSTEM_PROMPT = (
     "「（该说法已于<日期>经人工核实/推翻）」。只有段里没列过的新冲突才按上面的格式标。\n"
     "- 没有矛盾就不要硬标；正常的、无历史对照的消息不加此标记。\n"
     "\n"
+    "【语言铁律：输出必须是中文，禁止照抄英文原句（v1.30.12 硬性）】\n"
+    "- **只有这些可以保留英文**：SN 编号、子网名/项目名（Engy、Lium、Chutes…）、"
+    "人名/昵称、代币名（TAO、dTAO、Alpha、Gamma）。其余一律用中文表达。\n"
+    "- **禁止把整句英文照搬进中文句子**：原文是英文的，只翻成中文意思，"
+    "必要关键词放括号里（如「激励结构（meta model）」），不得整句原文照抄。"
+    "引号里也不许直接贴英文原话——写成「某人称：<中文转述>」。\n"
+    "- **一句话里除专有名词外出现两个以上英文单词，就是没翻译干净，必须改写**："
+    "emission→排放、buyback→回购、burn→销毁、staking→质押、miner→矿工、validator→验证人、"
+    "owner→所有者、revenue→营收、incentive→激励、liquidity→流动性、signal→信号、"
+    "scoring→评分、operator→运营方、agent→智能体。\n"
+    "- 输出前逐条自检：每一行的英文单词逐一核对，只有上面白名单里的能留下，"
+    "其余全部译成中文。宁可译成大白话，也不许留英文原句凑数。\n"
+    "\n"
     "【排版与篇幅（飞书/TG 双平台通用）】\n"
     "- 关键主体 **加粗**：人物、**SN编号/子网名**、代币、事件、关键数字。\n"
     "- emoji 标程度：🔥 热点、✅ 落地、⚠️ 风险/待确认、📌 关注、❌ 利空。\n"
@@ -699,6 +712,72 @@ def build_input(payload, cfg=None):
     return "\n".join(lines), ordered, sn_excerpts
 
 
+# ===== 英文残留兜底（v1.30.12）=====
+# 社区日报不经过 polish_digest/compress_digest（那两个是 DC 日报板块规范化），
+# 所以模型把整句英文照抄进来时没有任何校对轮拦。这里做代码层检测 + 定向翻译。
+_EN_ALLOW = {
+    "sn", "tao", "dtao", "alpha", "gamma", "ai", "agi", "llm", "api", "gpu", "defi",
+    "nft", "url", "x", "discord", "telegram", "twitter", "bittensor", "tao.com",
+}
+_RUN_RE = re.compile(r"(?i)(?:\b[A-Za-z][A-Za-z.'\-]*\b[\s,]+){3,}\b[A-Za-z][A-Za-z.'\-]*\b")
+
+
+def english_runs(text, min_words=4):
+    """列出连续 >=min_words 个英文词的片段（整句照抄的迹象）。"""
+    if not text:
+        return []
+    out = []
+    for m in _RUN_RE.finditer(text):
+        words = re.findall(r"[A-Za-z][A-Za-z.'\-]*", m.group(0))
+        if len(words) >= min_words:
+            out.append(m.group(0).strip())
+    return out
+
+
+def enforce_chinese(cfg, digest, log=print):
+    """检测并兜底翻译社区日报里照抄的整句英文。
+
+    返回 (digest, stats)。stats: {runs_before, translated, runs_after}。
+    翻译只做一次 LLM 调用；白名单（SN/项目/人名/代币）与 Markdown 结构原样保留。
+    """
+    import pipeline as P
+    runs = english_runs(digest)
+    stats = {"runs_before": len(runs), "translated": 0, "runs_after": len(runs)}
+    if not runs:
+        return digest, stats
+
+    prompt = (
+        "下面是一份中文社区日报，但里面混入了若干**整句英文**（多为英文原话照抄）。\n"
+        "请输出修订后的**完整日报**，要求：\n"
+        "1. 把所有英文句子/短语翻成通顺中文，保留原意与语气（玩笑就写玩笑）；\n"
+        "2. SN 编号、子网名/项目名（Engy/Lium/Chutes…）、人名、代币名（TAO/dTAO/Alpha/Gamma）"
+        "保留原文不翻译；\n"
+        "3. 必要关键词可写成「中文（英文）」，但不得整句照抄英文；\n"
+        "4. **保持原有结构、标题、项目符号、emoji、数字、人名归属完全不变**，只改英文→中文；\n"
+        "5. 只输出日报正文，不解释、不加前后缀。\n\n"
+        "===== 日报原文 =====\n%s" % digest
+    )
+    try:
+        tcfg = dict(cfg or {})
+        tcfg["deepseek_max_tokens"] = max(int((cfg or {}).get("deepseek_max_tokens", 2500) or 2500), 8000)
+        revised = P.call_llm(tcfg, prompt, system_prompt="你是中文编译，只做英文→中文翻译，不改事实与结构。")
+        after = english_runs(revised)
+        if revised and len(after) < len(runs):
+            # 翻译后行数/内容不能塌缩太多（防模型把整份报告缩水）：按字数比例判定
+            if len(revised) >= len(digest) * 0.7:
+                log("英文兜底：检测到 %d 处整句英文，翻译后剩 %d 处（已覆盖 %d 字）"
+                    % (len(runs), len(after), len(revised)))
+                stats["translated"] = len(runs) - len(after)
+                stats["runs_after"] = len(after)
+                return revised, stats
+            log("英文兜底：翻译结果过短（%d→%d 字），疑似缩水，保留原文" % (len(digest), len(revised)))
+        else:
+            log("英文兜底：翻译未能减少英文残留（%d→%d 处），保留原文" % (len(runs), len(after)))
+    except Exception as e:
+        log("英文兜底失败（保留原文，不影响推送）：%s" % e)
+    return digest, stats
+
+
 def _out_dir(cfg=None):
     d = (cfg or {}).get("community_output_dir") or "exports/community"
     return d if os.path.isabs(d) else os.path.join(HERE, d)
@@ -741,6 +820,10 @@ def run_community_day(cfg, day_str, log=print, push=True):
     digest = P.sanitize_digest(digest)
     # 兜底：清理模型在字数压力下吐出的「人名堆砌串」（无观点的纯名字列表）
     digest = strip_name_dump(digest, log=log)
+    # 兜底：检测并翻译照抄的整句英文（社区日报不经过 polish_digest，没有校对轮）
+    digest, en_stats = enforce_chinese(cfg, digest, log=log)
+    if en_stats.get("runs_after", 0) > 8:
+        log("⚠️ 英文兜底后仍有 %d 处整句英文，请人工复核（可能多为专有名词）" % en_stats["runs_after"])
 
     # 3) 交叉核对：把散落在正文各处的「待人工确认」抽出来，置顶成独立专区。
     #    之前只在顶部写一句泛泛提示、冲突仍埋在长文条目里，群里根本看不见；

@@ -8,11 +8,15 @@
 | 新增功能（向后兼容） | `MINOR` +1 | 1.0.1 → 1.1.0 |
 | 不兼容变更（配置项/命令改动，需迁移） | `MAJOR` +1 | 1.1.0 → 2.0.0 |
 
-**当前版本：v1.30.13** ｜ 查看版本：`python pipeline.py --version`
+**当前版本：v1.30.14** ｜ 查看版本：`python pipeline.py --version`
 
 > 每次发版请做三件事：改 `__version__`、在 README 顶部更新版本行、在下方追加一条记录。
 
 ---
+
+## v1.30.14 — 2026-11-28
+
+- **TG 群日报「0 条」不再误判为群里没消息（数据源停更识别）**：11-28 15:03 用户发 `/tg群昨日`，两个群都回「群消息 0 条、严格相关 0 条」。排查确认 CDP/登录/接口全正常（session 有效、API 200），根因是 **dtt 群消息库自 2026-11-25 09:00 起整体停止入库**——4 个群最后消息集中在 07:45–09:00，11-26/27/28 逐日 0 条，而同期关键词事件流仍有数据；群消息由 dtt 侧 bot 上传（前端脚本 `/api/bot/batch/upload/group-messages`），本地无法补采。修复：① `dtt_cdp.js` `groupmessages` 与 `tg_group_fetch._JS_FETCH` 一并取 `/api/group-messages/groups` 水位；② `fetch_day()` 落 `payload.upstream`（最后入库时间/滞后小时），滞后 >12h 写警告；③ `run_tg_group_day()` 遇 0 条且上游停更时**不调 AI、不生成空日报、不推送**，返回明确说明；④ `pipeline` 日志与 `tg_listener._daily_receipt()` 回执写明「数据源停更于 X（非群内无消息）」；⑤ 旧快照无 `upstream` 字段时强制重取。E 盘规则文档升 v1.24。回归 `test_stale_upstream_v13014.py`。
 
 ## v1.30.13 — 2026-11-27
 

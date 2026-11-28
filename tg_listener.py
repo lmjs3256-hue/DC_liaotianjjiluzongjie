@@ -1123,6 +1123,10 @@ def _daily_receipt(out, args):
         return receipt
 
     if kind == "tg_group":
+        if "TG群数据源停更：" in out:
+            detail = out.split("TG群数据源停更：", 1)[1].splitlines()[0].strip()
+            return ("💬 TG群消息日报未生成：数据源停更（非群内无消息）\n%s\n"
+                    "请检查 dtt 群消息采集/上传机器人后重取" % detail)
         m = re.search(r"TG群日报完成：\s*(\d{4}-\d{2}-\d{2})\s*(?:【([^】]+)】)?\s*（群消息\s*(\d+)\s*条，严格相关\s*(\d+)\s*条，(\d+)\s*个子网落档）", out)
         if m:
             day, gname, total, rel, sns = m.groups()

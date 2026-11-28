@@ -140,7 +140,13 @@ const r = await page.evaluate(async (args) => {
       id = d.nextCursor.id;
     }
   }
-  return { ok: true, events: all, pages: args.groupIds.length, apiError: apiError };
+  let groups = [];
+  try {
+    const gr = await fetch('/api/group-messages/groups', { headers: H });
+    const gct = gr.headers.get('content-type') || '';
+    if (gr.ok && gct.includes('json')) groups = ((await gr.json()).data || {}).groups || [];
+  } catch (e) {}
+  return { ok: true, events: all, pages: args.groupIds.length, apiError: apiError, groups: groups };
 }, __ARGS__);
 return r;
 """
@@ -148,6 +154,34 @@ return r;
 
 def _run_js(cli, code, timeout=240):
     return CF._run_cli(cli, code, timeout=timeout)
+
+
+# dtt 群消息库水位：0 条时必须区分「当日真没消息」与「上游采集停更」
+STALE_LAG_HOURS = 12
+
+
+def _upstream_info(groups, now=None):
+    """从 /api/group-messages/groups 算全库最后入库时间与滞后小时。"""
+    now_ms = int((now or datetime.datetime.now(TZ)).timestamp() * 1000)
+    stamps = []
+    for g in groups or []:
+        try:
+            t = int(g.get("lastOccurredAt") or 0)
+        except (TypeError, ValueError):
+            t = 0
+        if t > 0:
+            stamps.append(t)
+    if not stamps:
+        return {"last_occurred_at": None, "last_bj": None,
+                "lag_hours": None, "stale": False}
+    last = max(stamps)
+    lag = round(max(0, now_ms - last) / 3600000.0, 1)
+    return {
+        "last_occurred_at": last,
+        "last_bj": datetime.datetime.fromtimestamp(last / 1000, TZ).strftime("%Y-%m-%d %H:%M"),
+        "lag_hours": lag,
+        "stale": lag > STALE_LAG_HOURS,
+    }
 
 
 def list_groups(cfg=None, log=print):
@@ -197,6 +231,10 @@ def fetch_day(day_str, cfg=None, log=print, until_now=True):
         raise RuntimeError("TG群取数失败：%s" % (res.get("apiError") or res))
 
     events = res.get("events") or []
+    upstream = _upstream_info(res.get("groups"))
+    if upstream["stale"]:
+        log("⚠️ dtt 群消息库疑似停更：最后入库 %s（滞后 %.1f 小时），本次取到 %d 条；"
+            "0 条不代表群内无消息" % (upstream["last_bj"], upstream["lag_hours"], len(events)))
     # 保留群名/作者/正文/时间，带北京时间人读字段
     for e in events:
         t = e.get("occurredAt")
@@ -217,6 +255,7 @@ def fetch_day(day_str, cfg=None, log=print, until_now=True):
                    "unit": "ms"},
         "group_ids": gids,
         "pages": res.get("pages"),
+        "upstream": upstream,
         "stats": {
             "total": len(events),
             "by_group": dict(sorted(by_group.items(), key=lambda x: -x[1])),

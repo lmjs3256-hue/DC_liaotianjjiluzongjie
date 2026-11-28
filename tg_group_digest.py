@@ -431,6 +431,16 @@ def _out_dir(cfg=None):
     return TGF._out_dir(cfg)
 
 
+def _stale_upstream(payload):
+    """0 条时判定上游是否停更：全库最后入库距今 >12h 才算，避免误伤安静群。"""
+    up = (payload or {}).get("upstream") or {}
+    lag = up.get("lag_hours")
+    last = up.get("last_bj")
+    if last and isinstance(lag, (int, float)) and lag > TGF.STALE_LAG_HOURS:
+        return last, lag
+    return None
+
+
 def run_tg_group_day(cfg, day_str, log=print, push=True, group_id=None):
     """主流程：取数 -> (单群过滤) -> 推文核实 -> 严格筛选构建 -> AI 生成 -> 清洗 -> 落档 -> 双推。
 
@@ -445,7 +455,7 @@ def run_tg_group_day(cfg, day_str, log=print, push=True, group_id=None):
 
     # 1) 取数（窗口 00:00→当前，缓存不覆盖当下则重取）
     payload = TGF.read_day(day_str, cfg)
-    if payload is not None and TGF.cache_covers_now(payload, cfg):
+    if payload is not None and "upstream" in payload and TGF.cache_covers_now(payload, cfg):
         log("TG群日报：复用已取数的 %s（%d 条，边界覆盖到当前）"
             % (day_str, payload.get("stats", {}).get("total", 0)))
     else:
@@ -467,6 +477,16 @@ def run_tg_group_day(cfg, day_str, log=print, push=True, group_id=None):
         log("TG群日报单群模式：%s，保留 %d/%d 条" % (group_name, len(only), before))
 
     if not (payload.get("events") or []):
+        stale = _stale_upstream(payload)
+        if stale:
+            last, lag = stale
+            digest = ("⚠️ %s %s未生成日报：dtt 群消息库停更于 %s（距今约 %.1f 小时），"
+                      "所选日无入库数据。这不是「群内无消息」，请检查 dtt 群消息采集/上传机器人后重取。"
+                      % (day_str, (group_name + " " if group_name else ""), last, lag))
+            log("TG群数据源停更：最后入库 %s（滞后 %.1f 小时），%s 取数 0 条，未生成日报"
+                % (last, lag, day_str))
+            return {"ok": True, "day": day_str, "digest": digest, "empty": True,
+                    "stale": True, "group_id": group_id, "group_name": group_name}
         digest = "📭 %s %s当日无消息。" % (day_str, (group_name + " " if group_name else "TG 群消息库 "))
         return {"ok": True, "day": day_str, "digest": digest, "empty": True,
                 "group_id": group_id, "group_name": group_name}

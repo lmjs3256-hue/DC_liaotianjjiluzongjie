@@ -279,7 +279,14 @@ async function groupMessages(argsJson) {
         id = d.nextCursor.id;
       }
     }
-    return { ok: true, events: all, pages: args.groupIds.length, apiError };
+    // 顺带取群库水位（lastOccurredAt）：0 条时必须能区分「当日真没消息」与「上游停更」
+    let groups = [];
+    try {
+      const gr = await fetch('/api/group-messages/groups', { headers: H });
+      const gct = gr.headers.get('content-type') || '';
+      if (gr.ok && gct.includes('json')) groups = ((await gr.json()).data || {}).groups || [];
+    } catch (e) {}
+    return { ok: true, events: all, pages: args.groupIds.length, apiError, groups };
   }, args);
   out(result);
 }

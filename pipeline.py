@@ -62,7 +62,7 @@ for _stream_name in ("stdout", "stderr"):
 #   不兼容的配置/命令变更   -> MAJOR +1
 # 每次改动请同步更新 README 顶部版本行与 CHANGELOG.md
 # ----------------------------------------------------------------------------
-__version__ = "1.30.13"
+__version__ = "1.30.14"
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -4409,6 +4409,8 @@ if __name__ == "__main__":
             log("TG群日报完成：%s%s（群消息 %d 条，严格相关 %d 条，%d 个子网落档）"
                 % (day, scope, res.get("total", 0), st.get("related", 0),
                    res.get("archived_sn", 0)))
+            if res.get("stale"):
+                log("TG群数据源停更：%s" % (res.get("digest") or "")[:220])
         elif args.mode == "gamma":
             # Gamma 情报汇总（taostats 链上数据）。
             # 机制1：list/snapshot/week/month/detail；机制2：cross/crossweek/crossmonth。
